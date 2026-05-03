@@ -209,6 +209,20 @@ El marco teórico justifica que el proyecto no trate estos ejes como métricas a
 """)
 
 md("""
+### KPIs por eje de investigación
+
+Cada eje tiene un conjunto explícito de KPIs. Los ejes son las **métricas científicas del proyecto**; los KPIs son las variables CityLearn v2/v3 usadas para medir cada eje contra la línea base.
+
+| Eje | Objetivo | KPIs incluidos |
+|---|---|---|
+| **OE1 Flexibilidad energética** | Aumentar desplazamiento de carga, aprovechamiento de baterías, EVs/V2G, PV, autoconsumo e intercambio comunitario. | `grid_import`, `grid_import_control`, `grid_import_baseline`, `grid_import_delta`, `zero_net_energy`, `net_exchange_control`, `net_exchange_baseline`, `net_exchange_delta`, `grid_export_ratio`, `grid_export_control`, `grid_export_baseline`, `grid_export_delta`, `peak_average`, `ramping_average`, `one_minus_load_factor_average`, `pv_generation_total`, `pv_generation_daily_average`, `pv_export_total`, `pv_export_daily_average`, `pv_self_consumption_ratio`, `community_local_traded_total`, `community_local_traded_daily_average`, `community_import_share`, `battery_charge_total`, `battery_discharge_total`, `battery_throughput_total`, `battery_equivalent_full_cycles`, `battery_capacity_fade_ratio`, `ev_departure_count`, `ev_departure_met_count`, `ev_departure_within_tolerance_count`, `ev_departure_success_rate`, `ev_departure_within_tolerance_rate`, `ev_departure_soc_deficit_mean`, `ev_charge_total`, `ev_v2g_export_total`. |
+| **OE2 Emisiones de CO2** | Reducir la huella ambiental del distrito y evitar importaciones en horas de alta intensidad de carbono. | `carbon_emissions`, `carbon_emissions_control`, `carbon_emissions_baseline`, `carbon_emissions_delta`, `carbon_emissions_daily_average_control`, `carbon_emissions_daily_average_baseline`, `carbon_emissions_daily_average_delta`. |
+| **OE3 Costos energéticos** | Optimizar gasto energético, reducir picos con efecto económico y aprovechar tarifas dinámicas. | `electricity_cost`, `electricity_cost_control`, `electricity_cost_baseline`, `electricity_cost_delta`, `electricity_cost_daily_average_control`, `electricity_cost_daily_average_baseline`, `electricity_cost_daily_average_delta`, `cost_peak_average`, `cost_ramping_average`, `cost_one_minus_load_factor_average`, `price_signal_deviation`. |
+
+`price_signal_deviation` se mantiene como KPI derivado del proyecto porque no es una salida nativa de `evaluate_v2` en este código; se calcula desde importación neta distrital y `electricity_pricing`. Todos los demás KPIs provienen de CityLearn v2 o de agregaciones trazables sobre sus series.
+""")
+
+md("""
 ## Control Theories for Smart Communities
 
 En el tutorial original, el usuario pasa de reglas RBC a Q-learning y SAC. En este proyecto el salto conceptual es hacia control multiagente:
@@ -676,6 +690,24 @@ for axis, payload in objective_info['axes'].items():
     print(axis, '-', payload['name'])
     print(' ', payload['statement'])
     print(' ', 'kpi_count =', len(payload['kpis']))
+
+axis_kpi_rows = []
+for axis, payload in objective_info['axes'].items():
+    for kpi in payload['kpis']:
+        trace = objective_info['axis_kpis'].get(kpi, {})
+        axis_kpi_rows.append({
+            'axis': axis,
+            'axis_name': payload['name'],
+            'scenario': payload['scenario'],
+            'kpi': kpi,
+            'source': trace.get('source'),
+            'lower_is_better': trace.get('lower_is_better'),
+            'citylearn_v2_names': ', '.join(trace.get('citylearn_v2_names', [])),
+            'note': trace.get('note', ''),
+        })
+
+axis_kpi_manifest = pd.DataFrame(axis_kpi_rows)
+display(axis_kpi_manifest)
 """)
 
 code("""
@@ -1073,12 +1105,13 @@ def plot_algorithm_kpi_comparison(kpi_table: pd.DataFrame, axis: str, kpis: Sequ
     return fig
 
 if not kpi_comparison.empty:
-    plot_algorithm_kpi_comparison(kpi_comparison, 'OE1', ['peak_average', 'ramping_average', 'one_minus_load_factor_average'])
-    plt.show()
-    plot_algorithm_kpi_comparison(kpi_comparison, 'OE2', ['carbon_emissions', 'carbon_emissions_delta'])
-    plt.show()
-    plot_algorithm_kpi_comparison(kpi_comparison, 'OE3', ['electricity_cost', 'electricity_cost_delta', 'price_signal_deviation'])
-    plt.show()
+    manifest = objective_manifest()
+    for axis, payload in manifest['axes'].items():
+        fig = plot_algorithm_kpi_comparison(kpi_comparison, axis, payload['kpis'])
+        if fig is None:
+            print(f'No KPI values available for {axis}.')
+            continue
+        plt.show()
 """)
 
 md("""
