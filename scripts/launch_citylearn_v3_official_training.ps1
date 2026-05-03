@@ -5,7 +5,8 @@ param(
     [int]$Episodes = 5,
     [string]$OutputRoot = "outputs\citylearn_v3_madrl_official_full",
     [int]$TorchThreads = 8,
-    [switch]$Cuda = $true
+    [switch]$Cuda = $true,
+    [switch]$LiveOutput
 )
 
 $ErrorActionPreference = "Stop"
@@ -139,16 +140,35 @@ foreach ($job in $jobs) {
     $manifest.jobs += $jobRecord
     $manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $StatusPath -Encoding UTF8
 
-    $process = Start-Process `
-        -FilePath $Python `
-        -ArgumentList $commandArgs `
-        -WorkingDirectory $ProjectRoot `
-        -RedirectStandardOutput $logPath `
-        -RedirectStandardError $errPath `
-        -WindowStyle Hidden `
-        -Wait `
-        -PassThru
-    $exitCode = $process.ExitCode
+    if ($LiveOutput) {
+        Push-Location $ProjectRoot
+        try {
+            Write-Host ""
+            Write-Host "=== CityLearn v3 MADRL: $($job.name.ToUpper()) ===" -ForegroundColor Cyan
+            Write-Host "$Python $($commandArgs -join ' ')" -ForegroundColor DarkGray
+            & $Python @commandArgs 2>&1 | Tee-Object -FilePath $logPath
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
+        }
+
+        if (-not (Test-Path $errPath)) {
+            New-Item -ItemType File -Force -Path $errPath | Out-Null
+        }
+    }
+    else {
+        $process = Start-Process `
+            -FilePath $Python `
+            -ArgumentList $commandArgs `
+            -WorkingDirectory $ProjectRoot `
+            -RedirectStandardOutput $logPath `
+            -RedirectStandardError $errPath `
+            -WindowStyle Hidden `
+            -Wait `
+            -PassThru
+        $exitCode = $process.ExitCode
+    }
     $completedAt = Get-Date
 
     $jobRecord.completed_at = $completedAt.ToString("o")
