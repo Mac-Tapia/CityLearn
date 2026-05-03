@@ -24,6 +24,12 @@ class _Adapter:
             "episode_step": 0,
             "reward_sum": 1.0,
             "reward_mean": 0.5,
+            "district_net_electricity_consumption": 2.0,
+            "district_net_electricity_consumption_without_storage": 2.4,
+            "district_net_electricity_consumption_cost": 0.3,
+            "district_net_electricity_consumption_emission": 0.5,
+            "electricity_price_mean": 0.15,
+            "carbon_intensity_mean": 0.2,
             "scenario": "E3",
         },
         {
@@ -32,6 +38,12 @@ class _Adapter:
             "episode_step": 1,
             "reward_sum": 2.0,
             "reward_mean": 1.0,
+            "district_net_electricity_consumption": 1.0,
+            "district_net_electricity_consumption_without_storage": 1.4,
+            "district_net_electricity_consumption_cost": 0.2,
+            "district_net_electricity_consumption_emission": 0.3,
+            "electricity_price_mean": 0.14,
+            "carbon_intensity_mean": 0.18,
             "scenario": "E3",
         },
     ]
@@ -42,6 +54,8 @@ class _Adapter:
             "episode_step": 0,
             "agent": "Building_1",
             "reward": 0.5,
+            "action_l2": 0.25,
+            "action_mean": 0.1,
         }
     ]
 
@@ -152,14 +166,26 @@ def test_training_artifacts_use_data_checkpoints_and_figures_layout(tmp_path):
     assert artifacts["trace_rows"] == 1
     assert (figures_dir / "figures_manifest.json").is_file()
     assert (figures_dir / "reward_timeseries.png").is_file()
+    assert (figures_dir / "convergence_returns.png").is_file()
     assert (figures_dir / "episode_reward_summary.png").is_file()
+    assert (figures_dir / "learning_efficiency.png").is_file()
+    assert (figures_dir / "citylearn_v2_district_timeseries.png").is_file()
+    assert (figures_dir / "exploration_action_l2.png").is_file()
+    assert (figures_dir / "agent_reward_contribution.png").is_file()
     assert (figures_dir / "axis_baseline_comparison.png").is_file()
+    assert (figures_dir / "baseline_gain_by_kpi.png").is_file()
     assert (figures_dir / "core_kpis.png").is_file()
+    assert (figures_dir / "OE1_flexibility_kpis.png").is_file()
+    assert (figures_dir / "OE2_co2_kpis.png").is_file()
+    assert (figures_dir / "OE3_cost_kpis.png").is_file()
     assert (tables_dir / "episode_summary.csv").is_file()
     assert (tables_dir / "objective_kpis.csv").is_file()
+    assert (tables_dir / "training_efficiency.csv").is_file()
+    assert (tables_dir / "exploration_summary.csv").is_file()
+    assert (tables_dir / "agent_reward_summary.csv").is_file()
     assert (tables_dir / "checkpoint_inventory.csv").is_file()
 
     results = json.loads((data_dir / "results.json").read_text(encoding="utf-8"))
     assert results["artifact_layout"]["data"] == str(data_dir)
     assert results["artifact_layout"]["checkpoints"] == str(output_dir / "checkpoints")
-    assert results["figures"]["figure_count"] >= 4
+    assert results["figures"]["figure_count"] >= 12

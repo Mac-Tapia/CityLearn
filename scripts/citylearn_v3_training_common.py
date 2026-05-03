@@ -450,6 +450,155 @@ def _core_kpi_rows(report: Mapping[str, object]) -> List[Dict[str, object]]:
     return rows
 
 
+def _numeric_column(rows: Sequence[Mapping[str, object]], key: str) -> List[float]:
+    values: List[float] = []
+
+    for row in rows:
+        value = _as_float(row.get(key))
+        values.append(np.nan if value is None else value)
+
+    return values
+
+
+def _valid_pairs(rows: Sequence[Mapping[str, object]], x_key: str, y_key: str) -> List[Tuple[float, float]]:
+    points: List[Tuple[float, float]] = []
+
+    for row in rows:
+        x_value = _as_float(row.get(x_key))
+        y_value = _as_float(row.get(y_key))
+
+        if x_value is not None and y_value is not None:
+            points.append((x_value, y_value))
+
+    return points
+
+
+def _rolling_mean(values: Sequence[float], window: int) -> List[float]:
+    output: List[float] = []
+
+    for idx in range(len(values)):
+        start = max(0, idx - window + 1)
+        chunk = [value for value in values[start: idx + 1] if np.isfinite(value)]
+        output.append(float(np.mean(chunk)) if chunk else np.nan)
+
+    return output
+
+
+def _training_efficiency_rows(timeseries_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
+    grouped: Dict[int, List[Mapping[str, object]]] = {}
+
+    for row in timeseries_rows:
+        episode = row.get("episode")
+
+        if episode is None:
+            continue
+
+        grouped.setdefault(int(episode), []).append(row)
+
+    output: List[Dict[str, object]] = []
+
+    for episode, rows in sorted(grouped.items()):
+        reward = [_as_float(row.get("reward_sum")) for row in rows]
+        net_energy = [_as_float(row.get("district_net_electricity_consumption")) for row in rows]
+        cost = [_as_float(row.get("district_net_electricity_consumption_cost")) for row in rows]
+        emissions = [_as_float(row.get("district_net_electricity_consumption_emission")) for row in rows]
+        reward = [value for value in reward if value is not None]
+        net_energy = [value for value in net_energy if value is not None]
+        cost = [value for value in cost if value is not None]
+        emissions = [value for value in emissions if value is not None]
+        reward_total = float(np.sum(reward)) if reward else None
+        energy_import_total = float(np.sum([max(value, 0.0) for value in net_energy])) if net_energy else None
+        abs_energy_total = float(np.sum(np.abs(net_energy))) if net_energy else None
+        cost_total = float(np.sum(cost)) if cost else None
+        emission_total = float(np.sum(emissions)) if emissions else None
+        output.append({
+            "episode": episode,
+            "steps": len(rows),
+            "return_total": reward_total,
+            "grid_import_total": energy_import_total,
+            "absolute_net_energy_total": abs_energy_total,
+            "electricity_cost_total": cost_total,
+            "carbon_emissions_total": emission_total,
+            "return_per_grid_import": _safe_ratio(reward_total, energy_import_total),
+            "return_per_cost": _safe_ratio(reward_total, cost_total),
+            "return_per_kgco2": _safe_ratio(reward_total, emission_total),
+        })
+
+    return output
+
+
+def _exploration_rows(trace_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
+    grouped: Dict[int, List[Mapping[str, object]]] = {}
+
+    for row in trace_rows:
+        episode = row.get("episode")
+
+        if episode is None:
+            continue
+
+        grouped.setdefault(int(episode), []).append(row)
+
+    output: List[Dict[str, object]] = []
+
+    for episode, rows in sorted(grouped.items()):
+        action_l2 = [_as_float(row.get("action_l2")) for row in rows]
+        action_mean = [_as_float(row.get("action_mean")) for row in rows]
+        reward = [_as_float(row.get("reward")) for row in rows]
+        action_l2 = [value for value in action_l2 if value is not None]
+        action_mean = [value for value in action_mean if value is not None]
+        reward = [value for value in reward if value is not None]
+        output.append({
+            "episode": episode,
+            "agent_steps": len(rows),
+            "action_l2_mean": None if not action_l2 else float(np.mean(action_l2)),
+            "action_l2_std": None if not action_l2 else float(np.std(action_l2)),
+            "action_mean_average": None if not action_mean else float(np.mean(action_mean)),
+            "action_abs_mean_average": None if not action_mean else float(np.mean(np.abs(action_mean))),
+            "agent_reward_mean": None if not reward else float(np.mean(reward)),
+            "agent_reward_total": None if not reward else float(np.sum(reward)),
+        })
+
+    return output
+
+
+def _agent_reward_rows(trace_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
+    grouped: Dict[str, List[Mapping[str, object]]] = {}
+
+    for row in trace_rows:
+        agent = row.get("agent")
+
+        if agent is None:
+            continue
+
+        grouped.setdefault(str(agent), []).append(row)
+
+    output: List[Dict[str, object]] = []
+
+    for agent, rows in sorted(grouped.items()):
+        rewards = [_as_float(row.get("reward")) for row in rows]
+        action_l2 = [_as_float(row.get("action_l2")) for row in rows]
+        rewards = [value for value in rewards if value is not None]
+        action_l2 = [value for value in action_l2 if value is not None]
+        output.append({
+            "agent": agent,
+            "agent_steps": len(rows),
+            "reward_total": None if not rewards else float(np.sum(rewards)),
+            "reward_mean": None if not rewards else float(np.mean(rewards)),
+            "reward_min": None if not rewards else float(np.min(rewards)),
+            "reward_max": None if not rewards else float(np.max(rewards)),
+            "action_l2_mean": None if not action_l2 else float(np.mean(action_l2)),
+        })
+
+    return output
+
+
+def _safe_ratio(numerator: Optional[float], denominator: Optional[float]) -> Optional[float]:
+    if numerator is None or denominator is None or abs(denominator) < 1e-12:
+        return None
+
+    return float(numerator / denominator)
+
+
 def _save_line_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Optional[Dict[str, object]]:
     points = []
 
@@ -485,6 +634,41 @@ def _save_line_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Optiona
     fig.savefig(path, dpi=160)
     plt.close(fig)
     return {"path": str(path), "kind": "line_plot", "name": path.name}
+
+
+def _save_convergence_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Optional[Dict[str, object]]:
+    points = _valid_pairs(rows, "global_step", "reward_sum")
+
+    if not points:
+        return None
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    steps = [item[0] for item in points]
+    rewards = [item[1] for item in points]
+    cumulative_returns = np.cumsum(rewards)
+    window = max(2, min(100, int(len(rewards) / 10) or 2))
+    rolling_rewards = _rolling_mean(rewards, window)
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    axes[0].plot(steps, rewards, color="#406d96", linewidth=1.1, label="step_reward_sum")
+    axes[0].plot(steps, rolling_rewards, color="#c46b40", linewidth=1.8, label=f"rolling_mean_{window}")
+    axes[0].set_ylabel("reward")
+    axes[0].set_title("MADRL convergence and learning reward")
+    axes[0].grid(True, alpha=0.25)
+    axes[0].legend()
+    axes[1].plot(steps, cumulative_returns, color="#3b8c6e", linewidth=1.6, label="cumulative_return")
+    axes[1].set_xlabel("global_step")
+    axes[1].set_ylabel("return")
+    axes[1].grid(True, alpha=0.25)
+    axes[1].legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return {"path": str(path), "kind": "convergence_plot", "name": path.name}
 
 
 def _save_episode_plot(path: Path, episode_summaries: Sequence[Mapping[str, object]]) -> Optional[Dict[str, object]]:
@@ -527,6 +711,60 @@ def _save_episode_plot(path: Path, episode_summaries: Sequence[Mapping[str, obje
     return {"path": str(path), "kind": "bar_line_plot", "name": path.name}
 
 
+def _save_learning_efficiency_plot(
+    path: Path,
+    efficiency_rows: Sequence[Mapping[str, object]],
+) -> Optional[Dict[str, object]]:
+    rows = [row for row in efficiency_rows if _as_float(row.get("return_total")) is not None]
+
+    if not rows:
+        return None
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    episodes = [int(row["episode"]) for row in rows]
+    return_total = [_as_float(row.get("return_total")) or 0.0 for row in rows]
+    cost_total = [_as_float(row.get("electricity_cost_total")) for row in rows]
+    emission_total = [_as_float(row.get("carbon_emissions_total")) for row in rows]
+    fig, ax1 = plt.subplots(figsize=(10, 4.5))
+    ax1.plot(episodes, return_total, marker="o", linewidth=1.8, color="#406d96", label="return_total")
+    ax1.set_xlabel("episode")
+    ax1.set_ylabel("return")
+    ax1.grid(True, alpha=0.25)
+    ax2 = ax1.twinx()
+    if any(value is not None for value in cost_total):
+        ax2.plot(
+            episodes,
+            [np.nan if value is None else value for value in cost_total],
+            marker="s",
+            linewidth=1.4,
+            color="#c46b40",
+            label="electricity_cost_total",
+        )
+    if any(value is not None for value in emission_total):
+        ax2.plot(
+            episodes,
+            [np.nan if value is None else value for value in emission_total],
+            marker="^",
+            linewidth=1.4,
+            color="#3b8c6e",
+            label="carbon_emissions_total",
+        )
+    ax2.set_ylabel("cost / kgCO2")
+    lines, labels = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines + lines2, labels + labels2, loc="best")
+    ax1.set_title("Learning efficiency by episode")
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return {"path": str(path), "kind": "efficiency_plot", "name": path.name}
+
+
 def _save_axis_comparison_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Optional[Dict[str, object]]:
     filtered = [
         row for row in rows
@@ -562,6 +800,81 @@ def _save_axis_comparison_plot(path: Path, rows: Sequence[Mapping[str, object]])
     return {"path": str(path), "kind": "bar_plot", "name": path.name}
 
 
+def _save_baseline_gain_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Optional[Dict[str, object]]:
+    filtered = [
+        row for row in rows
+        if bool(row.get("available")) and _as_float(row.get("delta_vs_baseline")) is not None
+    ]
+
+    if not filtered:
+        return None
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    filtered = sorted(filtered, key=lambda row: (str(row.get("axis")), str(row.get("kpi"))))
+    labels = [f"{row.get('axis')}:{row.get('kpi')}" for row in filtered]
+    values = [_as_float(row.get("delta_vs_baseline")) or 0.0 for row in filtered]
+    colors = ["#3b8c6e" if bool(row.get("improved_vs_baseline")) else "#b85c5a" for row in filtered]
+    height = max(5.0, min(14.0, 0.3 * len(labels)))
+    fig, ax = plt.subplots(figsize=(11, height))
+    y = np.arange(len(labels))
+    ax.barh(y, values, color=colors)
+    ax.axvline(0.0, color="#333333", linewidth=1.0)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xlabel("control - baseline")
+    ax.set_title("KPI gain/loss versus CityLearn v2 baseline")
+    ax.grid(True, axis="x", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return {"path": str(path), "kind": "baseline_gain_plot", "name": path.name}
+
+
+def _save_axis_kpi_plot(
+    path: Path,
+    rows: Sequence[Mapping[str, object]],
+    axis_code: str,
+) -> Optional[Dict[str, object]]:
+    filtered = [
+        row for row in rows
+        if str(row.get("axis")) == axis_code and _as_float(row.get("value")) is not None
+    ]
+
+    if not filtered:
+        return None
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    labels = [str(row.get("kpi")) for row in filtered]
+    values = [_as_float(row.get("value")) or 0.0 for row in filtered]
+    colors = [
+        "#3b8c6e" if bool(row.get("improved_vs_baseline")) else "#5d6f99"
+        for row in filtered
+    ]
+    height = max(4.5, min(12.0, 0.32 * len(labels)))
+    fig, ax = plt.subplots(figsize=(10, height))
+    y = np.arange(len(labels))
+    ax.barh(y, values, color=colors)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xlabel("value")
+    ax.set_title(f"{axis_code} objective KPI profile")
+    ax.grid(True, axis="x", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return {"path": str(path), "kind": "axis_kpi_plot", "name": path.name}
+
+
 def _save_core_kpi_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Optional[Dict[str, object]]:
     filtered = [
         row for row in rows
@@ -594,11 +907,141 @@ def _save_core_kpi_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Opt
     return {"path": str(path), "kind": "horizontal_bar_plot", "name": path.name}
 
 
+def _save_citylearn_v2_timeseries_plot(
+    path: Path,
+    rows: Sequence[Mapping[str, object]],
+) -> Optional[Dict[str, object]]:
+    if not rows:
+        return None
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    steps = _numeric_column(rows, "global_step")
+    if not any(np.isfinite(value) for value in steps):
+        return None
+
+    series = [
+        ("district_net_electricity_consumption", "#406d96", "kWh"),
+        ("district_net_electricity_consumption_without_storage", "#8a7a4d", "kWh"),
+        ("district_net_electricity_consumption_cost", "#c46b40", "cost"),
+        ("district_net_electricity_consumption_emission", "#3b8c6e", "kgCO2"),
+        ("electricity_price_mean", "#7d5da6", "price"),
+        ("carbon_intensity_mean", "#555555", "kgCO2/kWh"),
+    ]
+    available = [
+        (key, color, ylabel, _numeric_column(rows, key))
+        for key, color, ylabel in series
+    ]
+    available = [
+        item for item in available
+        if any(np.isfinite(value) for value in item[3])
+    ]
+
+    if not available:
+        return None
+
+    fig, axes = plt.subplots(len(available), 1, figsize=(11, max(3.0, 2.0 * len(available))), sharex=True)
+    if len(available) == 1:
+        axes = [axes]
+
+    for ax, (key, color, ylabel, values) in zip(axes, available):
+        ax.plot(steps, values, color=color, linewidth=1.1)
+        ax.set_ylabel(ylabel)
+        ax.set_title(key)
+        ax.grid(True, alpha=0.25)
+
+    axes[-1].set_xlabel("global_step")
+    fig.suptitle("CityLearn v2 district time-series signals", y=0.995)
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return {"path": str(path), "kind": "citylearn_v2_timeseries_plot", "name": path.name}
+
+
+def _save_exploration_plot(
+    path: Path,
+    trace_rows: Sequence[Mapping[str, object]],
+) -> Optional[Dict[str, object]]:
+    grouped: Dict[int, List[float]] = {}
+
+    for row in trace_rows:
+        step = row.get("global_step")
+        action_l2 = _as_float(row.get("action_l2"))
+
+        if step is None or action_l2 is None:
+            continue
+
+        grouped.setdefault(int(step), []).append(action_l2)
+
+    if not grouped:
+        return None
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    steps = sorted(grouped)
+    means = [float(np.mean(grouped[step])) for step in steps]
+    stds = [float(np.std(grouped[step])) for step in steps]
+    upper = [mean + std for mean, std in zip(means, stds)]
+    lower = [mean - std for mean, std in zip(means, stds)]
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(steps, means, color="#406d96", linewidth=1.8, label="mean_action_l2")
+    ax.fill_between(steps, lower, upper, color="#406d96", alpha=0.18, label="+/- std")
+    ax.set_xlabel("global_step")
+    ax.set_ylabel("action_l2")
+    ax.set_title("Exploration and policy action magnitude")
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return {"path": str(path), "kind": "exploration_plot", "name": path.name}
+
+
+def _save_agent_reward_plot(
+    path: Path,
+    agent_rows: Sequence[Mapping[str, object]],
+) -> Optional[Dict[str, object]]:
+    filtered = [row for row in agent_rows if _as_float(row.get("reward_total")) is not None]
+
+    if not filtered:
+        return None
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    labels = [str(row.get("agent")) for row in filtered]
+    values = [_as_float(row.get("reward_total")) or 0.0 for row in filtered]
+    fig, ax = plt.subplots(figsize=(11, 5))
+    x = np.arange(len(labels))
+    ax.bar(x, values, color="#5d6f99")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=60, ha="right", fontsize=8)
+    ax.set_ylabel("reward_total")
+    ax.set_title("Agent-level reward contribution")
+    ax.grid(True, axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return {"path": str(path), "kind": "agent_reward_plot", "name": path.name}
+
+
 def _write_training_figures_and_tables(
     *,
     dirs: Mapping[str, Path],
     report: Mapping[str, object],
     timeseries_rows: Sequence[Mapping[str, object]],
+    trace_rows: Sequence[Mapping[str, object]],
     episode_summaries: Sequence[Mapping[str, object]],
     checkpoints: Sequence[Mapping[str, object]],
 ) -> Dict[str, object]:
@@ -607,11 +1050,20 @@ def _write_training_figures_and_tables(
     figures: List[Dict[str, object]] = []
     tables: List[Dict[str, object]] = []
 
+    objective_rows = _objective_kpi_rows(report)
+    axis_rows = _axis_comparison_rows(report)
+    core_rows = _core_kpi_rows(report)
+    efficiency_rows = _training_efficiency_rows(timeseries_rows)
+    exploration_rows = _exploration_rows(trace_rows)
+    agent_rows = _agent_reward_rows(trace_rows)
     table_specs = [
         ("episode_summary", list(episode_summaries)),
-        ("objective_kpis", _objective_kpi_rows(report)),
-        ("axis_baseline_comparison", _axis_comparison_rows(report)),
-        ("core_kpis", _core_kpi_rows(report)),
+        ("objective_kpis", objective_rows),
+        ("axis_baseline_comparison", axis_rows),
+        ("core_kpis", core_rows),
+        ("training_efficiency", efficiency_rows),
+        ("exploration_summary", exploration_rows),
+        ("agent_reward_summary", agent_rows),
         ("checkpoint_inventory", list(checkpoints)),
     ]
 
@@ -627,9 +1079,18 @@ def _write_training_figures_and_tables(
 
     figure_specs = [
         lambda: _save_line_plot(figures_dir / "reward_timeseries.png", timeseries_rows),
+        lambda: _save_convergence_plot(figures_dir / "convergence_returns.png", timeseries_rows),
         lambda: _save_episode_plot(figures_dir / "episode_reward_summary.png", episode_summaries),
-        lambda: _save_axis_comparison_plot(figures_dir / "axis_baseline_comparison.png", table_specs[2][1]),
-        lambda: _save_core_kpi_plot(figures_dir / "core_kpis.png", table_specs[3][1]),
+        lambda: _save_learning_efficiency_plot(figures_dir / "learning_efficiency.png", efficiency_rows),
+        lambda: _save_citylearn_v2_timeseries_plot(figures_dir / "citylearn_v2_district_timeseries.png", timeseries_rows),
+        lambda: _save_exploration_plot(figures_dir / "exploration_action_l2.png", trace_rows),
+        lambda: _save_agent_reward_plot(figures_dir / "agent_reward_contribution.png", agent_rows),
+        lambda: _save_axis_comparison_plot(figures_dir / "axis_baseline_comparison.png", axis_rows),
+        lambda: _save_baseline_gain_plot(figures_dir / "baseline_gain_by_kpi.png", objective_rows),
+        lambda: _save_core_kpi_plot(figures_dir / "core_kpis.png", core_rows),
+        lambda: _save_axis_kpi_plot(figures_dir / "OE1_flexibility_kpis.png", objective_rows, "OE1"),
+        lambda: _save_axis_kpi_plot(figures_dir / "OE2_co2_kpis.png", objective_rows, "OE2"),
+        lambda: _save_axis_kpi_plot(figures_dir / "OE3_cost_kpis.png", objective_rows, "OE3"),
     ]
     figure_errors = []
 
@@ -699,6 +1160,7 @@ def write_training_artifacts(
         dirs=dirs,
         report=report,
         timeseries_rows=timeseries_rows,
+        trace_rows=trace_rows,
         episode_summaries=episode_summaries,
         checkpoints=checkpoints,
     )
