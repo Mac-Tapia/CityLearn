@@ -131,6 +131,24 @@ El aporte MADRL consiste en aprender politicas coordinadas para muchos edificios
 """)
 
 md("""
+## Diagnóstico de la realidad
+
+El problema energético de edificios no es marginal. UNEP y GlobalABC reportan que, en 2022, edificios y construcción concentraron cerca del 34% de la demanda energética global y 37% de las emisiones de CO2 relacionadas con energía y procesos, además de una brecha creciente frente a la trayectoria necesaria de descarbonización (United Nations Environment Programme & Global Alliance for Buildings and Construction, 2024). La IEA estima que la operación de edificios representa alrededor del 30% del consumo final de energía y 26% de emisiones energéticas globales; también advierte que el sector debe acelerar eficiencia, electrificación, resiliencia y reducción de emisiones para alinearse con el escenario Net Zero (International Energy Agency, 2023).
+
+En comunidades urbanas, la penetración de PV, baterías, bombas de calor, vehículos eléctricos y tarifas dinámicas aumenta la flexibilidad disponible, pero también incrementa la complejidad de coordinación. CityLearn fue propuesto precisamente para estandarizar investigación en RL/MARL para respuesta de demanda y gestión energética urbana, en un contexto donde la integración de renovables, almacenamiento y EVs introduce nuevos desafíos operativos para la red (Vázquez-Canteli et al., 2020). CityLearn v2 amplía ese marco hacia comunidades grid-interactive, resilientes, ocupante-céntricas y carbon-aware con DERs, V2G y confort térmico (Nweye et al., 2025).
+""")
+
+md("""
+## Descripción problemática
+
+La problemática de tesis se puede resumir así: una comunidad con 17 edificios y EVs dispone de recursos flexibles, pero las decisiones locales no coordinadas pueden aumentar picos, rampas, importaciones en horas de alta intensidad de carbono y costos bajo tarifas dinámicas. Un controlador centralizado puro puede explotar información global, pero escala mal, reduce privacidad y no representa adecuadamente la ejecución real de edificios heterogéneos. Un controlador independiente por edificio preserva descentralización, pero puede sufrir no estacionariedad, pobre asignación de crédito y decisiones incompatibles con el objetivo distrital.
+
+Por ello se adopta un **Dec-POMDP colaborativo con CTDE**: durante entrenamiento se permite usar estado global para estabilizar críticos y aprendizaje; durante ejecución, cada edificio actúa con su observación local. Esta formulación sigue la motivación clásica de Dec-POMDP para control descentralizado bajo incertidumbre (Bernstein et al., 2002) y la tradición MARL moderna de entrenamiento centralizado con políticas descentralizadas (Lowe et al., 2017; Rashid et al., 2018).
+
+La hipótesis operativa del proyecto es que los cuatro MADRL oficiales pueden aprender políticas colaborativas que mejoren, respecto a la línea base CityLearn v2, uno o más de los ejes: **OE1 flexibilidad energética**, **OE2 emisiones de CO2** y **OE3 eficiencia económica**. La comparación final no se debe basar solo en reward: debe usar KPIs CityLearn v2, series técnicas, trazas por agente, checkpoints y figuras por eje.
+""")
+
+md("""
 <a name="target-audience"></a>
 
 # Target Audience
@@ -164,6 +182,30 @@ Cuando existe una serie de intensidad de carbono, la politica puede aprender a d
 ## Economic Efficiency
 
 La eficiencia economica combina costo de energia, precios dinamicos, reduccion de picos y respuesta a senales tarifarias. Una politica puede reducir costo sin necesariamente reducir emisiones; por eso los tres ejes se reportan por separado.
+""")
+
+md("""
+## Marco teórico y estado del arte relacionado
+
+### CityLearn y comunidades grid-interactive
+
+CityLearn nace como entorno estandarizado para investigar RL/MARL en respuesta de demanda y gestión energética urbana, buscando facilitar comparación y replicabilidad entre algoritmos (Vázquez-Canteli et al., 2020). CityLearn v2 amplía el alcance hacia comunidades con DERs, EV/V2G, resiliencia, confort y control carbon-aware, lo que lo hace adecuado para evaluar flexibilidad, emisiones y costos en un mismo simulador (Nweye et al., 2025).
+
+### Dec-POMDP, CTDE y coordinación multiagente
+
+El Dec-POMDP formaliza decisiones secuenciales descentralizadas con observabilidad parcial, donde cada agente dispone de información local y el equipo comparte un objetivo global (Bernstein et al., 2002). En MARL profundo, CTDE se usa para reducir no estacionariedad durante entrenamiento sin exigir información global en ejecución. MADDPG introdujo un esquema actor-critic con políticas locales y críticos que pueden observar acciones/observaciones de otros agentes (Lowe et al., 2017). QMIX mostró otra ruta CTDE: aprender un valor conjunto centralizado factorizable en utilidades por agente para ejecución descentralizada (Rashid et al., 2018).
+
+### MADRL para energía, demanda flexible y EVs
+
+La literatura reciente en smart grids y edificios muestra que MARL es pertinente cuando existen muchos recursos distribuidos, información local, privacidad, tarifas dinámicas y necesidad de coordinación. En tesis de maestría, González Rotger (2021) aplicó MARL a HVAC en BEMS y reportó trade-offs entre energía, confort y calidad de aire. Fonseca (2023) estudió integración de activos flexibles, EVs, V2G y comunidades energéticas con MADRL multiobjetivo. Dong (2022) combinó predicción de picos y MARL para gestión de DERs en smart grids con entrenamiento centralizado y ejecución distribuida. En tesis doctoral, Almannouny (2025) abordó pricing dinámico y respuesta de demanda integrada con DRL para sistemas multi-energía.
+
+### Relación con los tres ejes de este proyecto
+
+- **OE1 flexibilidad energética**: se conecta con reducción de picos/rampas, autoconsumo, baterías, EV/V2G y balance comunitario.
+- **OE2 emisiones de CO2**: se conecta con control carbon-aware e importaciones en horas de alta intensidad de carbono.
+- **OE3 eficiencia económica**: se conecta con precios dinámicos, costos de electricidad, respuesta de demanda y reducción de demanda pico.
+
+El marco teórico justifica que el proyecto no trate estos ejes como métricas aisladas. Son objetivos parcialmente conflictivos, por lo que deben reportarse por separado y compararse con baseline mediante KPIs CityLearn v2.
 """)
 
 md("""
@@ -215,6 +257,20 @@ md("""
 | MASAC | estado global estilo SMAC | accion discreta mapeada a CityLearn |
 | MATD3 | critico con observaciones/acciones conjuntas | actor continuo por edificio |
 | MAAC | critico de atencion multiagente | politica local por edificio |
+""")
+
+md("""
+### Backends oficiales, GitHub y papers
+
+| Algoritmo | Paper base | GitHub oficial / backend usado | Rol en este proyecto |
+|---|---|---|---|
+| HAPPO | Zhong et al. (2024), *Heterogeneous-Agent Reinforcement Learning*, JMLR. https://jmlr.org/papers/v25/23-0488.html | HARL: https://github.com/PKU-MARL/HARL | Backend principal para HAPPO con políticas heterogéneas y critic centralizado. |
+| MASAC / mSAC | Pu et al. (2021), *Decomposed Soft Actor-Critic Method for Cooperative Multi-Agent Reinforcement Learning*. https://arxiv.org/abs/2104.06655 | MARL: https://github.com/puyuan1996/MARL | Backend paper-repository para mSAC/MASAC cooperativo. |
+| MATD3 | Ackermann et al. (2019), *Reducing Overestimation Bias in Multi-Agent Domains Using Double Centralized Critics*. https://arxiv.org/abs/1910.01465 | Repositorio original: https://github.com/JohannesAck/MATD3implementation; backend PyTorch usado: https://github.com/marlbenchmark/off-policy | El repo original es referencia oficial; para Python 3.9 se usa backend PyTorch source-backed. |
+| MAAC | Iqbal y Sha (2019), *Actor-Attention-Critic for Multi-Agent Reinforcement Learning*. https://arxiv.org/abs/1810.02912 | MAAC: https://github.com/shariqiqbal2810/MAAC | Backend original con crítico de atención multiagente. |
+| MARLlib | Hu et al. (2023), *MARLlib: A Scalable and Efficient Multi-agent Reinforcement Learning Library*. https://arxiv.org/abs/2210.13708 | MARLlib: https://github.com/Replicable-MARL/MARLlib | Framework MARL adicional para registro del entorno `citylearn_v3`. |
+
+Regla metodológica: ningún algoritmo MADRL se reimplementa dentro de `citylearn.agents`. Cada entrenamiento debe llamar el backend externo correspondiente y registrar en `results.json` el backend, hiperparámetros, checkpoints y artefactos de evaluación.
 """)
 
 md("""
@@ -1081,6 +1137,42 @@ if status_path.is_file():
     }).to_frame('value'))
 else:
     print('No official status file found at', status_path)
+""")
+
+md("""
+# Referencias seleccionadas en formato APA 7
+
+Ackermann, J., Gabler, V., Osa, T., & Sugiyama, M. (2019). *Reducing overestimation bias in multi-agent domains using double centralized critics*. arXiv. https://doi.org/10.48550/arXiv.1910.01465
+
+Almannouny, G. A. (2025). *Intelligent dynamic pricing and integrated demand response for multi-energy systems using deep reinforcement learning* [Doctoral dissertation, University of Glasgow]. Enlighten Theses. https://doi.org/10.5525/gla.thesis.85367
+
+Bernstein, D. S., Givan, R., Immerman, N., & Zilberstein, S. (2002). The complexity of decentralized control of Markov decision processes. *Mathematics of Operations Research, 27*(4), 819-840. https://doi.org/10.1287/moor.27.4.819.297
+
+Dong, J. (2022). *Peak load ensemble prediction and multi-agent reinforcement learning for DER demand response management in smart grids* [Master's thesis, Lakehead University]. Knowledge Commons. https://knowledgecommons.lakeheadu.ca/handle/2453/4944
+
+Fonseca, T. C. C. (2023). *A multi-agent reinforcement learning approach to integrate flexible assets into energy communities* [Master's thesis, Instituto Superior de Engenharia do Porto]. Repositório Científico do Instituto Politécnico do Porto. http://hdl.handle.net/10400.22/24068
+
+González Rotger, C. (2021). *Multi-agent reinforcement learning applied to heating, ventilation, and air conditioning in a building energy management system* [Master's thesis, Universitat de les Illes Balears]. http://hdl.handle.net/11201/158415
+
+Hu, S., Zhong, Y., Gao, M., Wang, W., Dong, H., Liang, X., Li, Z., Chang, X., & Yang, Y. (2023). *MARLlib: A scalable and efficient multi-agent reinforcement learning library*. arXiv. https://arxiv.org/abs/2210.13708
+
+International Energy Agency. (2023). *Buildings*. https://www.iea.org/energy-system/buildings
+
+Iqbal, S., & Sha, F. (2019). *Actor-attention-critic for multi-agent reinforcement learning*. arXiv. https://doi.org/10.48550/arXiv.1810.02912
+
+Lowe, R., Wu, Y., Tamar, A., Harb, J., Abbeel, P., & Mordatch, I. (2017). Multi-agent actor-critic for mixed cooperative-competitive environments. *Advances in Neural Information Processing Systems, 30*. https://papers.nips.cc/paper/7217-multi-agent-actor-critic-for-mixed-cooperative-competitive-environments
+
+Nweye, K., Kaspar, K., Buscemi, G., Fonseca, T., Pinto, G., Ghose, D., Duddukuru, S., Pratapa, P., Li, H., Mohammadi, J., Lino Ferreira, L., Hong, T., Ouf, M., Capozzoli, A., & Nagy, Z. (2025). CityLearn v2: Energy-flexible, resilient, occupant-centric, and carbon-aware management of grid-interactive communities. *Journal of Building Performance Simulation, 18*(1), 17-38. https://doi.org/10.1080/19401493.2024.2418813
+
+Pu, Y., Wang, S., Yang, R., Yao, X., & Li, B. (2021). *Decomposed soft actor-critic method for cooperative multi-agent reinforcement learning*. arXiv. https://doi.org/10.48550/arXiv.2104.06655
+
+Rashid, T., Samvelyan, M., Schroeder de Witt, C., Farquhar, G., Foerster, J., & Whiteson, S. (2018). *QMIX: Monotonic value function factorisation for deep multi-agent reinforcement learning*. arXiv. https://doi.org/10.48550/arXiv.1803.11485
+
+United Nations Environment Programme & Global Alliance for Buildings and Construction. (2024). *Global status report for buildings and construction*. https://www.unep.org/resources/report/global-status-report-buildings-and-construction
+
+Vázquez-Canteli, J. R., Dey, S., Henze, G., & Nagy, Z. (2020). *CityLearn: Standardizing research in multi-agent reinforcement learning for demand response and urban energy management*. arXiv. https://doi.org/10.48550/arXiv.2012.10504
+
+Zhong, Y., Kuba, J. G., Feng, X., Hu, S., Ji, J., & Yang, Y. (2024). Heterogeneous-agent reinforcement learning. *Journal of Machine Learning Research, 25*(32), 1-67. https://jmlr.org/papers/v25/23-0488.html
 """)
 
 md("""
