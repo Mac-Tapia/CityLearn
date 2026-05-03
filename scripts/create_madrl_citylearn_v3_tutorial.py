@@ -1,0 +1,1131 @@
+"""Create the CityLearn v3 MADRL tutorial notebook."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+
+NOTEBOOK_PATH = Path(__file__).resolve().parents[1] / "examples" / "madrl_citylearn_v3_tutorial.ipynb"
+PROJECT_TITLE = (
+    "MULTI-AGENTE DE APRENDIZAJE POR REFUERZO PROFUNDO PARA GESTIÓN "
+    "COORDINADA DE FLEXIBILIDAD ENERGÉTICA, EMISIONES DE CARBONO Y "
+    "EFICIENCIA ECONÓMICA EN COMUNIDADES INTELIGENTES"
+)
+
+
+cells = []
+
+
+def md(source: str) -> None:
+    cells.append({
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": source.strip("\n").splitlines(keepends=True),
+    })
+
+
+def code(source: str) -> None:
+    cells.append({
+        "cell_type": "code",
+        "execution_count": None,
+        "metadata": {},
+        "outputs": [],
+        "source": source.strip("\n").splitlines(keepends=True),
+    })
+
+
+md("""
+<a href="https://colab.research.google.com/github/Mac-Tapia/CityLearn/blob/citylearn-v3-madrl/examples/madrl_citylearn_v3_tutorial.ipynb" target="_parent"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
+""")
+
+md(f"""
+# {PROJECT_TITLE}
+
+## Tutorial CityLearn v3 MADRL sobre CityLearn v2
+
+Este notebook sigue la estructura pedagogica del tutorial original de CityLearn: contexto, datos, preprocesamiento, entorno, KPIs, visualizacion, control, entrenamiento, evaluacion, ajuste y siguientes pasos. La diferencia es que aqui el controlador ya no es un unico agente RL, sino un sistema **MADRL colaborativo** con **Dec-POMDP**, **CTDE** y cuatro backends oficiales: **HAPPO**, **MASAC**, **MATD3** y **MAAC**.
+
+La idea central del proyecto es conservar **CityLearn v2** como simulador, dataset, fisica y fuente oficial de KPIs, agregando una capa **CityLearn v3** para entrenamiento multiagente profundo y evaluacion multiobjetivo.
+""")
+
+md("""
+# Glossary
+
+- **CityLearn v2**: simulador base usado para edificios, baterias, PV, EVs, tarifas, intensidad de carbono y KPIs `evaluate_v2`.
+- **CityLearn v3 MADRL**: capa experimental de este proyecto que adapta CityLearn v2 a Dec-POMDP, CTDE, backends MADRL oficiales y reportes por ejes.
+- **MADRL**: aprendizaje por refuerzo profundo multiagente.
+- **Dec-POMDP**: juego de Markov parcialmente observable descentralizado; cada edificio observa localmente y actua localmente.
+- **CTDE**: entrenamiento centralizado y ejecucion descentralizada; el critico puede usar estado global durante entrenamiento, pero cada actor ejecuta con informacion local.
+- **HAPPO**: actor-critic multiagente de HARL, usado con critico centralizado.
+- **MASAC**: variante multiagente de Soft Actor-Critic usada sobre un estado global estilo SMAC.
+- **MATD3**: TD3 multiagente con critico centralizado y actores continuos por agente.
+- **MAAC**: Actor-Attention-Critic multiagente con critico de atencion.
+- **OE1**: flexibilidad energetica.
+- **OE2**: emisiones de CO2.
+- **OE3**: costos energeticos.
+- **Baseline CityLearn v2**: referencia usada por CityLearn para calcular ratios, deltas y comparaciones de KPIs.
+""")
+
+md("""
+<a name="overview"></a>
+
+# Overview
+
+El tutorial original de CityLearn enseña como pasar de datos y reglas de control a agentes RL que modifican acciones de almacenamiento. Este notebook conserva esa ruta de aprendizaje, pero cambia el foco hacia comunidades inteligentes donde cada edificio es un agente coordinado.
+
+El flujo de trabajo sera:
+
+1. Revisar el objetivo cientifico y los ejes de evaluacion.
+2. Cargar el dataset CityLearn v2 con 17 edificios + EV.
+3. Inspeccionar clima, precios, carbono y archivos de edificios.
+4. Construir el entorno Dec-POMDP de CityLearn v3.
+5. Validar observaciones locales, acciones locales y estado global CTDE.
+6. Evaluar KPIs CityLearn v2 y KPIs del proyecto por OE1/OE2/OE3.
+7. Revisar los cuatro backends MADRL oficiales.
+8. Ejecutar entrenamientos cortos o lanzar entrenamiento oficial.
+9. Analizar `results.json`, `timeseries.csv`, `trace.csv`, checkpoints, figuras y tablas.
+10. Comparar algoritmos contra la linea base CityLearn v2.
+""")
+
+md("""
+## Contributions
+
+Este proyecto aporta una integracion reproducible para estudiar control coordinado en comunidades de edificios:
+
+- Mantiene CityLearn v2 como fuente oficial de datos, dinamica fisica y KPIs.
+- Expone cada edificio como agente descentralizado.
+- Incluye EVs dentro de los espacios de accion/observacion de los edificios.
+- Permite CTDE con estado global durante entrenamiento y ejecucion local por edificio.
+- Integra cuatro backends MADRL oficiales sin implementar algoritmos dentro de `citylearn.agents`.
+- Genera artefactos tecnicos comparables: checkpoints, resultados JSON, series temporales, trazas por agente, figuras y tablas.
+- Ordena la evaluacion en tres ejes: flexibilidad, CO2 y costos.
+""")
+
+md("""
+## Learning Outcomes
+
+Al finalizar este notebook deberias poder:
+
+- Explicar por que CityLearn v3 sigue usando CityLearn v2 como entorno de entrenamiento.
+- Identificar agentes, observaciones, acciones y estado global en un Dec-POMDP.
+- Distinguir KPIs CityLearn v2 de los ejes de evaluacion del proyecto.
+- Ejecutar validaciones de estructura antes de entrenar.
+- Lanzar entrenamientos cortos para HAPPO, MASAC, MATD3 y MAAC.
+- Leer los artefactos generados por cada MADRL.
+- Interpretar graficas de convergencia, exploracion, eficiencia, recompensas, returns y comparacion con baseline.
+""")
+
+md("""
+<a name="climate-impact"></a>
+
+# Climate Impact
+
+Las comunidades inteligentes pueden desplazar cargas, usar almacenamiento y coordinar EVs para reducir importaciones en horas criticas. Esta coordinacion tiene tres impactos medibles:
+
+- **Flexibilidad energetica**: reducir picos, rampas y dependencia de importacion desde red.
+- **Emisiones de CO2**: evitar consumo en horas con alta intensidad de carbono.
+- **Eficiencia economica**: reducir costo total, aprovechar tarifas dinamicas y limitar demanda pico.
+
+El aporte MADRL consiste en aprender politicas coordinadas para muchos edificios sin exigir que cada edificio observe todo el distrito en ejecucion.
+""")
+
+md("""
+<a name="target-audience"></a>
+
+# Target Audience
+
+Este notebook esta pensado para investigadores en energia e IA, estudiantes de RL/MARL, usuarios de CityLearn que necesitan reproducir experimentos con multiples edificios y EV, y evaluadores de tesis que necesitan ver claramente datos, algoritmos, KPIs y artefactos.
+""")
+
+md("""
+<a name="prereqs"></a>
+
+# Prerequisites
+
+Se recomienda tener Python 3.9, el entorno `.venv39-citylearn-v3`, PyTorch con CUDA si se va a entrenar en GPU, repositorios externos bajo `external/`, y conocimientos basicos de RL, actor-critic, SAC/TD3/PPO y evaluacion energetica.
+
+Los entrenamientos completos pueden tardar bastante. Las celdas de entrenamiento incluyen banderas para evitar ejecutar procesos largos por accidente.
+""")
+
+md("""
+<a name="background"></a>
+
+# Background
+
+## Grid-Interactive Efficient Buildings and Energy Flexibility
+
+Los edificios interactivos con la red pueden modificar su consumo neto usando almacenamiento electrico, almacenamiento termico, PV, EVs y control de cargas. La flexibilidad se observa en la forma de la curva agregada: picos, rampas, factor de carga, autoconsumo y exportacion.
+
+## Carbon-Aware District Operation
+
+Cuando existe una serie de intensidad de carbono, la politica puede aprender a desplazar importaciones hacia horas menos intensivas en CO2. Por eso el segundo eje no se trata como metrica secundaria sino como objetivo completo.
+
+## Economic Efficiency
+
+La eficiencia economica combina costo de energia, precios dinamicos, reduccion de picos y respuesta a senales tarifarias. Una politica puede reducir costo sin necesariamente reducir emisiones; por eso los tres ejes se reportan por separado.
+""")
+
+md("""
+## Control Theories for Smart Communities
+
+En el tutorial original, el usuario pasa de reglas RBC a Q-learning y SAC. En este proyecto el salto conceptual es hacia control multiagente:
+
+- **RBC**: reglas fijas, utiles como linea base y diagnostico.
+- **RL centralizado**: un agente decide todas las acciones; puede escalar mal con muchos edificios.
+- **MARL/MADRL descentralizado**: cada edificio decide su accion.
+- **CTDE**: durante entrenamiento se permite informacion global para estabilizar el aprendizaje; en ejecucion cada actor usa observacion local.
+""")
+
+md("""
+## Reinforcement Learning and MADRL for CityLearn
+
+Cada paso del entorno entrega observaciones locales por edificio, acciones continuas por edificio y recompensas. La formulacion Dec-POMDP usada aqui es:
+
+- agentes: `Building_1`, ..., `Building_17`;
+- observacion local: variables CityLearn v2 habilitadas para cada edificio;
+- accion local: almacenamiento, EV y otros actuadores disponibles del edificio;
+- estado global CTDE: concatenacion de observaciones locales;
+- recompensa colaborativa: `team_mean` por defecto;
+- evaluacion: KPIs CityLearn v2 y reporte CityLearn v3 por ejes.
+""")
+
+md("""
+## CityLearn
+
+CityLearn v3 no reemplaza CityLearn v2. Lo envuelve.
+
+- CityLearn v2 conserva datasets, fisica, evaluacion y API base.
+- CityLearn v3 agrega adaptadores Dec-POMDP, reportes multiobjetivo, backends oficiales y estructura de artefactos.
+- Los algoritmos MADRL viven en `external/`, no dentro de `citylearn.agents`.
+""")
+
+md("""
+### Environment
+
+El entorno principal es `CityLearnDecPOMDPEnv`, compatible con la idea de `ParallelEnv`: cada agente recibe su observacion y devuelve su accion. La propiedad `state()` da el estado global usado por algoritmos CTDE.
+""")
+
+md("""
+### Control
+
+| Algoritmo | Entrenamiento | Ejecucion |
+|---|---|---|
+| HAPPO | critico centralizado HARL | actor por edificio |
+| MASAC | estado global estilo SMAC | accion discreta mapeada a CityLearn |
+| MATD3 | critico con observaciones/acciones conjuntas | actor continuo por edificio |
+| MAAC | critico de atencion multiagente | politica local por edificio |
+""")
+
+md("""
+### Datasets
+
+El proyecto puede usar cualquier `schema.json` CityLearn v2 compatible. El caso de tesis usa `citylearn_challenge_2022_phase_all_plus_evs` con 17 edificios y EVs.
+""")
+
+md("""
+### Other Environments
+
+MARLlib queda registrado mediante un adaptador `citylearn_v3`. Los backends oficiales se conservan como fuentes externas:
+
+- `external/HARL`
+- `external/MARL`
+- `external/off-policy`
+- `external/MAAC`
+- `external/MARLlib`
+- `external/MATD3implementation` como referencia legacy del paper MATD3
+""")
+
+md("""
+## Other References
+
+Consulta tambien `ESTRATEGIA_3PILARES_MADRL.md`, `CityLearn/CITYLEARN_V3_MADRL.md`, `external/backends.lock.json` y los manifiestos de figuras en `outputs/<experimento>/<madrl>/<escenario>_seed_<seed>/figures/`.
+""")
+
+md("""
+# Hands-On Experiments
+
+Las siguientes celdas estan disenadas para ejecutarse dentro del repositorio completo `MADRLCitytleranflexresdr`. Algunas son de inspeccion rapida y otras lanzan entrenamientos. Por defecto, las celdas largas quedan protegidas con banderas booleanas.
+""")
+
+md("""
+<a name="software-requirements"></a>
+
+# Software Requirements
+
+Primero verificamos la version de Python. El proyecto fue preparado para Python 3.9.
+""")
+
+code("""
+!python --version
+""")
+
+md("""
+Si estas en una maquina nueva, instala dependencias desde el entorno preparado del proyecto. En este repositorio ya se usa `.venv39-citylearn-v3`; en Colab tendrias que clonar el repositorio con submodulos y recrear el entorno.
+""")
+
+code("""
+# Ejemplo local, no ejecutar si el entorno ya esta preparado:
+# !python -m pip install -e ../CityLearn pytest matplotlib pandas numpy
+# !python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+""")
+
+md("""
+Importamos librerias comunes y configuramos rutas. La funcion `find_project_root` permite ejecutar el notebook desde la raiz del proyecto o desde `CityLearn/examples`.
+""")
+
+code("""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Dict, List, Mapping, Optional, Sequence
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from IPython.display import Image, Markdown, display
+
+
+def find_project_root(start: Optional[Path] = None) -> Path:
+    start = Path.cwd() if start is None else Path(start).resolve()
+    candidates = [start, *start.parents]
+
+    for candidate in candidates:
+        if (candidate / 'CityLearn').exists() and (candidate / 'external').exists():
+            return candidate
+
+    for candidate in candidates:
+        if (candidate / 'citylearn').exists() and (candidate / 'examples').exists():
+            return candidate.parent if candidate.name == 'CityLearn' else candidate
+
+    return start
+
+
+PROJECT_ROOT = find_project_root()
+CITYLEARN_ROOT = PROJECT_ROOT / 'CityLearn' if (PROJECT_ROOT / 'CityLearn').exists() else PROJECT_ROOT
+EXTERNAL_ROOT = PROJECT_ROOT / 'external'
+SCRIPTS_DIR = CITYLEARN_ROOT / 'scripts'
+
+for path in [PROJECT_ROOT, CITYLEARN_ROOT, SCRIPTS_DIR]:
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+print('PROJECT_ROOT =', PROJECT_ROOT)
+print('CITYLEARN_ROOT =', CITYLEARN_ROOT)
+print('EXTERNAL_ROOT =', EXTERNAL_ROOT)
+""")
+
+md("""
+Aqui incluimos ajustes globales para el resto del notebook. Para tutorial se usa un horizonte corto; para tesis se usa `8760` pasos por episodio.
+""")
+
+code("""
+plt.rcParams['figure.figsize'] = (10, 4)
+plt.rcParams['axes.grid'] = True
+plt.rcParams['grid.alpha'] = 0.25
+pd.set_option('display.max_columns', 120)
+
+RANDOM_SEED = 0
+SCENARIO = 'E3'
+TUTORIAL_EPISODE_TIME_STEPS = 24
+OFFICIAL_EPISODE_TIME_STEPS = 8760
+ALGORITHMS = ['happo', 'masac', 'matd3', 'maac']
+""")
+
+md("""
+<a name="data-description"></a>
+
+# Dataset Description
+
+## Loading the Data
+
+El dataset de tesis es una variante CityLearn v2 con 17 edificios y EVs. Se carga desde su `schema.json`, igual que en el tutorial original se carga el dataset base de CityLearn.
+""")
+
+code("""
+from citylearn.data import DataSet
+from citylearn.dec_pomdp import DEFAULT_17_BUILDING_EV_SCHEMA
+
+DATASET_NAME = 'citylearn_challenge_2022_phase_all_plus_evs'
+SCHEMA_PATH = Path(DEFAULT_17_BUILDING_EV_SCHEMA)
+
+schema = json.loads(SCHEMA_PATH.read_text(encoding='utf-8'))
+print('Dataset:', DATASET_NAME)
+print('Schema:', SCHEMA_PATH)
+print('Simulation start:', schema.get('simulation_start_time_step'))
+print('Simulation end:', schema.get('simulation_end_time_step'))
+print('Buildings:', len(schema.get('buildings', {})))
+""")
+
+md("""
+Podemos listar los datasets disponibles en CityLearn. El dataset de tesis puede no aparecer si es una extension local del proyecto, pero su `schema.json` esta dentro de `CityLearn/data/datasets`.
+""")
+
+code("""
+try:
+    display(pd.Series(sorted(DataSet.get_names()), name='dataset').to_frame())
+except Exception as exc:
+    print('Could not list DataSet names:', exc)
+""")
+
+md("""
+### Preview a Building Data File
+
+Inspeccionamos el primer edificio incluido. En CityLearn v2 cada edificio apunta a archivos CSV de cargas, clima, precios e intensidad de carbono.
+""")
+
+code("""
+def included_buildings(schema: Mapping[str, object]) -> List[str]:
+    buildings = schema.get('buildings', {})
+    return [name for name, payload in buildings.items() if payload.get('include', True)]
+
+
+def resolve_dataset_file(schema_path: Path, schema: Mapping[str, object], filename: str) -> Path:
+    root = Path(schema.get('root_directory') or schema_path.parent)
+    if not root.is_absolute():
+        direct = schema_path.parent / root
+        root = direct if direct.exists() else schema_path.parent
+    return root / filename
+
+
+building_names = included_buildings(schema)
+building_name = building_names[0]
+building_schema = schema['buildings'][building_name]
+print('Selected building:', building_name)
+print('Building keys:', sorted(building_schema.keys()))
+
+building_file = resolve_dataset_file(SCHEMA_PATH, schema, building_schema['energy_simulation'])
+building_data = pd.read_csv(building_file)
+display(building_data.head())
+display(building_data.describe(include='all').T.head(20))
+""")
+
+md("""
+El archivo del edificio permite revisar cargas no desplazables, condiciones interiores, refrigeracion/calefaccion y otros perfiles. Estas variables son la base fisica que los agentes no deben inventar: el entrenamiento MADRL opera sobre la misma simulacion CityLearn v2.
+""")
+
+code("""
+columns = [col for col in building_data.columns if any(token in col.lower() for token in ['load', 'cooling', 'heating', 'temperature'])]
+columns = columns[:4]
+fig, axes = plt.subplots(len(columns), 1, figsize=(11, max(3, 2.2 * len(columns))), sharex=True)
+if len(columns) == 1:
+    axes = [axes]
+for ax, column in zip(axes, columns):
+    ax.plot(building_data[column].iloc[:168].values, linewidth=1.2)
+    ax.set_title(column)
+    ax.set_xlabel('hour')
+fig.tight_layout()
+plt.show()
+""")
+
+md("""
+### Preview Weather File
+
+El clima afecta cargas termicas y produccion PV. Revisarlo ayuda a entender por que el aprendizaje debe generalizar por episodios y semillas.
+""")
+
+code("""
+weather_file = resolve_dataset_file(SCHEMA_PATH, schema, building_schema['weather'])
+weather_data = pd.read_csv(weather_file)
+display(weather_data.head())
+display(weather_data.describe(include='all').T.head(20))
+
+weather_columns = [col for col in weather_data.columns if any(token in col.lower() for token in ['temperature', 'humidity', 'solar', 'radiation'])][:4]
+fig, axes = plt.subplots(len(weather_columns), 1, figsize=(11, max(3, 2.2 * len(weather_columns))), sharex=True)
+if len(weather_columns) == 1:
+    axes = [axes]
+for ax, column in zip(axes, weather_columns):
+    ax.plot(weather_data[column].iloc[:168].values, linewidth=1.2)
+    ax.set_title(column)
+fig.tight_layout()
+plt.show()
+""")
+
+md("""
+### Preview Electricity Price Data
+
+El eje OE3 depende de costos y tarifas dinamicas. Esta serie se usa para evaluar si la politica desplaza consumo hacia horas economicamente favorables.
+""")
+
+code("""
+pricing_file = resolve_dataset_file(SCHEMA_PATH, schema, building_schema['pricing'])
+pricing_data = pd.read_csv(pricing_file)
+display(pricing_data.head())
+pricing_column = pricing_data.columns[0]
+
+fig, ax = plt.subplots(figsize=(11, 2.8))
+ax.plot(pricing_data[pricing_column].iloc[:168].values, color='tab:purple', linewidth=1.2)
+ax.set_title(f'Electricity price: {pricing_column}')
+ax.set_xlabel('hour')
+plt.show()
+""")
+
+md("""
+### Preview Carbon Intensity Data
+
+El eje OE2 usa intensidad de carbono para calcular emisiones y comparar control contra baseline. Si el dataset expone esta serie, CityLearn v2 calcula KPIs de carbono.
+""")
+
+code("""
+carbon_filename = building_schema.get('carbon_intensity')
+if carbon_filename:
+    carbon_file = resolve_dataset_file(SCHEMA_PATH, schema, carbon_filename)
+    carbon_data = pd.read_csv(carbon_file)
+    display(carbon_data.head())
+    carbon_column = carbon_data.columns[0]
+    fig, ax = plt.subplots(figsize=(11, 2.8))
+    ax.plot(carbon_data[carbon_column].iloc[:168].values, color='tab:green', linewidth=1.2)
+    ax.set_title(f'Carbon intensity: {carbon_column}')
+    ax.set_xlabel('hour')
+    plt.show()
+else:
+    print('This building does not define a carbon_intensity file.')
+""")
+
+md("""
+## Data Preprocessing
+
+Igual que el tutorial original, podemos modificar una copia del `schema` para seleccionar edificios, periodo de simulacion y observaciones. Para la tesis, el entrenamiento oficial usa los 17 edificios y el horizonte completo.
+""")
+
+code("""
+def set_schema_buildings(schema: Dict[str, object], count: int) -> Dict[str, object]:
+    output = json.loads(json.dumps(schema))
+    names = list(output.get('buildings', {}).keys())
+    selected = set(names[:count])
+    for name, payload in output.get('buildings', {}).items():
+        payload['include'] = name in selected
+    return output
+
+
+def set_schema_simulation_period(schema: Dict[str, object], start: int, end: int) -> Dict[str, object]:
+    output = json.loads(json.dumps(schema))
+    output['simulation_start_time_step'] = int(start)
+    output['simulation_end_time_step'] = int(end)
+    return output
+
+
+def active_observation_names(schema: Mapping[str, object]) -> List[str]:
+    observations = schema.get('observations', {})
+    return [name for name, payload in observations.items() if payload.get('active', False)]
+
+
+def active_action_names(schema: Mapping[str, object]) -> List[str]:
+    actions = schema.get('actions', {})
+    return [name for name, payload in actions.items() if payload.get('active', False)]
+
+print('Active observations:', active_observation_names(schema)[:25])
+print('Active actions:', active_action_names(schema))
+""")
+
+md("""
+### Setting your Random Seed
+
+La semilla controla inicializaciones, escenarios aleatorios y reproducibilidad. En experimentos formales se deben ejecutar varias semillas por algoritmo.
+""")
+
+code("""
+np.random.seed(RANDOM_SEED)
+print('RANDOM_SEED =', RANDOM_SEED)
+""")
+
+md("""
+### Setting the Buildings, Time Periods and Observations to use in Simulations from the Schema
+
+Para una ejecucion pedagogica se puede usar un periodo corto. Para resultados oficiales se usa todo el ano y todos los edificios.
+""")
+
+code("""
+tutorial_schema = set_schema_buildings(schema, count=17)
+tutorial_schema = set_schema_simulation_period(tutorial_schema, start=0, end=TUTORIAL_EPISODE_TIME_STEPS - 1)
+print('Tutorial buildings:', len(included_buildings(tutorial_schema)))
+print('Tutorial time steps:', tutorial_schema['simulation_start_time_step'], 'to', tutorial_schema['simulation_end_time_step'])
+print('Official time steps:', 0, 'to', OFFICIAL_EPISODE_TIME_STEPS - 1)
+""")
+
+md("""
+# Initialize a CityLearn v3 Dec-POMDP Environment
+
+La celda siguiente crea el entorno del proyecto. Internamente se usa `CityLearnEnv` de CityLearn v2, pero la interfaz externa es multiagente.
+""")
+
+code("""
+from citylearn.v3 import (
+    describe_environment,
+    evaluate_objectives,
+    make_citylearn_v3_project_env,
+    objective_manifest,
+)
+
+env = make_citylearn_v3_project_env(
+    scenario=SCENARIO,
+    seed=RANDOM_SEED,
+    episode_time_steps=TUTORIAL_EPISODE_TIME_STEPS,
+)
+
+description = describe_environment(env)
+display(pd.Series(description).to_frame('value'))
+""")
+
+md("""
+El objeto `env` conserva el simulador CityLearn v2 en `env.env`, y expone propiedades multiagente como `possible_agents`, `observation_space(agent)`, `action_space(agent)` y `state()`.
+""")
+
+code("""
+print('Number of agents:', env.num_agents)
+print('First agents:', env.possible_agents[:5])
+
+space_rows = []
+for agent in env.possible_agents:
+    space_rows.append({
+        'agent': agent,
+        'observation_dim': int(env.observation_space(agent).shape[0]),
+        'action_dim': int(env.action_space(agent).shape[0]),
+    })
+
+display(pd.DataFrame(space_rows))
+print('CTDE state dimension:', env.state_space.shape)
+""")
+
+md("""
+Ejecutamos unos pasos con acciones cero para confirmar la forma de observaciones, recompensas, terminaciones y estado global. Este no es entrenamiento: es una prueba funcional del Dec-POMDP.
+""")
+
+code("""
+observations, infos = env.reset(seed=RANDOM_SEED)
+print('Observation keys:', list(observations)[:5])
+print('Initial CTDE state shape:', env.state().shape)
+
+for step in range(3):
+    actions = {
+        agent: np.zeros(env.action_space(agent).shape, dtype=np.float32)
+        for agent in env.agents
+    }
+    observations, rewards, terminations, truncations, infos = env.step(actions)
+    print(f'step={step}', 'reward_mean=', np.mean(list(rewards.values())), 'active_agents=', len(env.agents))
+""")
+
+md("""
+# Key Performance Indicators for Evaluation
+
+CityLearn v2 produce KPIs de evaluacion. CityLearn v3 organiza esos KPIs en tres ejes de tesis. Esta separacion evita confundir metricas de simulacion con objetivos cientificos.
+""")
+
+code("""
+objective_info = objective_manifest()
+for axis, payload in objective_info['axes'].items():
+    print(axis, '-', payload['name'])
+    print(' ', payload['statement'])
+    print(' ', 'kpi_count =', len(payload['kpis']))
+""")
+
+code("""
+report = evaluate_objectives(env)
+print('KPI frame rows:', report.get('kpi_frame_rows'))
+display(pd.DataFrame([
+    {'kpi': name, 'value': value}
+    for name, value in report.get('axis_kpis', {}).items()
+]).head(30))
+""")
+
+md("""
+# Convenience Functions to Display Simulation Results
+
+El tutorial original define funciones de visualizacion para KPIs, perfiles de carga y baterias. Aqui definimos funciones equivalentes para los artefactos MADRL: resultados, series temporales, trazas por agente y figuras generadas.
+""")
+
+code("""
+def run_dir(output_root: Path, algorithm: str, scenario: str = SCENARIO, seed: int = RANDOM_SEED) -> Path:
+    return output_root / algorithm.lower() / f'{scenario}_seed_{seed}'
+
+
+def load_json(path: Path) -> Dict[str, object]:
+    return json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
+
+
+def load_run_results(path: Path) -> Dict[str, object]:
+    return load_json(path / 'data' / 'results.json') or load_json(path / 'results.json')
+
+
+def load_run_timeseries(path: Path) -> pd.DataFrame:
+    csv_path = path / 'data' / 'timeseries.csv'
+    if not csv_path.is_file():
+        csv_path = path / 'timeseries.csv'
+    return pd.read_csv(csv_path) if csv_path.is_file() else pd.DataFrame()
+
+
+def load_run_trace(path: Path) -> pd.DataFrame:
+    csv_path = path / 'data' / 'trace.csv'
+    if not csv_path.is_file():
+        csv_path = path / 'trace.csv'
+    return pd.read_csv(csv_path) if csv_path.is_file() else pd.DataFrame()
+
+
+def load_objective_kpis(path: Path) -> pd.DataFrame:
+    table_path = path / 'figures' / 'tables' / 'objective_kpis.csv'
+    return pd.read_csv(table_path) if table_path.is_file() else pd.DataFrame()
+""")
+
+code("""
+def plot_axis_kpis(results: Mapping[str, object], axis: str) -> plt.Figure:
+    report = results.get('citylearn_v3_report', results)
+    axis_payload = report.get('objective_axis_kpis', {}).get(axis, {})
+    rows = []
+    for name, payload in axis_payload.get('kpis', {}).items():
+        value = payload.get('value') if isinstance(payload, Mapping) else None
+        if value is not None:
+            rows.append({'kpi': name, 'value': value})
+    data = pd.DataFrame(rows)
+    fig, ax = plt.subplots(figsize=(10, max(3, 0.3 * len(data))))
+    if not data.empty:
+        ax.barh(data['kpi'], data['value'])
+        ax.set_title(f'{axis} KPI profile')
+        ax.set_xlabel('value')
+    return fig
+
+
+def plot_district_timeseries(timeseries: pd.DataFrame) -> plt.Figure:
+    columns = [
+        'district_net_electricity_consumption',
+        'district_net_electricity_consumption_without_storage',
+        'district_net_electricity_consumption_cost',
+        'district_net_electricity_consumption_emission',
+        'electricity_price_mean',
+        'carbon_intensity_mean',
+    ]
+    columns = [column for column in columns if column in timeseries.columns]
+    fig, axes = plt.subplots(len(columns), 1, figsize=(11, max(3, 2 * len(columns))), sharex=True)
+    if len(columns) == 1:
+        axes = [axes]
+    for ax, column in zip(axes, columns):
+        ax.plot(timeseries['global_step'], timeseries[column], linewidth=1.1)
+        ax.set_title(column)
+    axes[-1].set_xlabel('global_step')
+    fig.tight_layout()
+    return fig
+
+
+def display_generated_figures(path: Path, names: Optional[Sequence[str]] = None) -> None:
+    manifest_path = path / 'figures' / 'figures_manifest.json'
+    manifest = load_json(manifest_path)
+    figures = manifest.get('figures', [])
+    if names is not None:
+        figures = [item for item in figures if item.get('name') in set(names)]
+    for item in figures:
+        display(Markdown(f"### {item.get('name')}"))
+        display(Image(filename=item['path']))
+""")
+
+md("""
+# Build your Baseline Validation
+
+Para comparacion formal, CityLearn v2 calcula KPIs contra una linea base. En CityLearn v3 no se redefine esa linea base; se reutilizan los valores `baseline`, `control`, `delta` y ratios que provienen de `evaluate_v2`.
+""")
+
+code("""
+VALIDATE_OBJECTIVES = False
+VALIDATION_OUTPUT = PROJECT_ROOT / 'outputs' / 'citylearn_v3_objective_validation_notebook'
+
+if VALIDATE_OBJECTIVES:
+    command = [
+        sys.executable,
+        '-B',
+        str(SCRIPTS_DIR / 'validate_citylearn_v3_objectives.py'),
+        '--scenario', SCENARIO,
+        '--seed', str(RANDOM_SEED),
+        '--episode-time-steps', str(TUTORIAL_EPISODE_TIME_STEPS),
+        '--include-citylearn-v2-test-agents',
+        '--output-dir', str(VALIDATION_OUTPUT),
+    ]
+    print('Running:', ' '.join(map(str, command)))
+    subprocess.run(command, check=True, cwd=PROJECT_ROOT)
+else:
+    print('Set VALIDATE_OBJECTIVES=True to run the validation script.')
+""")
+
+md("""
+# An Introduction to MADRL Algorithms as Adaptive Controllers
+
+En lugar de construir un RBC interactivo o un agente Q-learning tabular, este proyecto usa cuatro algoritmos MADRL profundos respaldados por repositorios oficiales. Antes de entrenar, revisamos el manifiesto de backends.
+""")
+
+code("""
+from citylearn.v3.backends import citylearn_v3_backend_manifest
+
+backend_manifest = citylearn_v3_backend_manifest()
+print('Version layer:', backend_manifest['version_layer'])
+print('Simulator:', backend_manifest['simulator'])
+display(pd.DataFrame.from_dict(backend_manifest['backends'], orient='index'))
+""")
+
+md("""
+## Dec-POMDP and CTDE Contract
+
+Cada algoritmo debe cumplir el mismo contrato experimental aunque sus redes internas sean distintas. La comparacion entre algoritmos solo es defendible si el entorno, dataset, horizonte, semillas y KPIs permanecen constantes.
+""")
+
+code("""
+ctde_contract = pd.DataFrame([
+    {
+        'algorithm': 'HAPPO',
+        'centralized_training': 'HARL centralized critic/share_observation_space',
+        'decentralized_execution': 'local actor per building',
+        'action_type': 'continuous',
+    },
+    {
+        'algorithm': 'MASAC',
+        'centralized_training': 'SMAC-style global state get_state()',
+        'decentralized_execution': 'local discrete policy mapped to CityLearn action',
+        'action_type': 'discretized continuous action table',
+    },
+    {
+        'algorithm': 'MATD3',
+        'centralized_training': 'joint observations/actions in centralized critic',
+        'decentralized_execution': 'local continuous actor per building',
+        'action_type': 'continuous',
+    },
+    {
+        'algorithm': 'MAAC',
+        'centralized_training': 'attention critic over agents',
+        'decentralized_execution': 'local discrete policy mapped to CityLearn action',
+        'action_type': 'discretized continuous action table',
+    },
+])
+display(ctde_contract)
+""")
+
+md("""
+# Optimize MADRL Controllers
+
+Los entrenamientos se ejecutan con scripts separados por algoritmo. Todos escriben la misma estructura de artefactos:
+
+```text
+outputs/<experimento>/<madrl>/<escenario>_seed_<seed>/
+  data/
+  checkpoints/
+  figures/
+```
+
+Por seguridad, las celdas de entrenamiento no se ejecutan automaticamente.
+""")
+
+code("""
+def train_command(algorithm: str, output_root: Path, episode_time_steps: int, episodes: int, cuda: bool = True) -> List[str]:
+    script = SCRIPTS_DIR / f'train_citylearn_v3_{algorithm}.py'
+    num_env_steps = episode_time_steps * episodes
+    command = [
+        sys.executable,
+        '-B',
+        str(script),
+        '--scenario', SCENARIO,
+        '--seed', str(RANDOM_SEED),
+        '--episode-time-steps', str(episode_time_steps),
+        '--episodes', str(episodes),
+        '--output-dir', str(output_root / algorithm),
+    ]
+    if algorithm in {'happo', 'matd3'}:
+        command.extend(['--num-env-steps', str(num_env_steps)])
+    if cuda:
+        command.append('--cuda')
+    return command
+
+
+SMOKE_OUTPUT = PROJECT_ROOT / 'outputs' / 'citylearn_v3_notebook_smoke'
+for algorithm in ALGORITHMS:
+    print(algorithm.upper())
+    print(' '.join(map(str, train_command(algorithm, SMOKE_OUTPUT, episode_time_steps=4, episodes=1))))
+""")
+
+md("""
+## Train
+
+Esta celda ejecuta entrenamientos minimos. Usala para validar que los cuatro backends arrancan, no para obtener resultados cientificos.
+""")
+
+code("""
+RUN_SMOKE_TRAINING = False
+
+if RUN_SMOKE_TRAINING:
+    for algorithm in ALGORITHMS:
+        command = train_command(algorithm, SMOKE_OUTPUT, episode_time_steps=4, episodes=1, cuda=True)
+        print('Running', algorithm.upper())
+        subprocess.run(command, check=True, cwd=PROJECT_ROOT)
+else:
+    print('Set RUN_SMOKE_TRAINING=True to train a tiny run for all algorithms.')
+""")
+
+md("""
+## Official Full Training
+
+El entrenamiento oficial usa 17 edificios + EV, escenario `E3`, 8760 pasos por episodio y 5 episodios por algoritmo. El lanzador ejecuta los cuatro algoritmos de forma secuencial para reducir conflicto de memoria GPU.
+""")
+
+code("""
+OFFICIAL_OUTPUT = PROJECT_ROOT / 'outputs' / 'citylearn_v3_madrl_official_full_cuda_v2'
+OFFICIAL_COMMAND = [
+    'powershell.exe',
+    '-NoProfile',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', str(SCRIPTS_DIR / 'launch_citylearn_v3_official_training.ps1'),
+    '-Scenario', SCENARIO,
+    '-Seed', str(RANDOM_SEED),
+    '-EpisodeTimeSteps', str(OFFICIAL_EPISODE_TIME_STEPS),
+    '-Episodes', '5',
+    '-OutputRoot', str(OFFICIAL_OUTPUT),
+    '-TorchThreads', '8',
+    '-Cuda',
+]
+print(' '.join(map(str, OFFICIAL_COMMAND)))
+""")
+
+code("""
+RUN_OFFICIAL_TRAINING = False
+
+if RUN_OFFICIAL_TRAINING:
+    subprocess.Popen(OFFICIAL_COMMAND, cwd=PROJECT_ROOT)
+    print('Official training launched in background.')
+else:
+    print('Set RUN_OFFICIAL_TRAINING=True only when you intend to launch the long official run.')
+""")
+
+md("""
+# Evaluate the Episode Rewards for MADRL Algorithms
+
+Las recompensas no sustituyen los KPIs. Sirven para diagnosticar aprendizaje, convergencia, exploracion y estabilidad. Una politica con recompensa creciente aun puede fallar en CO2 o costo si la recompensa no captura bien esos objetivos.
+""")
+
+code("""
+def available_run_dirs(output_root: Path) -> Dict[str, Path]:
+    return {
+        algorithm: run_dir(output_root, algorithm)
+        for algorithm in ALGORITHMS
+        if run_dir(output_root, algorithm).exists()
+    }
+
+
+runs = available_run_dirs(OFFICIAL_OUTPUT)
+print('Available runs:')
+for algorithm, path in runs.items():
+    print(algorithm, '->', path)
+""")
+
+code("""
+reward_rows = []
+for algorithm, path in runs.items():
+    timeseries = load_run_timeseries(path)
+    if timeseries.empty or 'reward_sum' not in timeseries.columns:
+        continue
+    grouped = timeseries.groupby('episode', as_index=False).agg(
+        reward_total=('reward_sum', 'sum'),
+        reward_mean=('reward_mean', 'mean'),
+        steps=('global_step', 'count'),
+    )
+    grouped['algorithm'] = algorithm.upper()
+    reward_rows.append(grouped)
+
+if reward_rows:
+    reward_table = pd.concat(reward_rows, ignore_index=True)
+    display(reward_table)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    for algorithm, group in reward_table.groupby('algorithm'):
+        ax.plot(group['episode'], group['reward_total'], marker='o', label=algorithm)
+    ax.set_title('Episode returns by MADRL algorithm')
+    ax.set_xlabel('episode')
+    ax.set_ylabel('reward_total')
+    ax.legend()
+    plt.show()
+else:
+    print('No reward tables available yet.')
+""")
+
+md("""
+# Analyze Training Artifacts
+
+Cada MADRL produce `data/results.json`, `data/timeseries.csv`, `data/trace.csv`, `data/checkpoint_manifest.json` y una carpeta `figures/` con graficas y tablas.
+""")
+
+code("""
+REGENERATE_FIGURES = False
+
+if REGENERATE_FIGURES:
+    for algorithm, path in runs.items():
+        command = [sys.executable, '-B', str(SCRIPTS_DIR / 'regenerate_citylearn_v3_figures.py'), str(path)]
+        print('Regenerating figures for', algorithm.upper())
+        subprocess.run(command, check=True, cwd=PROJECT_ROOT)
+else:
+    print('Set REGENERATE_FIGURES=True to rebuild figures/tables from saved CSV/JSON artifacts.')
+""")
+
+md("""
+Las figuras obligatorias cubren rendimiento, eficiencia, convergencia, comparacion con baseline, evolucion de entrenamiento, exploracion, aprendizaje, recompensas, returns, ganancias y perfiles por eje.
+""")
+
+code("""
+if runs:
+    first_algorithm, first_path = next(iter(runs.items()))
+    print('Showing figures for:', first_algorithm.upper())
+    display_generated_figures(first_path, names=[
+        'reward_timeseries.png',
+        'convergence_returns.png',
+        'learning_efficiency.png',
+        'citylearn_v2_district_timeseries.png',
+        'exploration_action_l2.png',
+        'baseline_gain_by_kpi.png',
+    ])
+else:
+    print('No run directories found yet. Train or point OFFICIAL_OUTPUT to an existing run root.')
+""")
+
+md("""
+# Compare MADRL Algorithms Against Baseline
+
+La comparacion debe hacerse por eje. No se recomienda mezclar todos los KPIs en un unico numero sin explicar pesos y normalizacion. Primero miramos KPIs por algoritmo; despues se puede aplicar TOPSIS o ranking ponderado.
+""")
+
+code("""
+all_kpi_tables = []
+for algorithm, path in runs.items():
+    table = load_objective_kpis(path)
+    if not table.empty:
+        table['algorithm'] = algorithm.upper()
+        all_kpi_tables.append(table)
+
+if all_kpi_tables:
+    kpi_comparison = pd.concat(all_kpi_tables, ignore_index=True)
+    display(kpi_comparison.head(20))
+else:
+    kpi_comparison = pd.DataFrame()
+    print('No objective_kpis.csv tables available yet.')
+""")
+
+code("""
+def plot_algorithm_kpi_comparison(kpi_table: pd.DataFrame, axis: str, kpis: Sequence[str]) -> Optional[plt.Figure]:
+    if kpi_table.empty:
+        return None
+    subset = kpi_table[(kpi_table['axis'] == axis) & (kpi_table['kpi'].isin(kpis))].copy()
+    if subset.empty:
+        return None
+    pivot = subset.pivot_table(index='kpi', columns='algorithm', values='value', aggfunc='first')
+    fig, ax = plt.subplots(figsize=(10, max(3, 0.5 * len(pivot))))
+    pivot.plot(kind='barh', ax=ax)
+    ax.set_title(f'{axis} algorithm KPI comparison')
+    ax.set_xlabel('value')
+    fig.tight_layout()
+    return fig
+
+if not kpi_comparison.empty:
+    plot_algorithm_kpi_comparison(kpi_comparison, 'OE1', ['peak_average', 'ramping_average', 'one_minus_load_factor_average'])
+    plt.show()
+    plot_algorithm_kpi_comparison(kpi_comparison, 'OE2', ['carbon_emissions', 'carbon_emissions_delta'])
+    plt.show()
+    plot_algorithm_kpi_comparison(kpi_comparison, 'OE3', ['electricity_cost', 'electricity_cost_delta', 'price_signal_deviation'])
+    plt.show()
+""")
+
+md("""
+# Tune your MADRL Experiment
+
+Como en el tutorial original se ajusta SAC, aqui se ajusta la configuracion experimental MADRL: horizonte de entrenamiento, semillas, escenario E1/E2/E3, pesos multiobjetivo, arquitectura, frecuencia de actualizacion, tamano de buffer, tasas de aprendizaje, discretizacion de acciones, cabezas de atencion y retardo de politica.
+""")
+
+code("""
+from citylearn.v3.config import CityLearnV3ExperimentConfig
+
+config = CityLearnV3ExperimentConfig()
+print('Algorithms:', config.algorithms)
+print('Scenarios:', config.scenarios)
+print('Seeds:', config.seeds)
+print('Episode time steps:', config.episode_time_steps)
+display(pd.Series(config.hyperparameters).to_frame('value'))
+""")
+
+md("""
+## Set Environment, Agent and Reward Function
+
+Para resultados de tesis no basta una corrida. Una matriz minima defendible usa los cuatro algoritmos, tres escenarios, varias semillas, mismo dataset, mismo horizonte, mismos KPIs y comparacion contra baseline CityLearn v2.
+""")
+
+code("""
+experiment_matrix = pd.MultiIndex.from_product(
+    [config.algorithms, config.scenarios, config.seeds[:3]],
+    names=['algorithm', 'scenario', 'seed'],
+).to_frame(index=False)
+print('Example experiment count with first 3 seeds:', len(experiment_matrix))
+display(experiment_matrix.head(20))
+""")
+
+md("""
+## Submit
+
+En lugar de una celda de envio a leaderboard, este proyecto usa trazabilidad local/GitHub: codigo, `backends.lock.json`, `official_full_manifest.json`, `official_full_status.json`, checkpoints, JSON/CSV/PNG/MD por corrida.
+""")
+
+code("""
+status_path = OFFICIAL_OUTPUT / 'official_full_status.json'
+manifest_path = OFFICIAL_OUTPUT / 'official_full_manifest.json'
+
+if status_path.is_file():
+    status = load_json(status_path)
+    display(pd.Series({
+        'status': status.get('status'),
+        'dataset': status.get('dataset'),
+        'scenario': status.get('scenario'),
+        'episodes': status.get('episodes'),
+        'episode_time_steps': status.get('episode_time_steps'),
+        'torch': status.get('torch'),
+        'cuda': status.get('cuda'),
+        'output_root': status.get('output_root'),
+    }).to_frame('value'))
+else:
+    print('No official status file found at', status_path)
+""")
+
+md("""
+# Next Steps
+
+1. Esperar a que termine el entrenamiento oficial secuencial.
+2. Regenerar figuras si alguna corrida fue creada antes del contrato ampliado.
+3. Consolidar `objective_kpis.csv` de HAPPO, MASAC, MATD3 y MAAC.
+4. Crear tablas comparativas por OE1/OE2/OE3.
+5. Aplicar ranking TOPSIS o ponderado con pesos justificados.
+6. Revisar estabilidad por semilla y no solo una corrida.
+7. Reportar limitaciones: costo computacional, discretizacion de algunos backends y dependencia de calidad de recompensa.
+""")
+
+md("""
+## Other Ideas
+
+- Ejecutar E1, E2 y E3 por separado para observar especializacion de politicas.
+- Comparar `team_mean`, `team_sum`, `individual` y recompensa mixta.
+- Incorporar analisis de equidad entre edificios.
+- Evaluar sensibilidad a EV penetration y disponibilidad PV.
+- Generar curvas de Pareto entre flexibilidad, CO2 y costo.
+- Usar MARLlib para experimentos adicionales con el mismo adaptador `citylearn_v3`.
+""")
+
+
+notebook = {
+    "cells": cells,
+    "metadata": {
+        "colab": {"provenance": []},
+        "kernelspec": {"display_name": "Python 3", "name": "python3"},
+        "language_info": {
+            "codemirror_mode": {"name": "ipython", "version": 3},
+            "file_extension": ".py",
+            "mimetype": "text/x-python",
+            "name": "python",
+            "nbconvert_exporter": "python",
+            "pygments_lexer": "ipython3",
+            "version": "3.9",
+        },
+    },
+    "nbformat": 4,
+    "nbformat_minor": 5,
+}
+
+NOTEBOOK_PATH.write_text(json.dumps(notebook, ensure_ascii=False, indent=1), encoding="utf-8")
+print(NOTEBOOK_PATH)
+print("cells", len(cells))
