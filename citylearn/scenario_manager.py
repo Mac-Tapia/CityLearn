@@ -5,6 +5,9 @@ Implements the current 3-axis thesis setup:
 - E1: Energy flexibility
 - E2: Carbon emissions reduction
 - E3: Economic cost optimization with integrated flexibility and carbon context
+
+The previous resilience/demand-response wording is retained only in legacy
+fields for compatibility; the active thesis axes are flexibility, CO2 and cost.
 """
 
 import numpy as np
@@ -50,7 +53,7 @@ class ScenarioManager:
     # E1: Flexibility Focus
     E1_CONFIG = ScenarioConfig(
         name="E1",
-        description="Flexibility Scenario - RTP tariff, no outages, normal operation",
+        description="Flexibility Scenario - load shifting, storage, EV flexibility and PV self-consumption",
         use_time_of_use=False,
         use_real_time_pricing=True,
         tariff_multiplier=1.0,
@@ -61,43 +64,43 @@ class ScenarioManager:
         enable_dr_signals=False,
         dr_signal_threshold=0.8,
         dr_response_required=False,
-        reward_weights={"flex": 0.6, "carbon": 0.2, "cost": 0.2},
+        reward_weights={"flex": 0.70, "carbon": 0.15, "cost": 0.15},
         primary_kpi="peak_average"
     )
     
     # E2: Carbon Emissions Focus
     E2_CONFIG = ScenarioConfig(
         name="E2",
-        description="Carbon Emissions Scenario - carbon-aware operation with scheduled/random outages",
+        description="Carbon Emissions Scenario - carbon-aware operation without legacy resilience reward",
         use_time_of_use=False,
         use_real_time_pricing=False,
         tariff_multiplier=1.0,
-        enable_outages=True,
-        outage_frequency=52,  # ~1 per week
+        enable_outages=False,
+        outage_frequency=0,
         outage_duration_min=2,
         outage_duration_max=8,
         enable_dr_signals=False,
         dr_signal_threshold=0.8,
         dr_response_required=False,
-        reward_weights={"flex": 0.2, "carbon": 0.6, "cost": 0.2},
+        reward_weights={"flex": 0.15, "carbon": 0.70, "cost": 0.15},
         primary_kpi="carbon_emissions_total"
     )
     
     # E3: Economic Cost Focus
     E3_CONFIG = ScenarioConfig(
         name="E3",
-        description="Cost Scenario - RTP pricing with integrated flexibility and carbon objectives",
+        description="Cost Scenario - RTP pricing, peak reduction and dynamic-tariff optimization",
         use_time_of_use=False,
         use_real_time_pricing=True,
         tariff_multiplier=1.2,
-        enable_outages=True,
-        outage_frequency=52,
+        enable_outages=False,
+        outage_frequency=0,
         outage_duration_min=2,
         outage_duration_max=8,
         enable_dr_signals=False,
         dr_signal_threshold=0.75,
         dr_response_required=False,
-        reward_weights={"flex": 1/3, "carbon": 1/3, "cost": 1/3},
+        reward_weights={"flex": 0.25, "carbon": 0.15, "cost": 0.60},
         primary_kpi="electricity_cost_total"
     )
     

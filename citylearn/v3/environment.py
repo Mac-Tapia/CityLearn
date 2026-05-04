@@ -21,12 +21,24 @@ def make_citylearn_v3_env(
     seed: Optional[int] = None,
     episode_time_steps: Optional[int] = None,
     reward_aggregation: Optional[str] = None,
+    madrl_algorithm: Optional[str] = None,
+    use_citylearn_v3_reward: bool = True,
     **citylearn_kwargs,
 ) -> CityLearnDecPOMDPEnv:
     """Build a CityLearn v3 Dec-POMDP for any CityLearn v2 schema."""
 
     config = CityLearnV3ExperimentConfig() if config is None else config
     merged_citylearn_kwargs = {**config.citylearn_kwargs, **citylearn_kwargs}
+
+    if use_citylearn_v3_reward:
+        reward_kwargs = dict(merged_citylearn_kwargs.get("reward_function_kwargs") or {})
+        reward_kwargs.setdefault("algorithm", madrl_algorithm or "MADRL")
+        reward_kwargs.setdefault("scenario", scenario or "E1")
+        merged_citylearn_kwargs.setdefault(
+            "reward_function",
+            "citylearn.reward_function.CityLearnV3MADRLRewardFunction",
+        )
+        merged_citylearn_kwargs["reward_function_kwargs"] = reward_kwargs
 
     return make_citylearn_dec_pomdp(
         schema_path or config.schema_path,
@@ -46,6 +58,8 @@ def make_citylearn_v3_project_env(
     seed: Optional[int] = None,
     episode_time_steps: Optional[int] = None,
     reward_aggregation: Optional[str] = None,
+    madrl_algorithm: Optional[str] = None,
+    use_citylearn_v3_reward: bool = True,
 ) -> CityLearnDecPOMDPEnv:
     """Build this project's default 17-building + EV CityLearn v3 environment."""
 
@@ -58,6 +72,8 @@ def make_citylearn_v3_project_env(
         seed=seed,
         episode_time_steps=episode_time_steps,
         reward_aggregation=reward_aggregation,
+        madrl_algorithm=madrl_algorithm,
+        use_citylearn_v3_reward=use_citylearn_v3_reward,
     )
 
 
@@ -93,5 +109,7 @@ def describe_environment(env: CityLearnDecPOMDPEnv) -> Dict[str, object]:
         "has_ev_observations": any("electric_vehicle" in name for name in observation_names),
         "supports_all_citylearn_v2_kpis": hasattr(env.env.unwrapped, "evaluate_v2"),
         "reward_aggregation": env.reward_aggregation,
+        "reward_function": env.env.reward_function.__class__.__name__,
+        "reward_metadata": getattr(env.env.reward_function, "metadata", {}),
         "scenario": env.scenario,
     }

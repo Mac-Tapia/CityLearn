@@ -187,6 +187,9 @@ function Show-TrainingProgress {
 
         Write-Host "Progreso vivo:" -ForegroundColor DarkCyan
         Write-Host ("  global_step={0} episode={1} episode_step={2} time_step={3}" -f $liveProgress.global_step, $liveProgress.episode, $liveProgress.episode_step, $liveProgress.time_step)
+        if ($liveProgress.reward_function) {
+            Write-Host ("  reward_function={0} profile={1} axis_weights={2}" -f $liveProgress.reward_function, $liveProgress.reward_profile, ($liveProgress.reward_axis_weights | ConvertTo-Json -Compress))
+        }
         Write-Host ("  instant_reward_sum={0} instant_reward_mean={1}" -f $instantRewardSum, $instantRewardMean)
         if ($null -ne $liveProgress.episode_return_cumulative) {
             Write-Host ("  episode_return_cumulative={0} episode_reward_mean_cumulative={1} episode_steps={2}" -f $liveProgress.episode_return_cumulative, $liveProgress.episode_reward_mean_cumulative, $liveProgress.episode_steps_recorded)

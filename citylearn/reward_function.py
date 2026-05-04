@@ -521,3 +521,260 @@ class Electric_Vehicles_Reward_Function(MARL):
             penalty_total += sum(contributions.values())
 
         return penalty_total
+
+
+CITYLEARN_V3_AXIS_REWARD_WEIGHTS = {
+    "E1": {"flex": 0.70, "carbon": 0.15, "cost": 0.15},
+    "E2": {"flex": 0.15, "carbon": 0.70, "cost": 0.15},
+    "E3": {"flex": 0.25, "carbon": 0.15, "cost": 0.60},
+}
+
+
+CITYLEARN_V3_MADRL_REWARD_PROFILES = {
+    "HAPPO": {
+        "profile_name": "happo_on_policy_cooperative_ctde",
+        "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
+        "team_reward_ratio": 0.75,
+        "ev_weight": 0.15,
+        "reward_scale": 1.00,
+        "ramp_weight": 0.35,
+        "peak_weight": 0.45,
+    },
+    "MASAC": {
+        "profile_name": "masac_entropy_regularized_dense_local_signal",
+        "axis_weight_multipliers": {"flex": 0.95, "carbon": 1.00, "cost": 1.05},
+        "team_reward_ratio": 0.55,
+        "ev_weight": 0.12,
+        "reward_scale": 0.80,
+        "ramp_weight": 0.30,
+        "peak_weight": 0.40,
+    },
+    "MATD3": {
+        "profile_name": "matd3_deterministic_peak_ramp_control",
+        "axis_weight_multipliers": {"flex": 1.15, "carbon": 0.95, "cost": 1.10},
+        "team_reward_ratio": 0.65,
+        "ev_weight": 0.10,
+        "reward_scale": 1.10,
+        "ramp_weight": 0.45,
+        "peak_weight": 0.50,
+    },
+    "MAAC": {
+        "profile_name": "maac_attention_coordinated_multiagent",
+        "axis_weight_multipliers": {"flex": 1.05, "carbon": 1.05, "cost": 1.00},
+        "team_reward_ratio": 0.80,
+        "ev_weight": 0.16,
+        "reward_scale": 1.00,
+        "ramp_weight": 0.38,
+        "peak_weight": 0.42,
+    },
+    "MADRL": {
+        "profile_name": "generic_citylearn_v3_madrl",
+        "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
+        "team_reward_ratio": 0.70,
+        "ev_weight": 0.12,
+        "reward_scale": 1.00,
+        "ramp_weight": 0.35,
+        "peak_weight": 0.45,
+    },
+}
+
+
+class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
+    """CityLearn v3 thesis reward for MADRL training.
+
+    The original CityLearn v2 schema keeps the EV-aware MARL reward for
+    backward compatibility. This reward is used only by the v3 MADRL adapters
+    and exposes explicit axis weights for the thesis objectives plus a separate
+    profile for each MADRL backend.
+    """
+
+    def __init__(
+        self,
+        env_metadata: Mapping[str, Any],
+        algorithm: str = None,
+        scenario: str = None,
+        axis_weights: Mapping[str, float] = None,
+        profile: Mapping[str, Any] = None,
+        ev_weights: Mapping[str, float] = None,
+        price_reference: float = 0.20,
+        carbon_reference: float = 0.35,
+    ):
+        super().__init__(env_metadata, weights=ev_weights)
+        self.algorithm = str(algorithm or "MADRL").upper()
+        self.scenario = str(scenario or "E1").upper()
+        self.price_reference = float(price_reference)
+        self.carbon_reference = float(carbon_reference)
+        self.profile = self._build_profile(profile)
+        self.axis_weights = self._build_axis_weights(axis_weights)
+        self._last_district_import = None
+        self._last_component_breakdown = {}
+
+    def reset(self):
+        self._last_district_import = None
+        self._last_component_breakdown = {}
+
+    @property
+    def metadata(self) -> Mapping[str, Any]:
+        return {
+            "function": self.__class__.__name__,
+            "algorithm": self.algorithm,
+            "scenario": self.scenario,
+            "axis_weights": dict(self.axis_weights),
+            "profile": dict(self.profile),
+            "base_reward": "CityLearnV3MADRLRewardFunction",
+            "not_using_marl_base_weights": True,
+        }
+
+    def _build_profile(self, profile: Mapping[str, Any] = None) -> Mapping[str, Any]:
+        base = dict(
+            CITYLEARN_V3_MADRL_REWARD_PROFILES.get(
+                self.algorithm,
+                CITYLEARN_V3_MADRL_REWARD_PROFILES["MADRL"],
+            )
+        )
+        base["axis_weight_multipliers"] = dict(base.get("axis_weight_multipliers", {}))
+
+        if profile:
+            for key, value in profile.items():
+                if key == "axis_weight_multipliers":
+                    merged = dict(base.get("axis_weight_multipliers", {}))
+                    merged.update(dict(value))
+                    base[key] = merged
+                else:
+                    base[key] = value
+
+        return base
+
+    def _build_axis_weights(self, axis_weights: Mapping[str, float] = None) -> Mapping[str, float]:
+        raw_weights = dict(
+            axis_weights
+            or CITYLEARN_V3_AXIS_REWARD_WEIGHTS.get(
+                self.scenario,
+                {"flex": 1.0 / 3.0, "carbon": 1.0 / 3.0, "cost": 1.0 / 3.0},
+            )
+        )
+        multipliers = dict(self.profile.get("axis_weight_multipliers", {}))
+        weighted = {
+            key: max(0.0, float(raw_weights.get(key, 0.0)) * float(multipliers.get(key, 1.0)))
+            for key in ("flex", "carbon", "cost")
+        }
+        total = sum(weighted.values())
+
+        if total <= ZERO_DIVISION_PLACEHOLDER:
+            return {"flex": 1.0 / 3.0, "carbon": 1.0 / 3.0, "cost": 1.0 / 3.0}
+
+        return {key: value / total for key, value in weighted.items()}
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            output = float(value)
+        except (TypeError, ValueError):
+            return default
+
+        return output if np.isfinite(output) else default
+
+    @staticmethod
+    def _soft(value: float, scale: float) -> float:
+        scale = max(float(scale), ZERO_DIVISION_PLACEHOLDER)
+        return float(np.tanh(max(float(value), 0.0) / scale))
+
+    @staticmethod
+    def _mean_soc(observation: Mapping[str, Union[int, float, dict]], names: Tuple[str, ...]) -> float:
+        values = []
+
+        for name in names:
+            value = CityLearnV3MADRLRewardFunction._safe_float(observation.get(name), default=np.nan)
+
+            if np.isfinite(value):
+                values.append(np.clip(value, 0.0, 1.0))
+
+        return 0.0 if not values else float(np.mean(values))
+
+    def _ev_term(self, observation: Mapping[str, Union[int, float, dict]]) -> float:
+        if not observation.get("electric_vehicles_chargers_dict", {}):
+            return 0.0
+
+        violation = self._safe_float(observation.get("charging_constraint_violation_kwh"), 0.0)
+        ev_reward = self.calculate_ev_penalty(observation, current_reward=0.0)
+        ev_reward -= max(0.0, violation) * self.charging_constraint_penalty_coefficient
+        return float(ev_reward)
+
+    def calculate(self, observations: List[Mapping[str, Union[int, float, dict]]]) -> List[float]:
+        net_values = [self._safe_float(o.get("net_electricity_consumption")) for o in observations]
+        imports = [max(value, 0.0) for value in net_values]
+        exports = [max(-value, 0.0) for value in net_values]
+        district_import = float(np.sum(imports))
+        district_ramp = 0.0 if self._last_district_import is None else abs(district_import - self._last_district_import)
+        self._last_district_import = district_import
+        n_buildings = max(len(observations), 1)
+        ramp_share = district_ramp / n_buildings
+        peak_share = district_import / n_buildings
+
+        peak_weight = float(self.profile.get("peak_weight", 0.45))
+        ramp_weight = float(self.profile.get("ramp_weight", 0.35))
+        ev_weight = float(self.profile.get("ev_weight", 0.12))
+        reward_scale = float(self.profile.get("reward_scale", 1.0))
+        team_reward_ratio = float(np.clip(self.profile.get("team_reward_ratio", 0.70), 0.0, 1.0))
+        individual_ratio = 1.0 - team_reward_ratio
+        rewards = []
+        components = []
+
+        for observation, net_value, import_value, export_value in zip(observations, net_values, imports, exports):
+            price = max(self._safe_float(observation.get("electricity_pricing")), 0.0)
+            carbon = max(self._safe_float(observation.get("carbon_intensity")), 0.0)
+            price_norm = price / (price + self.price_reference) if price > 0.0 else 0.0
+            carbon_norm = carbon / (carbon + self.carbon_reference) if carbon > 0.0 else 0.0
+            storage_soc = self._mean_soc(
+                observation,
+                ("electrical_storage_soc", "cooling_storage_soc", "heating_storage_soc", "dhw_storage_soc"),
+            )
+            storage_headroom = max(0.0, 1.0 - storage_soc)
+
+            flex_penalty = (
+                peak_weight * self._soft(peak_share, 25.0)
+                + ramp_weight * self._soft(ramp_share, 15.0)
+                + 0.15 * self._soft(export_value * (1.0 + storage_headroom), 20.0)
+                + 0.10 * self._soft(import_value * storage_soc, 20.0)
+            )
+            carbon_penalty = self._soft(import_value * (0.25 + carbon_norm), 20.0)
+            carbon_credit = 0.05 * self._soft(export_value * carbon_norm, 20.0)
+            cost_penalty = self._soft(import_value * (0.25 + price_norm), 20.0)
+            cost_credit = 0.08 * self._soft(export_value * price_norm, 20.0)
+            flex_component = -flex_penalty
+            carbon_component = -carbon_penalty + carbon_credit
+            cost_component = -cost_penalty + cost_credit
+            ev_component = ev_weight * self._ev_term(observation)
+
+            scalar_reward = reward_scale * (
+                self.axis_weights["flex"] * flex_component
+                + self.axis_weights["carbon"] * carbon_component
+                + self.axis_weights["cost"] * cost_component
+                + ev_component
+            )
+            rewards.append(float(scalar_reward))
+            components.append({
+                "net": net_value,
+                "flex": flex_component,
+                "carbon": carbon_component,
+                "cost": cost_component,
+                "ev": ev_component,
+            })
+
+        team_reward = float(np.mean(rewards)) if rewards else 0.0
+        mixed_rewards = [individual_ratio * value + team_reward_ratio * team_reward for value in rewards]
+        self._last_component_breakdown = {
+            "algorithm": self.algorithm,
+            "scenario": self.scenario,
+            "axis_weights": dict(self.axis_weights),
+            "profile_name": self.profile.get("profile_name"),
+            "district_import": district_import,
+            "district_ramp": district_ramp,
+            "team_reward": team_reward,
+            "components": components,
+        }
+
+        if self.central_agent:
+            return [float(np.sum(mixed_rewards))]
+
+        return [float(value) for value in mixed_rewards]

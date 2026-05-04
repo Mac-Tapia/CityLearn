@@ -61,6 +61,7 @@ def main() -> int:
         scenario=args.scenario,
         seed=args.seed,
         episode_time_steps=args.episode_time_steps,
+        algorithm="MATD3",
         live_progress_path=str(output_dir / "live_progress.json"),
         live_progress_interval=100,
     )
@@ -69,6 +70,7 @@ def main() -> int:
         scenario=args.scenario,
         seed=args.seed + 10000,
         episode_time_steps=args.episode_time_steps,
+        algorithm="MATD3",
     )
 
     parser = get_config()
@@ -147,6 +149,9 @@ def main() -> int:
         "checkpoint_interval_steps": all_args.save_interval,
         "cuda": all_args.cuda,
         "ctde_share_observation": "padded_joint_observation",
+        "reward_function": "CityLearnV3MADRLRewardFunction",
+        "reward_profile": "MATD3",
+        "reward_metadata": env.adapter.reward_metadata,
     }
 
     try:
@@ -188,6 +193,7 @@ def main() -> int:
             "output_dir": str(output_dir),
             "artifact_layout": artifacts.get("artifact_layout", {}),
             "hyperparameters": hyperparameters,
+            "reward_metadata": env.adapter.reward_metadata,
             "artifacts": artifacts,
             "project_axis_metrics": report["project_axis_metrics"],
             "citylearn_v3_report": report,

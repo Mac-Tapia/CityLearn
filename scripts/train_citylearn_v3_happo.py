@@ -59,6 +59,7 @@ def main() -> int:
                     scenario=args.scenario,
                     seed=args.seed + rank * 1000,
                     episode_time_steps=args.episode_time_steps,
+                    algorithm="HAPPO",
                     live_progress_path=str(output_dir / "live_progress.json"),
                     live_progress_interval=100,
                 )
@@ -89,6 +90,10 @@ def main() -> int:
 
     runner_args = {"algo": "happo", "env": "gym", "exp_name": args.exp_name}
     runner = RUNNER_REGISTRY["happo"](runner_args, algo_args, env_args)
+    reward_metadata = {}
+    runner_envs = getattr(runner.envs, "envs", None)
+    if runner_envs:
+        reward_metadata = getattr(runner_envs[0].adapter, "reward_metadata", {})
     report = citylearn_v3_training_report(None)
     artifacts = {}
     hyperparameters = {
@@ -103,6 +108,9 @@ def main() -> int:
         "log_interval": algo_args["train"]["log_interval"],
         "checkpoint_interval_episodes": algo_args["train"]["eval_interval"],
         "cuda": algo_args["device"]["cuda"],
+        "reward_function": "CityLearnV3MADRLRewardFunction",
+        "reward_profile": "HAPPO",
+        "reward_metadata": reward_metadata,
     }
 
     try:
@@ -138,6 +146,7 @@ def main() -> int:
             "output_dir": str(output_dir),
             "artifact_layout": artifacts.get("artifact_layout", {}),
             "hyperparameters": hyperparameters,
+            "reward_metadata": reward_metadata,
             "artifacts": artifacts,
             "project_axis_metrics": report["project_axis_metrics"],
             "citylearn_v3_report": report,

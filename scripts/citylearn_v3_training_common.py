@@ -1250,6 +1250,7 @@ class CityLearnV3BackendAdapter:
         seed: int = 0,
         episode_time_steps: int = 4,
         action_bins: int = 3,
+        algorithm: str = "MADRL",
         live_progress_path: Optional[str] = None,
         live_progress_interval: int = 100,
     ):
@@ -1262,15 +1263,18 @@ class CityLearnV3BackendAdapter:
                 scenario=scenario,
                 seed=seed,
                 episode_time_steps=episode_time_steps,
+                madrl_algorithm=algorithm,
             )
         else:
             self.env = make_citylearn_v3_project_env(
                 scenario=scenario,
                 seed=seed,
                 episode_time_steps=episode_time_steps,
+                madrl_algorithm=algorithm,
             )
 
         self.scenario = scenario
+        self.algorithm = str(algorithm).upper()
         self.seed_value = seed
         self.episode_time_steps = int(episode_time_steps)
         self.agents = list(self.env.possible_agents)
@@ -1343,6 +1347,7 @@ class CityLearnV3BackendAdapter:
         self.reset_count = 0
         self.trace_records: List[Dict[str, object]] = []
         self.timeseries_records: List[Dict[str, object]] = []
+        self.reward_metadata = self._reward_metadata()
 
     def seed(self, seed: int) -> None:
         self.seed_value = int(seed)
@@ -1364,6 +1369,19 @@ class CityLearnV3BackendAdapter:
 
     def close(self) -> None:
         self.env.close()
+
+    def _reward_metadata(self) -> Dict[str, object]:
+        reward_function = getattr(getattr(self.env, "env", None), "reward_function", None)
+        metadata = getattr(reward_function, "metadata", None)
+
+        if isinstance(metadata, Mapping):
+            return dict(metadata)
+
+        return {
+            "function": reward_function.__class__.__name__ if reward_function is not None else None,
+            "algorithm": self.algorithm,
+            "scenario": self.scenario,
+        }
 
     def padded_observations(self, observations: Mapping[str, np.ndarray]) -> List[np.ndarray]:
         return [
@@ -1448,6 +1466,12 @@ class CityLearnV3BackendAdapter:
             "reset_count": self.reset_count,
             "time_step": time_step,
             "scenario": self.scenario,
+            "algorithm": self.algorithm,
+            "reward_function": self.reward_metadata.get("function"),
+            "reward_profile": self.reward_metadata.get("profile", {}).get("profile_name")
+            if isinstance(self.reward_metadata.get("profile"), Mapping)
+            else self.reward_metadata.get("profile"),
+            "reward_axis_weights": self.reward_metadata.get("axis_weights"),
             "reward_sum": None if not reward_values else float(np.sum(reward_values)),
             "reward_mean": None if not reward_values else float(np.mean(reward_values)),
             "all_done": bool(all(dones.values())) if dones else False,
@@ -1472,6 +1496,9 @@ class CityLearnV3BackendAdapter:
                 "episode_step": episode_step,
                 "time_step": time_step,
                 "scenario": self.scenario,
+                "algorithm": self.algorithm,
+                "reward_function": self.reward_metadata.get("function"),
+                "reward_profile": timeseries_row.get("reward_profile"),
                 "agent": agent,
                 "agent_index": self.agents.index(agent),
                 "reward": _as_float(rewards.get(agent)),
@@ -1535,6 +1562,10 @@ class CityLearnV3BackendAdapter:
             "episode_step": int(timeseries_row["episode_step"]),
             "time_step": int(timeseries_row["time_step"]),
             "scenario": self.scenario,
+            "algorithm": self.algorithm,
+            "reward_function": self.reward_metadata.get("function"),
+            "reward_profile": timeseries_row.get("reward_profile"),
+            "reward_axis_weights": self.reward_metadata.get("axis_weights"),
             "instant_reward_sum": timeseries_row.get("reward_sum"),
             "instant_reward_mean": timeseries_row.get("reward_mean"),
             "reward_sum": timeseries_row.get("reward_sum"),

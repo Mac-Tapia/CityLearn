@@ -62,6 +62,7 @@ def main() -> int:
         seed=args.seed,
         episode_time_steps=args.episode_time_steps,
         action_bins=args.action_bins,
+        algorithm="MAAC",
         live_progress_path=str(output_dir / "live_progress.json"),
         live_progress_interval=100,
     )
@@ -110,6 +111,9 @@ def main() -> int:
         "reward_scale": args.reward_scale,
         "cuda": use_gpu,
         "critic": "multi-agent attention critic",
+        "reward_function": "CityLearnV3MADRLRewardFunction",
+        "reward_profile": "MAAC",
+        "reward_metadata": env.adapter.reward_metadata,
     }
     try:
         for episode in range(args.episodes):
@@ -179,6 +183,7 @@ def main() -> int:
             "output_dir": str(output_dir),
             "artifact_layout": artifacts.get("artifact_layout", {}),
             "hyperparameters": hyperparameters,
+            "reward_metadata": env.adapter.reward_metadata,
             "artifacts": artifacts,
             "project_axis_metrics": report["project_axis_metrics"],
             "citylearn_v3_report": report,

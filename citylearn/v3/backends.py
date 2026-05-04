@@ -44,6 +44,8 @@ def citylearn_v3_backend_manifest(
         "dec_pomdp": {
             "central_agent": config.central_agent,
             "reward_aggregation": config.reward_aggregation,
+            "reward_function": config.reward_function,
+            "reward_policy": "axis_and_algorithm_specific_citylearn_v3_reward",
             "state": "concatenated_local_observations_for_ctde",
             "agents": "CityLearn buildings with EV chargers embedded in building action spaces",
         },

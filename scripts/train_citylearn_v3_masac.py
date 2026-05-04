@@ -49,6 +49,7 @@ def main() -> int:
         seed=args.seed,
         episode_time_steps=args.episode_time_steps,
         action_bins=args.action_bins,
+        algorithm="MASAC",
         live_progress_path=str(output_dir / "live_progress.json"),
         live_progress_interval=100,
     )
@@ -95,6 +96,9 @@ def main() -> int:
         "buffer_size": backend_args.buffer_size,
         "cuda": backend_args.cuda,
         "ctde_state_shape": backend_args.state_shape,
+        "reward_function": "CityLearnV3MADRLRewardFunction",
+        "reward_profile": "MASAC",
+        "reward_metadata": env.adapter.reward_metadata,
     }
 
     try:
@@ -132,6 +136,7 @@ def main() -> int:
             "output_dir": str(output_dir),
             "artifact_layout": artifacts.get("artifact_layout", {}),
             "hyperparameters": hyperparameters,
+            "reward_metadata": env.adapter.reward_metadata,
             "artifacts": artifacts,
             "project_axis_metrics": report["project_axis_metrics"],
             "citylearn_v3_report": report,

@@ -25,6 +25,7 @@ class CityLearnV3ExperimentConfig:
     seeds: Tuple[int, ...] = tuple(range(10))
     episode_time_steps: int = 8760
     reward_aggregation: str = "team_mean"
+    reward_function: str = "citylearn.reward_function.CityLearnV3MADRLRewardFunction"
     central_agent: bool = False
     backend_policy: str = "official_repository"
     use_citylearn_v2_kpis: bool = True
