@@ -176,9 +176,25 @@ function Show-TrainingProgress {
 
     $liveProgress = Read-JsonFile -Path $liveProgressPath
     if ($null -ne $liveProgress) {
+        $instantRewardSum = $liveProgress.reward_sum
+        $instantRewardMean = $liveProgress.reward_mean
+        if ($null -ne $liveProgress.instant_reward_sum) {
+            $instantRewardSum = $liveProgress.instant_reward_sum
+        }
+        if ($null -ne $liveProgress.instant_reward_mean) {
+            $instantRewardMean = $liveProgress.instant_reward_mean
+        }
+
         Write-Host "Progreso vivo:" -ForegroundColor DarkCyan
         Write-Host ("  global_step={0} episode={1} episode_step={2} time_step={3}" -f $liveProgress.global_step, $liveProgress.episode, $liveProgress.episode_step, $liveProgress.time_step)
-        Write-Host ("  reward_sum={0} reward_mean={1}" -f $liveProgress.reward_sum, $liveProgress.reward_mean)
+        Write-Host ("  instant_reward_sum={0} instant_reward_mean={1}" -f $instantRewardSum, $instantRewardMean)
+        if ($null -ne $liveProgress.episode_return_cumulative) {
+            Write-Host ("  episode_return_cumulative={0} episode_reward_mean_cumulative={1} episode_steps={2}" -f $liveProgress.episode_return_cumulative, $liveProgress.episode_reward_mean_cumulative, $liveProgress.episode_steps_recorded)
+            Write-Host ("  total_return_cumulative={0} total_reward_mean_cumulative={1} total_steps={2}" -f $liveProgress.total_return_cumulative, $liveProgress.total_reward_mean_cumulative, $liveProgress.total_steps_recorded)
+        }
+        else {
+            Write-Host "  retornos acumulados: aun no disponibles para este proceso; apareceran al cargar el codigo nuevo en el siguiente MADRL/job." -ForegroundColor Yellow
+        }
         Write-Host ("  cost={0} co2={1} net_load={2}" -f $liveProgress.district_net_electricity_consumption_cost, $liveProgress.district_net_electricity_consumption_emission, $liveProgress.district_net_electricity_consumption)
         Write-Host ("  price_mean={0} carbon_intensity_mean={1}" -f $liveProgress.electricity_price_mean, $liveProgress.carbon_intensity_mean)
     }

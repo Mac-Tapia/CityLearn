@@ -1506,14 +1506,47 @@ class CityLearnV3BackendAdapter:
         if int(timeseries_row["global_step"]) % self.live_progress_interval != 0:
             return
 
+        episode = timeseries_row.get("episode")
+        episode_rows = [row for row in self.timeseries_records if row.get("episode") == episode]
+        episode_reward_sums = [
+            value
+            for value in (_as_float(row.get("reward_sum")) for row in episode_rows)
+            if value is not None
+        ]
+        episode_reward_means = [
+            value
+            for value in (_as_float(row.get("reward_mean")) for row in episode_rows)
+            if value is not None
+        ]
+        total_reward_sums = [
+            value
+            for value in (_as_float(row.get("reward_sum")) for row in self.timeseries_records)
+            if value is not None
+        ]
+        total_reward_means = [
+            value
+            for value in (_as_float(row.get("reward_mean")) for row in self.timeseries_records)
+            if value is not None
+        ]
+
         payload = {
             "global_step": int(timeseries_row["global_step"]),
             "episode": int(timeseries_row["episode"]),
             "episode_step": int(timeseries_row["episode_step"]),
             "time_step": int(timeseries_row["time_step"]),
             "scenario": self.scenario,
+            "instant_reward_sum": timeseries_row.get("reward_sum"),
+            "instant_reward_mean": timeseries_row.get("reward_mean"),
             "reward_sum": timeseries_row.get("reward_sum"),
             "reward_mean": timeseries_row.get("reward_mean"),
+            "reward_sum_semantics": "instant_step_sum_kept_for_backward_compatibility",
+            "reward_mean_semantics": "instant_step_mean_kept_for_backward_compatibility",
+            "episode_return_cumulative": None if not episode_reward_sums else float(np.sum(episode_reward_sums)),
+            "episode_reward_mean_cumulative": None if not episode_reward_means else float(np.mean(episode_reward_means)),
+            "episode_steps_recorded": len(episode_reward_sums),
+            "total_return_cumulative": None if not total_reward_sums else float(np.sum(total_reward_sums)),
+            "total_reward_mean_cumulative": None if not total_reward_means else float(np.mean(total_reward_means)),
+            "total_steps_recorded": len(total_reward_sums),
             "district_net_electricity_consumption": timeseries_row.get("district_net_electricity_consumption"),
             "district_net_electricity_consumption_cost": timeseries_row.get("district_net_electricity_consumption_cost"),
             "district_net_electricity_consumption_emission": timeseries_row.get("district_net_electricity_consumption_emission"),
