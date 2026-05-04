@@ -49,6 +49,8 @@ def main() -> int:
         seed=args.seed,
         episode_time_steps=args.episode_time_steps,
         action_bins=args.action_bins,
+        live_progress_path=str(output_dir / "live_progress.json"),
+        live_progress_interval=100,
     )
     env_info = env.get_env_info()
 

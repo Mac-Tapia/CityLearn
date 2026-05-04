@@ -59,6 +59,8 @@ def main() -> int:
                     scenario=args.scenario,
                     seed=args.seed + rank * 1000,
                     episode_time_steps=args.episode_time_steps,
+                    live_progress_path=str(output_dir / "live_progress.json"),
+                    live_progress_interval=100,
                 )
                 env.seed(seed + rank * 1000)
                 return env

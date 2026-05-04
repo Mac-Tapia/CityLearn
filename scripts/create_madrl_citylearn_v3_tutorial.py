@@ -35,6 +35,96 @@ def code(source: str) -> None:
     })
 
 
+def _comment_for_code_line(line: str) -> str:
+    stripped = line.strip()
+
+    if stripped.startswith("!"):
+        return "Ejecuta un comando de shell/notebook para preparar o verificar el entorno."
+    if stripped.startswith(("import ", "from ")):
+        return "Importa dependencias necesarias para esta seccion."
+    if stripped.startswith("def "):
+        name = stripped.split("def ", 1)[1].split("(", 1)[0]
+        return f"Define la funcion auxiliar `{name}`."
+    if stripped.startswith("class "):
+        name = stripped.split("class ", 1)[1].split("(", 1)[0].split(":", 1)[0]
+        return f"Define la clase `{name}`."
+    if stripped.startswith("return "):
+        return "Retorna el resultado calculado por la funcion."
+    if stripped.startswith("if "):
+        return "Evalua una condicion antes de continuar el flujo."
+    if stripped.startswith("elif "):
+        return "Evalua una condicion alternativa."
+    if stripped == "else:":
+        return "Ejecuta la rama alternativa cuando la condicion previa no se cumple."
+    if stripped.startswith("for "):
+        return "Itera sobre una coleccion de elementos."
+    if stripped.startswith("while "):
+        return "Mantiene un ciclo mientras la condicion sea verdadera."
+    if stripped == "try:":
+        return "Inicia un bloque protegido para capturar errores controlados."
+    if stripped.startswith("except "):
+        return "Captura una excepcion para manejarla sin detener todo el notebook."
+    if stripped == "finally:":
+        return "Ejecuta acciones finales independientemente del resultado anterior."
+    if stripped.startswith("with "):
+        return "Abre un contexto administrado para usar recursos de forma segura."
+    if stripped.startswith("raise "):
+        return "Interrumpe la ejecucion con un error explicito si falla una condicion critica."
+    if stripped.startswith("print("):
+        return "Muestra informacion de seguimiento para el usuario."
+    if stripped.startswith("display("):
+        return "Renderiza una tabla, figura o Markdown dentro del notebook."
+    if stripped.startswith(("plt.", "fig,", "fig ", "ax.", "axes")):
+        return "Configura o dibuja una visualizacion."
+    if stripped.startswith(("subprocess.", "command = ", "MONITOR_COMMAND", "OFFICIAL_COMMAND")):
+        return "Construye o ejecuta comandos externos del flujo de trabajo."
+    if stripped.startswith(("]", ")", "}", "],", "),", "},")):
+        return "Cierra la estructura de datos o llamada definida arriba."
+    if stripped.startswith(("'", '"')) and ("--" in stripped or ".py" in stripped or "powershell" in stripped.lower()):
+        return "Declara un argumento o componente del comando ejecutable."
+    if "=" in stripped and not stripped.startswith(("==", "!=", ">=", "<=")):
+        name = stripped.split("=", 1)[0].strip().split(" ")[-1]
+        return f"Configura o actualiza `{name}`."
+
+    return "Ejecuta una instruccion necesaria para esta celda."
+
+
+def _comment_code_source(source: list[str]) -> list[str]:
+    commented: list[str] = []
+    previous_nonempty_was_comment = False
+
+    for raw_line in source:
+        line = raw_line.rstrip("\n")
+        stripped = line.strip()
+
+        if stripped == "":
+            commented.append(raw_line)
+            previous_nonempty_was_comment = False
+            continue
+
+        if stripped.startswith("#"):
+            commented.append(raw_line)
+            previous_nonempty_was_comment = True
+            continue
+
+        indent = line[: len(line) - len(line.lstrip())]
+        if not previous_nonempty_was_comment:
+            commented.append(f"{indent}# {_comment_for_code_line(line)}\n")
+
+        commented.append(raw_line)
+        previous_nonempty_was_comment = False
+
+    return commented
+
+
+def comment_notebook_code_cells(cells_payload: list[dict]) -> None:
+    for cell in cells_payload:
+        if cell.get("cell_type") != "code":
+            continue
+
+        cell["source"] = _comment_code_source(cell.get("source", []))
+
+
 md("""
 <a href="https://colab.research.google.com/github/Mac-Tapia/CityLearn/blob/citylearn-v3-madrl/examples/madrl_citylearn_v3_tutorial.ipynb" target="_parent"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
 """)
@@ -86,6 +176,18 @@ El flujo de trabajo sera:
 8. Ejecutar entrenamientos cortos o lanzar entrenamiento oficial.
 9. Analizar `results.json`, `timeseries.csv`, `trace.csv`, checkpoints, figuras y tablas.
 10. Comparar algoritmos contra la linea base CityLearn v2.
+""")
+
+md("""
+## Arquitectura y flujo renderizables del proyecto
+
+Los cambios recientes del proyecto quedaron documentados en un plano y en un Markdown maestro listo para renderizar con Mermaid:
+
+- `docs/ARQUITECTURA_Y_FLUJO_TRABAJO_CITYLEARN_V3_MADRL.md`
+- `docs/PLANO_REAL_IMPLEMENTADO_CITYLEARN_V3_MADRL.pdf`
+- `docs/PLANO_INTEGRADO_CITYLEARN_V3_MADRL.pdf`
+
+El flujo real implementado es: dataset oficial -> CityLearn v2 -> capa CityLearn v3 -> adaptador comun Dec-POMDP/CTDE -> cuatro scripts MADRL -> launcher `-Scenario ALL` -> artefactos por eje -> benchmark CityLearn v2 -> comparador v2 vs v3.
 """)
 
 md("""
@@ -399,7 +501,9 @@ plt.rcParams['grid.alpha'] = 0.25
 pd.set_option('display.max_columns', 120)
 
 RANDOM_SEED = 0
-SCENARIO = 'E3'
+SCENARIOS = ['E1', 'E2', 'E3']
+SCENARIO = 'E1'  # escenario corto para celdas interactivas del tutorial
+OFFICIAL_SCENARIO = 'ALL'  # ejecuta E1, E2 y E3 en el launcher oficial
 TUTORIAL_EPISODE_TIME_STEPS = 24
 OFFICIAL_EPISODE_TIME_STEPS = 8760
 ALGORITHMS = ['happo', 'masac', 'matd3', 'maac']
@@ -888,27 +992,39 @@ display(ctde_contract)
 md("""
 # Optimize MADRL Controllers
 
-Los entrenamientos se ejecutan con scripts separados por algoritmo. Todos escriben la misma estructura de artefactos:
+Los entrenamientos se ejecutan con scripts separados por algoritmo. En el flujo oficial actual se usa `-Scenario ALL`, que ejecuta secuencialmente los tres ejes `E1`, `E2` y `E3` para cada MADRL. Todos escriben la misma estructura de artefactos:
 
 ```text
 outputs/<experimento>/<madrl>/<escenario>_seed_<seed>/
   data/
   checkpoints/
   figures/
+  live_progress.json
+  results.json
+  training_summary.json
+  timeseries.csv
+  trace.csv
 ```
 
 Por seguridad, las celdas de entrenamiento no se ejecutan automaticamente.
 """)
 
 code("""
-def train_command(algorithm: str, output_root: Path, episode_time_steps: int, episodes: int, cuda: bool = True) -> List[str]:
+def train_command(
+    algorithm: str,
+    output_root: Path,
+    episode_time_steps: int,
+    episodes: int,
+    cuda: bool = True,
+    scenario: str = SCENARIO,
+) -> List[str]:
     script = SCRIPTS_DIR / f'train_citylearn_v3_{algorithm}.py'
     num_env_steps = episode_time_steps * episodes
     command = [
         sys.executable,
         '-B',
         str(script),
-        '--scenario', SCENARIO,
+        '--scenario', scenario,
         '--seed', str(RANDOM_SEED),
         '--episode-time-steps', str(episode_time_steps),
         '--episodes', str(episodes),
@@ -948,7 +1064,16 @@ else:
 md("""
 ## Official Full Training
 
-El entrenamiento oficial usa 17 edificios + EV, escenario `E3`, 8760 pasos por episodio y 5 episodios por algoritmo. El lanzador ejecuta los cuatro algoritmos de forma secuencial para reducir conflicto de memoria GPU.
+El entrenamiento oficial usa 17 edificios + EV, `-Scenario ALL`, 8760 pasos por episodio y 5 episodios. El lanzador ejecuta 12 trabajos secuenciales: `E1/E2/E3 x HAPPO/MASAC/MATD3/MAAC`. Esta ejecucion secuencial reduce conflictos de memoria GPU y deja salidas separadas por eje:
+
+```text
+outputs/citylearn_v3_madrl_official_full_cuda_v2/
+  happo/E1_seed_0
+  happo/E2_seed_0
+  happo/E3_seed_0
+  masac/E1_seed_0
+  ...
+```
 """)
 
 code("""
@@ -958,12 +1083,12 @@ OFFICIAL_COMMAND = [
     '-NoProfile',
     '-ExecutionPolicy', 'Bypass',
     '-File', str(SCRIPTS_DIR / 'launch_citylearn_v3_official_training.ps1'),
-    '-Scenario', SCENARIO,
+    '-Scenario', OFFICIAL_SCENARIO,
     '-Seed', str(RANDOM_SEED),
     '-EpisodeTimeSteps', str(OFFICIAL_EPISODE_TIME_STEPS),
     '-Episodes', '5',
     '-OutputRoot', str(OFFICIAL_OUTPUT),
-    '-TorchThreads', '8',
+    '-TorchThreads', '12',
     '-Cuda',
 ]
 print(' '.join(map(str, OFFICIAL_COMMAND)))
@@ -980,29 +1105,157 @@ else:
 """)
 
 md("""
+## Monitor visual local
+
+El proyecto incluye un monitor PowerShell que muestra la matriz `E1/E2/E3 x HAPPO/MASAC/MATD3/MAAC`, uso GPU, proceso activo, `global_step`, episodio, `reward_sum`, `reward_mean`, costo, CO2, carga neta y artefactos recientes.
+""")
+
+code("""
+MONITOR_COMMAND = [
+    'powershell.exe',
+    '-NoProfile',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', str(SCRIPTS_DIR / 'monitor_citylearn_v3_official_training.ps1'),
+    '-OutputRoot', str(OFFICIAL_OUTPUT),
+    '-IntervalSeconds', '5',
+    '-LogTail', '20',
+]
+print(' '.join(map(str, MONITOR_COMMAND)))
+""")
+
+md("""
+## Google Colab GPU A100/T4 Training Cell
+
+Esta celda permite ejecutar el entrenamiento en Google Colab usando GPU. Esta pensada para Colab Pro/Pro+ con **A100** cuando este disponible; tambien funciona con T4/V100, pero sera mas lento. En Colab Linux no se usa el launcher PowerShell; por eso la celda ejecuta directamente los cuatro scripts `train_citylearn_v3_*.py` para cada escenario `E1`, `E2` y `E3`.
+
+La celda esta apagada por defecto. Cambia `RUN_COLAB_GPU_TRAINING = True` solo cuando el repositorio ya este clonado con submodulos y las dependencias instaladas.
+""")
+
+code("""
+RUN_COLAB_GPU_TRAINING = False
+COLAB_OUTPUT = PROJECT_ROOT / 'outputs' / 'citylearn_v3_madrl_colab_gpu'
+COLAB_EPISODES = 5
+COLAB_EPISODE_TIME_STEPS = 8760
+COLAB_SCENARIOS = ['E1', 'E2', 'E3']
+COLAB_ALGORITHMS = ['happo', 'masac', 'matd3', 'maac']
+
+
+def is_google_colab() -> bool:
+    try:
+        import google.colab  # type: ignore
+        return True
+    except Exception:
+        return False
+
+
+def colab_madrl_command(algorithm: str, scenario: str) -> List[str]:
+    script = SCRIPTS_DIR / f'train_citylearn_v3_{algorithm}.py'
+    num_env_steps = COLAB_EPISODE_TIME_STEPS * COLAB_EPISODES
+    command = [
+        sys.executable,
+        '-B',
+        str(script),
+        '--scenario', scenario,
+        '--seed', str(RANDOM_SEED),
+        '--episode-time-steps', str(COLAB_EPISODE_TIME_STEPS),
+        '--episodes', str(COLAB_EPISODES),
+        '--output-dir', str(COLAB_OUTPUT / algorithm),
+        '--cuda',
+    ]
+
+    if algorithm == 'happo':
+        command.extend([
+            '--num-env-steps', str(num_env_steps),
+            '--hidden-size', '256',
+            '--torch-threads', '8',
+        ])
+    elif algorithm == 'masac':
+        command.extend([
+            '--action-bins', '3',
+            '--buffer-size', '2',
+        ])
+    elif algorithm == 'matd3':
+        command.extend([
+            '--num-env-steps', str(num_env_steps),
+            '--batch-size', '256',
+            '--buffer-size', '10000',
+            '--hidden-size', '256',
+            '--train-interval', '100',
+            '--num-random-episodes', '1',
+        ])
+    elif algorithm == 'maac':
+        command.extend([
+            '--action-bins', '3',
+            '--batch-size', '256',
+            '--buffer-length', '100000',
+            '--steps-per-update', '100',
+            '--num-updates', '4',
+            '--hidden-size', '256',
+            '--attend-heads', '4',
+            '--pi-lr', '0.0003',
+            '--q-lr', '0.001',
+            '--tau', '0.005',
+            '--gamma', '0.99',
+        ])
+    else:
+        raise ValueError(f'Unknown algorithm: {algorithm}')
+
+    return command
+
+
+if RUN_COLAB_GPU_TRAINING:
+    import torch
+
+    if not is_google_colab():
+        print('Aviso: esta celda tambien puede correr localmente, pero fue preparada para Google Colab.')
+
+    if not torch.cuda.is_available():
+        raise RuntimeError('CUDA no esta disponible. En Colab ve a Runtime > Change runtime type > GPU.')
+
+    device_name = torch.cuda.get_device_name(0)
+    print('CUDA device:', device_name)
+    if 'A100' not in device_name.upper():
+        print('Aviso: no parece ser A100. El entrenamiento puede funcionar, pero sera mas lento.')
+
+    for scenario in COLAB_SCENARIOS:
+        for algorithm in COLAB_ALGORITHMS:
+            command = colab_madrl_command(algorithm, scenario)
+            print('\\n===', algorithm.upper(), scenario, '===')
+            print(' '.join(map(str, command)))
+            subprocess.run(command, check=True, cwd=PROJECT_ROOT)
+
+    print('Colab GPU training completed:', COLAB_OUTPUT)
+else:
+    print('Set RUN_COLAB_GPU_TRAINING=True only in Google Colab with GPU enabled.')
+    print('Recommended runtime: Colab Pro/Pro+ A100. T4/V100 also works with longer runtime.')
+""")
+
+md("""
 # Evaluate the Episode Rewards for MADRL Algorithms
 
 Las recompensas no sustituyen los KPIs. Sirven para diagnosticar aprendizaje, convergencia, exploracion y estabilidad. Una politica con recompensa creciente aun puede fallar en CO2 o costo si la recompensa no captura bien esos objetivos.
 """)
 
 code("""
-def available_run_dirs(output_root: Path) -> Dict[str, Path]:
-    return {
-        algorithm: run_dir(output_root, algorithm)
-        for algorithm in ALGORITHMS
-        if run_dir(output_root, algorithm).exists()
-    }
+def available_run_dirs(output_root: Path, scenarios: Sequence[str] = SCENARIOS) -> Dict[str, Path]:
+    runs: Dict[str, Path] = {}
+    for algorithm in ALGORITHMS:
+        for scenario in scenarios:
+            path = run_dir(output_root, algorithm, scenario=scenario)
+            if path.exists():
+                runs[f'{algorithm}_{scenario}'] = path
+    return runs
 
 
 runs = available_run_dirs(OFFICIAL_OUTPUT)
 print('Available runs:')
-for algorithm, path in runs.items():
-    print(algorithm, '->', path)
+for run_name, path in runs.items():
+    print(run_name, '->', path)
 """)
 
 code("""
 reward_rows = []
-for algorithm, path in runs.items():
+for run_name, path in runs.items():
     timeseries = load_run_timeseries(path)
     if timeseries.empty or 'reward_sum' not in timeseries.columns:
         continue
@@ -1011,16 +1264,16 @@ for algorithm, path in runs.items():
         reward_mean=('reward_mean', 'mean'),
         steps=('global_step', 'count'),
     )
-    grouped['algorithm'] = algorithm.upper()
+    grouped['run'] = run_name.upper()
     reward_rows.append(grouped)
 
 if reward_rows:
     reward_table = pd.concat(reward_rows, ignore_index=True)
     display(reward_table)
     fig, ax = plt.subplots(figsize=(10, 4))
-    for algorithm, group in reward_table.groupby('algorithm'):
-        ax.plot(group['episode'], group['reward_total'], marker='o', label=algorithm)
-    ax.set_title('Episode returns by MADRL algorithm')
+    for run_name, group in reward_table.groupby('run'):
+        ax.plot(group['episode'], group['reward_total'], marker='o', label=run_name)
+    ax.set_title('Episode returns by MADRL run')
     ax.set_xlabel('episode')
     ax.set_ylabel('reward_total')
     ax.legend()
@@ -1039,9 +1292,9 @@ code("""
 REGENERATE_FIGURES = False
 
 if REGENERATE_FIGURES:
-    for algorithm, path in runs.items():
+    for run_name, path in runs.items():
         command = [sys.executable, '-B', str(SCRIPTS_DIR / 'regenerate_citylearn_v3_figures.py'), str(path)]
-        print('Regenerating figures for', algorithm.upper())
+        print('Regenerating figures for', run_name.upper())
         subprocess.run(command, check=True, cwd=PROJECT_ROOT)
 else:
     print('Set REGENERATE_FIGURES=True to rebuild figures/tables from saved CSV/JSON artifacts.')
@@ -1053,8 +1306,8 @@ Las figuras obligatorias cubren rendimiento, eficiencia, convergencia, comparaci
 
 code("""
 if runs:
-    first_algorithm, first_path = next(iter(runs.items()))
-    print('Showing figures for:', first_algorithm.upper())
+    first_run_name, first_path = next(iter(runs.items()))
+    print('Showing figures for:', first_run_name.upper())
     display_generated_figures(first_path, names=[
         'reward_timeseries.png',
         'convergence_returns.png',
@@ -1075,10 +1328,12 @@ La comparacion debe hacerse por eje. No se recomienda mezclar todos los KPIs en 
 
 code("""
 all_kpi_tables = []
-for algorithm, path in runs.items():
+for run_name, path in runs.items():
     table = load_objective_kpis(path)
     if not table.empty:
-        table['algorithm'] = algorithm.upper()
+        table['run'] = run_name.upper()
+        table['algorithm'] = run_name.split('_')[0].upper()
+        table['scenario'] = run_name.split('_')[1].upper() if '_' in run_name else SCENARIO
         all_kpi_tables.append(table)
 
 if all_kpi_tables:
@@ -1162,12 +1417,18 @@ if status_path.is_file():
         'status': status.get('status'),
         'dataset': status.get('dataset'),
         'scenario': status.get('scenario'),
+        'scenarios': ', '.join(status.get('scenarios', [])) if isinstance(status.get('scenarios'), list) else status.get('scenarios'),
         'episodes': status.get('episodes'),
         'episode_time_steps': status.get('episode_time_steps'),
+        'num_env_steps': status.get('num_env_steps'),
         'torch': status.get('torch'),
         'cuda': status.get('cuda'),
         'output_root': status.get('output_root'),
     }).to_frame('value'))
+
+    jobs = status.get('jobs', [])
+    if jobs:
+        display(pd.DataFrame(jobs)[['scenario', 'name', 'started_at', 'completed_at', 'exit_code', 'output_dir']])
 else:
     print('No official status file found at', status_path)
 """)
@@ -1231,6 +1492,8 @@ md("""
 - Usar MARLlib para experimentos adicionales con el mismo adaptador `citylearn_v3`.
 """)
 
+
+comment_notebook_code_cells(cells)
 
 notebook = {
     "cells": cells,

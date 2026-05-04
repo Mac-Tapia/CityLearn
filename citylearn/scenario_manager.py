@@ -1,10 +1,10 @@
 """
 Experimental Scenario Manager for MADRL Experiments
 
-Implements 3 scenarios per thesis requirements:
-- E1: Flexibility (RTP tariff, no outages)
-- E2: Resilience (fixed tariff, scheduled/random outages, 2-8h)
-- E3: Combined DR/flexibility/resilience (RTP pricing plus random outages)
+Implements the current 3-axis thesis setup:
+- E1: Energy flexibility
+- E2: Carbon emissions reduction
+- E3: Economic cost optimization with integrated flexibility and carbon context
 """
 
 import numpy as np
@@ -32,12 +32,12 @@ class ScenarioConfig:
     outage_duration_min: int  # Hours
     outage_duration_max: int  # Hours
     
-    # Demand response settings
+    # Legacy signal settings retained for backward compatibility with older runs.
     enable_dr_signals: bool
     dr_signal_threshold: float
     dr_response_required: bool
     
-    # Reward weights (flexibility, resilience, dr)
+    # Reward weights (flexibility, carbon, cost)
     reward_weights: Dict[str, float]
     
     # KPI focus
@@ -61,14 +61,14 @@ class ScenarioManager:
         enable_dr_signals=False,
         dr_signal_threshold=0.8,
         dr_response_required=False,
-        reward_weights={"flex": 0.6, "resil": 0.2, "dr": 0.2},
+        reward_weights={"flex": 0.6, "carbon": 0.2, "cost": 0.2},
         primary_kpi="peak_average"
     )
     
-    # E2: Resilience Focus
+    # E2: Carbon Emissions Focus
     E2_CONFIG = ScenarioConfig(
         name="E2",
-        description="Resilience Scenario - fixed tariff with scheduled/random outages",
+        description="Carbon Emissions Scenario - carbon-aware operation with scheduled/random outages",
         use_time_of_use=False,
         use_real_time_pricing=False,
         tariff_multiplier=1.0,
@@ -79,14 +79,14 @@ class ScenarioManager:
         enable_dr_signals=False,
         dr_signal_threshold=0.8,
         dr_response_required=False,
-        reward_weights={"flex": 0.2, "resil": 0.6, "dr": 0.2},
-        primary_kpi="unserved_energy_fraction"
+        reward_weights={"flex": 0.2, "carbon": 0.6, "cost": 0.2},
+        primary_kpi="carbon_emissions_total"
     )
     
-    # E3: Demand Response Focus
+    # E3: Economic Cost Focus
     E3_CONFIG = ScenarioConfig(
         name="E3",
-        description="Combined Scenario - RTP pricing, random outages, integrated objectives",
+        description="Cost Scenario - RTP pricing with integrated flexibility and carbon objectives",
         use_time_of_use=False,
         use_real_time_pricing=True,
         tariff_multiplier=1.2,
@@ -94,11 +94,11 @@ class ScenarioManager:
         outage_frequency=52,
         outage_duration_min=2,
         outage_duration_max=8,
-        enable_dr_signals=True,
+        enable_dr_signals=False,
         dr_signal_threshold=0.75,
-        dr_response_required=True,
-        reward_weights={"flex": 1/3, "resil": 1/3, "dr": 1/3},
-        primary_kpi="topsis_score"
+        dr_response_required=False,
+        reward_weights={"flex": 1/3, "carbon": 1/3, "cost": 1/3},
+        primary_kpi="electricity_cost_total"
     )
     
     SCENARIOS = {
@@ -263,9 +263,10 @@ class ScenarioManager:
         if self.current_config.enable_outages:
             logger.info(f"Outages enabled: {len(self.outage_schedule)} scheduled outages")
         
-        # Apply DR settings
+        # Legacy DR settings are intentionally disabled for the current
+        # flexibility-carbon-cost thesis axes.
         if self.current_config.enable_dr_signals:
-            logger.info("Demand response signals enabled")
+            logger.info("Legacy demand-response signals enabled")
     
     def get_scenario_description(self) -> Dict:
         """Get human-readable scenario description"""
@@ -278,7 +279,7 @@ class ScenarioManager:
             "tariff": "TOU" if self.current_config.use_time_of_use else ("RTP" if self.current_config.use_real_time_pricing else "FLAT"),
             "outages_enabled": self.current_config.enable_outages,
             "n_outages": len(self.outage_schedule) if self.current_config.enable_outages else 0,
-            "dr_signals_enabled": self.current_config.enable_dr_signals,
+            "legacy_dr_signals_enabled": self.current_config.enable_dr_signals,
             "reward_weights": self.current_config.reward_weights,
             "primary_kpi": self.current_config.primary_kpi
         }
@@ -298,7 +299,7 @@ class ExperimentalDesign:
     
     Design:
     - 4 algorithms: HAPPO, MASAC, MATD3, MAAC
-    - 3 scenarios: E1 (flex), E2 (resil), E3 (DR)
+    - 3 scenarios: E1 (flexibility), E2 (carbon), E3 (cost)
     - 10 random seeds
     - Total: 4 × 3 × 10 = 120 experiments
     """

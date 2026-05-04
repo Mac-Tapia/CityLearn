@@ -1,5 +1,5 @@
 param(
-    [string]$Scenario = "E3",
+    [string]$Scenario = "ALL",
     [int]$Seed = 0,
     [int]$EpisodeTimeSteps = 8760,
     [int]$Episodes = 5,
@@ -20,17 +20,31 @@ $ManifestPath = Join-Path $OutputRootPath "official_full_manifest.json"
 $StatusPath = Join-Path $OutputRootPath "official_full_status.json"
 $NumEnvSteps = $EpisodeTimeSteps * $Episodes
 $CudaArgs = if ($Cuda) { @("--cuda") } else { @() }
+$ScenarioList = if ($Scenario.ToUpperInvariant() -in @("ALL", "TODOS", "3EJES")) {
+    @("E1", "E2", "E3")
+}
+else {
+    @($Scenario.ToUpperInvariant())
+}
+
+foreach ($scenarioName in $ScenarioList) {
+    if ($scenarioName -notin @("E1", "E2", "E3")) {
+        throw "Unknown scenario: $scenarioName. Use E1, E2, E3 or ALL."
+    }
+}
 
 New-Item -ItemType Directory -Force -Path $OutputRootPath | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 Set-Location $ProjectRoot
 
-$jobs = @(
-    [ordered]@{
+$jobs = @()
+foreach ($scenarioName in $ScenarioList) {
+    $jobs += [ordered]@{
         name = "happo"
+        scenario = $scenarioName
         script = "CityLearn\scripts\train_citylearn_v3_happo.py"
         args = @(
-            "--scenario", $Scenario,
+            "--scenario", $scenarioName,
             "--seed", "$Seed",
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
@@ -40,12 +54,13 @@ $jobs = @(
         ) + $CudaArgs + @(
             "--output-dir", (Join-Path $OutputRoot "happo")
         )
-    },
-    [ordered]@{
+    }
+    $jobs += [ordered]@{
         name = "masac"
+        scenario = $scenarioName
         script = "CityLearn\scripts\train_citylearn_v3_masac.py"
         args = @(
-            "--scenario", $Scenario,
+            "--scenario", $scenarioName,
             "--seed", "$Seed",
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
@@ -54,12 +69,13 @@ $jobs = @(
         ) + $CudaArgs + @(
             "--output-dir", (Join-Path $OutputRoot "masac")
         )
-    },
-    [ordered]@{
+    }
+    $jobs += [ordered]@{
         name = "matd3"
+        scenario = $scenarioName
         script = "CityLearn\scripts\train_citylearn_v3_matd3.py"
         args = @(
-            "--scenario", $Scenario,
+            "--scenario", $scenarioName,
             "--seed", "$Seed",
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
@@ -72,12 +88,13 @@ $jobs = @(
         ) + $CudaArgs + @(
             "--output-dir", (Join-Path $OutputRoot "matd3")
         )
-    },
-    [ordered]@{
+    }
+    $jobs += [ordered]@{
         name = "maac"
+        scenario = $scenarioName
         script = "CityLearn\scripts\train_citylearn_v3_maac.py"
         args = @(
-            "--scenario", $Scenario,
+            "--scenario", $scenarioName,
             "--seed", "$Seed",
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
@@ -96,7 +113,7 @@ $jobs = @(
             "--output-dir", (Join-Path $OutputRoot "maac")
         )
     }
-)
+}
 
 $manifest = [ordered]@{
     started_at = (Get-Date).ToString("o")
@@ -105,6 +122,7 @@ $manifest = [ordered]@{
     dataset = "citylearn_challenge_2022_phase_all_plus_evs"
     schema_path = "CityLearn\data\datasets\citylearn_challenge_2022_phase_all_plus_evs\schema.json"
     scenario = $Scenario
+    scenarios = $ScenarioList
     seed = $Seed
     episode_time_steps = $EpisodeTimeSteps
     episodes = $Episodes
@@ -120,20 +138,21 @@ $manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $ManifestPath -Encoding 
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $StatusPath -Encoding UTF8
 
 foreach ($job in $jobs) {
-    $logPath = Join-Path $LogDir "$($job.name).log"
-    $errPath = Join-Path $LogDir "$($job.name).stderr.log"
+    $logPath = Join-Path $LogDir "$($job.scenario)_$($job.name).log"
+    $errPath = Join-Path $LogDir "$($job.scenario)_$($job.name).stderr.log"
     $commandArgs = @("-B", $job.script) + $job.args
     $startedAt = Get-Date
 
     $jobRecord = [ordered]@{
         name = $job.name
+        scenario = $job.scenario
         script = $job.script
         started_at = $startedAt.ToString("o")
         completed_at = $null
         exit_code = $null
         log = $logPath
         stderr_log = $errPath
-        output_dir = Join-Path $OutputRoot "$($job.name)\$($Scenario)_seed_$Seed"
+        output_dir = Join-Path $OutputRoot "$($job.name)\$($job.scenario)_seed_$Seed"
         command = "$Python " + ($commandArgs -join " ")
     }
 
@@ -144,7 +163,7 @@ foreach ($job in $jobs) {
         Push-Location $ProjectRoot
         try {
             Write-Host ""
-            Write-Host "=== CityLearn v3 MADRL: $($job.name.ToUpper()) ===" -ForegroundColor Cyan
+            Write-Host "=== CityLearn v3 MADRL: $($job.name.ToUpper()) | $($job.scenario) ===" -ForegroundColor Cyan
             Write-Host "$Python $($commandArgs -join ' ')" -ForegroundColor DarkGray
             & $Python @commandArgs 2>&1 | Tee-Object -FilePath $logPath
             $exitCode = $LASTEXITCODE

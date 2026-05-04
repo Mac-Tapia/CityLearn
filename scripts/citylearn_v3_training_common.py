@@ -24,6 +24,7 @@ DATA_DIR_NAME = "data"
 CHECKPOINT_DIR_NAME = "checkpoints"
 FIGURES_DIR_NAME = "figures"
 TABLES_DIR_NAME = "tables"
+SPACE_BOUND = 1.0e6
 
 
 def ensure_project_paths() -> None:
@@ -1249,6 +1250,8 @@ class CityLearnV3BackendAdapter:
         seed: int = 0,
         episode_time_steps: int = 4,
         action_bins: int = 3,
+        live_progress_path: Optional[str] = None,
+        live_progress_interval: int = 100,
     ):
         ensure_project_paths()
         from citylearn.v3 import make_citylearn_v3_env, make_citylearn_v3_project_env
@@ -1274,6 +1277,8 @@ class CityLearnV3BackendAdapter:
         self.n_agents = len(self.agents)
         self.num_agents = self.n_agents
         self.action_bins = int(action_bins)
+        self.live_progress_path = Path(live_progress_path) if live_progress_path else None
+        self.live_progress_interval = max(1, int(live_progress_interval))
 
         self._obs_spaces = {agent: self.env.observation_space(agent) for agent in self.agents}
         self._act_spaces = {agent: self.env.action_space(agent) for agent in self.agents}
@@ -1292,21 +1297,21 @@ class CityLearnV3BackendAdapter:
 
         self.continuous_observation_space = [
             spaces.Box(
-                low=-np.inf,
-                high=np.inf,
+                low=-SPACE_BOUND,
+                high=SPACE_BOUND,
                 shape=(self.max_observation_dim,),
                 dtype=np.float32,
             )
             for _ in self.agents
         ]
         self.ctde_share_observation_space = [
-            spaces.Box(low=-np.inf, high=np.inf, shape=(self.state_dim,), dtype=np.float32)
+            spaces.Box(low=-SPACE_BOUND, high=SPACE_BOUND, shape=(self.state_dim,), dtype=np.float32)
             for _ in self.agents
         ]
         self.padded_share_observation_space = [
             spaces.Box(
-                low=-np.inf,
-                high=np.inf,
+                low=-SPACE_BOUND,
+                high=SPACE_BOUND,
                 shape=(self.padded_joint_observation_dim,),
                 dtype=np.float32,
             )
@@ -1454,6 +1459,7 @@ class CityLearnV3BackendAdapter:
             "carbon_intensity_mean": _mean_current_building_signal(citylearn_env, "carbon_intensity", "carbon_intensity", time_step),
         }
         self.timeseries_records.append(timeseries_row)
+        self._write_live_progress(timeseries_row)
 
         for agent in self.agents:
             action = np.asarray(action_dict.get(agent, []), dtype=float).reshape(-1)
@@ -1492,6 +1498,32 @@ class CityLearnV3BackendAdapter:
             self.trace_records.append(row)
 
         self.global_step += 1
+
+    def _write_live_progress(self, timeseries_row: Mapping[str, object]) -> None:
+        if self.live_progress_path is None:
+            return
+
+        if int(timeseries_row["global_step"]) % self.live_progress_interval != 0:
+            return
+
+        payload = {
+            "global_step": int(timeseries_row["global_step"]),
+            "episode": int(timeseries_row["episode"]),
+            "episode_step": int(timeseries_row["episode_step"]),
+            "time_step": int(timeseries_row["time_step"]),
+            "scenario": self.scenario,
+            "reward_sum": timeseries_row.get("reward_sum"),
+            "reward_mean": timeseries_row.get("reward_mean"),
+            "district_net_electricity_consumption": timeseries_row.get("district_net_electricity_consumption"),
+            "district_net_electricity_consumption_cost": timeseries_row.get("district_net_electricity_consumption_cost"),
+            "district_net_electricity_consumption_emission": timeseries_row.get("district_net_electricity_consumption_emission"),
+            "electricity_price_mean": timeseries_row.get("electricity_price_mean"),
+            "carbon_intensity_mean": timeseries_row.get("carbon_intensity_mean"),
+        }
+        self.live_progress_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.live_progress_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        tmp_path.replace(self.live_progress_path)
 
     def kpi_summary(self) -> Dict[str, object]:
         return {
