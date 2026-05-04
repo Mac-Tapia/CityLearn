@@ -344,8 +344,83 @@ Cada paso del entorno entrega observaciones locales por edificio, acciones conti
 - observacion local: variables CityLearn v2 habilitadas para cada edificio;
 - accion local: almacenamiento, EV y otros actuadores disponibles del edificio;
 - estado global CTDE: concatenacion de observaciones locales;
-- recompensa colaborativa: `team_mean` por defecto;
+- recompensa v3: `CityLearnV3MADRLRewardFunction`, con pesos por eje y perfil por algoritmo;
+- agregacion colaborativa Dec-POMDP: `team_mean` por defecto despues de calcular la recompensa v3;
 - evaluacion: KPIs CityLearn v2 y reporte CityLearn v3 por ejes.
+""")
+
+md("""
+### Reward Function v3: pesos por eje y perfil por MADRL
+
+La recompensa usada en los entrenamientos CityLearn v3 no usa los pesos base heredados de `MARL` como criterio principal. Los scripts `train_citylearn_v3_*.py` fuerzan `CityLearnV3MADRLRewardFunction`, que combina:
+
+- pesos multiobjetivo por escenario `E1/E2/E3`;
+- multiplicadores especificos por MADRL;
+- componente EV/V2G separado para SoC, restricciones de carga, autoconsumo y uso de excedentes;
+- mezcla local/equipo mediante `team_reward_ratio`.
+
+Esto separa claramente reward de entrenamiento, agregacion colaborativa Dec-POMDP y KPIs CityLearn v2 de evaluacion final.
+""")
+
+code("""
+from citylearn.reward_function import (
+    CITYLEARN_V3_AXIS_REWARD_WEIGHTS,
+    CITYLEARN_V3_MADRL_REWARD_PROFILES,
+)
+
+axis_reward_table = pd.DataFrame.from_dict(CITYLEARN_V3_AXIS_REWARD_WEIGHTS, orient='index')
+axis_reward_table.index.name = 'scenario'
+display(axis_reward_table)
+
+profile_rows = []
+for algorithm, profile in CITYLEARN_V3_MADRL_REWARD_PROFILES.items():
+    if algorithm == 'MADRL':
+        continue
+    multipliers = profile['axis_weight_multipliers']
+    profile_rows.append({
+        'algorithm': algorithm,
+        'profile_name': profile['profile_name'],
+        'flex_multiplier': multipliers['flex'],
+        'carbon_multiplier': multipliers['carbon'],
+        'cost_multiplier': multipliers['cost'],
+        'team_reward_ratio': profile['team_reward_ratio'],
+        'ev_weight': profile['ev_weight'],
+        'reward_scale': profile['reward_scale'],
+        'peak_weight': profile['peak_weight'],
+        'ramp_weight': profile['ramp_weight'],
+    })
+
+reward_profile_table = pd.DataFrame(profile_rows)
+display(reward_profile_table)
+""")
+
+code("""
+def effective_axis_weights(scenario: str, algorithm: str) -> Dict[str, float]:
+    base = CITYLEARN_V3_AXIS_REWARD_WEIGHTS[scenario]
+    multipliers = CITYLEARN_V3_MADRL_REWARD_PROFILES[algorithm]['axis_weight_multipliers']
+    weighted = {
+        key: base[key] * multipliers[key]
+        for key in ['flex', 'carbon', 'cost']
+    }
+    total = sum(weighted.values())
+    return {
+        key: weighted[key] / total
+        for key in weighted
+    }
+
+
+effective_rows = []
+for algorithm in ['HAPPO', 'MASAC', 'MATD3', 'MAAC']:
+    for scenario in SCENARIOS:
+        row = {
+            'algorithm': algorithm,
+            'scenario': scenario,
+            **effective_axis_weights(scenario, algorithm),
+        }
+        effective_rows.append(row)
+
+effective_reward_table = pd.DataFrame(effective_rows)
+display(effective_reward_table)
 """)
 
 md("""
@@ -503,6 +578,7 @@ pd.set_option('display.max_columns', 120)
 RANDOM_SEED = 0
 SCENARIOS = ['E1', 'E2', 'E3']
 SCENARIO = 'E1'  # escenario corto para celdas interactivas del tutorial
+TUTORIAL_ALGORITHM = 'HAPPO'  # perfil reward v3 usado en celdas interactivas
 OFFICIAL_SCENARIO = 'ALL'  # ejecuta E1, E2 y E3 en el launcher oficial
 TUTORIAL_EPISODE_TIME_STEPS = 24
 OFFICIAL_EPISODE_TIME_STEPS = 8760
@@ -738,10 +814,12 @@ env = make_citylearn_v3_project_env(
     scenario=SCENARIO,
     seed=RANDOM_SEED,
     episode_time_steps=TUTORIAL_EPISODE_TIME_STEPS,
+    madrl_algorithm=TUTORIAL_ALGORITHM,
 )
 
 description = describe_environment(env)
 display(pd.Series(description).to_frame('value'))
+display(pd.Series(description['reward_metadata']).to_frame('reward_metadata'))
 """)
 
 md("""
@@ -951,6 +1029,7 @@ backend_manifest = citylearn_v3_backend_manifest()
 print('Version layer:', backend_manifest['version_layer'])
 print('Simulator:', backend_manifest['simulator'])
 display(pd.DataFrame.from_dict(backend_manifest['backends'], orient='index'))
+display(pd.Series(backend_manifest['dec_pomdp']).to_frame('value'))
 """)
 
 md("""
@@ -987,6 +1066,35 @@ ctde_contract = pd.DataFrame([
     },
 ])
 display(ctde_contract)
+""")
+
+md("""
+## Validate Reward Profiles
+
+Esta validacion confirma que `E1/E2/E3` usan perfiles de recompensa MADRL propios del proyecto CityLearn v3, que los pesos efectivos suman 1 por eje y que no se esta usando la recompensa base MARL como criterio principal.
+""")
+
+code("""
+REWARD_PROFILE_VALIDATION = PROJECT_ROOT / 'outputs' / 'citylearn_v3_reward_profile_validation.json'
+VALIDATE_REWARD_PROFILES = False
+
+if VALIDATE_REWARD_PROFILES:
+    command = [
+        sys.executable,
+        '-B',
+        str(SCRIPTS_DIR / 'validate_citylearn_v3_reward_profiles.py'),
+        '--output',
+        str(REWARD_PROFILE_VALIDATION),
+    ]
+    print('Running:', ' '.join(map(str, command)))
+    subprocess.run(command, check=True, cwd=PROJECT_ROOT)
+
+if REWARD_PROFILE_VALIDATION.is_file():
+    reward_validation = load_json(REWARD_PROFILE_VALIDATION)
+    print('status:', reward_validation['status'])
+    display(pd.DataFrame(reward_validation['rows']))
+else:
+    print('No reward profile validation JSON found yet.')
 """)
 
 md("""
@@ -1030,8 +1138,40 @@ def train_command(
         '--episodes', str(episodes),
         '--output-dir', str(output_root / algorithm),
     ]
-    if algorithm in {'happo', 'matd3'}:
-        command.extend(['--num-env-steps', str(num_env_steps)])
+    if algorithm == 'happo':
+        command.extend([
+            '--num-env-steps', str(num_env_steps),
+            '--hidden-size', '256',
+            '--torch-threads', '8',
+        ])
+    elif algorithm == 'masac':
+        command.extend([
+            '--action-bins', '3',
+            '--buffer-size', '2',
+        ])
+    elif algorithm == 'matd3':
+        command.extend([
+            '--num-env-steps', str(num_env_steps),
+            '--batch-size', '256',
+            '--buffer-size', '10000',
+            '--hidden-size', '256',
+            '--train-interval', '100',
+            '--num-random-episodes', '1',
+        ])
+    elif algorithm == 'maac':
+        command.extend([
+            '--action-bins', '3',
+            '--batch-size', '256',
+            '--buffer-length', '100000',
+            '--steps-per-update', '100',
+            '--num-updates', '4',
+            '--hidden-size', '256',
+            '--attend-heads', '4',
+            '--pi-lr', '0.0003',
+            '--q-lr', '0.001',
+            '--tau', '0.005',
+            '--gamma', '0.99',
+        ])
     if cuda:
         command.append('--cuda')
     return command
@@ -1107,7 +1247,7 @@ else:
 md("""
 ## Monitor visual local
 
-El proyecto incluye un monitor PowerShell que muestra la matriz `E1/E2/E3 x HAPPO/MASAC/MATD3/MAAC`, uso GPU, proceso activo, `global_step`, episodio, `reward_sum`, `reward_mean`, costo, CO2, carga neta y artefactos recientes.
+El proyecto incluye un monitor PowerShell que muestra la matriz `E1/E2/E3 x HAPPO/MASAC/MATD3/MAAC`, uso GPU, proceso activo, `global_step`, episodio, recompensa instantanea, retorno acumulado, funcion reward, perfil MADRL, pesos activos, costo, CO2, carga neta y artefactos recientes.
 """)
 
 code("""
@@ -1383,7 +1523,40 @@ print('Algorithms:', config.algorithms)
 print('Scenarios:', config.scenarios)
 print('Seeds:', config.seeds)
 print('Episode time steps:', config.episode_time_steps)
+print('Reward function:', config.reward_function)
 display(pd.Series(config.hyperparameters).to_frame('value'))
+display(axis_reward_table)
+display(reward_profile_table)
+""")
+
+code("""
+official_hyperparameters = pd.DataFrame([
+    {
+        'algorithm': 'HAPPO',
+        'main_parameters': 'hidden_size=256, share_param=False, n_rollout_threads=1',
+        'training': 'episode_length=8760, num_env_steps=43800, log_interval=1, eval_interval=1',
+        'optimizer': 'HARL official defaults: lr=5e-4, critic_lr=5e-4, gamma=0.99, gae_lambda=0.95, clip=0.2',
+    },
+    {
+        'algorithm': 'MASAC',
+        'main_parameters': 'action_bins=3, critic_batch_size=1, buffer_size=2',
+        'training': 'episodes=5, n_epoch=5, n_episodes=1, episode_limit=8760',
+        'optimizer': 'paper backend defaults plus CityLearn v3 CTDE state_shape',
+    },
+    {
+        'algorithm': 'MATD3',
+        'main_parameters': 'batch_size=256, buffer_size=10000, hidden_size=256',
+        'training': 'num_env_steps=43800, train_interval=100, num_random_episodes=1',
+        'optimizer': 'off-policy defaults: lr=5e-4, gamma=0.99, tau=0.005, target_noise=0.2',
+    },
+    {
+        'algorithm': 'MAAC',
+        'main_parameters': 'batch_size=256, buffer_length=100000, hidden_size=256, attend_heads=4',
+        'training': 'steps_per_update=100, num_updates=4, episodes=5',
+        'optimizer': 'pi_lr=3e-4, q_lr=1e-3, tau=0.005, gamma=0.99, reward_scale=100',
+    },
+])
+display(official_hyperparameters)
 """)
 
 md("""
@@ -1472,8 +1645,8 @@ Zhong, Y., Kuba, J. G., Feng, X., Hu, S., Ji, J., & Yang, Y. (2024). Heterogeneo
 md("""
 # Next Steps
 
-1. Esperar a que termine el entrenamiento oficial secuencial.
-2. Regenerar figuras si alguna corrida fue creada antes del contrato ampliado.
+1. Reiniciar el entrenamiento oficial secuencial despues de limpiar salidas creadas con rewards anteriores.
+2. Regenerar figuras si alguna corrida fue creada antes de `CityLearnV3MADRLRewardFunction`.
 3. Consolidar `objective_kpis.csv` de HAPPO, MASAC, MATD3 y MAAC.
 4. Crear tablas comparativas por OE1/OE2/OE3.
 5. Aplicar ranking TOPSIS o ponderado con pesos justificados.
