@@ -13,6 +13,8 @@ from citylearn.v3.config import CityLearnV3ExperimentConfig
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 EXTERNAL_ROOT = PROJECT_ROOT / "external"
 BACKENDS_LOCK = EXTERNAL_ROOT / "backends.lock.json"
+TRAINING_CONFIG_YAML = PROJECT_ROOT / "CityLearn" / "configs" / "citylearn_v3_madrl_training.yaml"
+TRAINING_CONFIG_JSON = PROJECT_ROOT / "CityLearn" / "configs" / "citylearn_v3_madrl_training.json"
 
 
 def _load_backend_lock() -> Dict[str, object]:
@@ -22,7 +24,7 @@ def _load_backend_lock() -> Dict[str, object]:
     with BACKENDS_LOCK.open("r", encoding="utf-8") as file:
         data = json.load(file)
 
-    return data.get("backends", {})
+    return data
 
 
 def citylearn_v3_backend_manifest(
@@ -35,12 +37,18 @@ def citylearn_v3_backend_manifest(
     config = CityLearnV3ExperimentConfig() if config is None else config
     selected = tuple(algorithm.upper() for algorithm in (algorithms or config.algorithms))
     status = official_backend_status((*selected, "MARLLIB"), external_root=EXTERNAL_ROOT)
-    locked_backends = _load_backend_lock()
+    backend_lock = _load_backend_lock()
+    locked_backends = backend_lock.get("backends", {})
 
     return {
         "version_layer": "citylearn-v3-madrl",
         "simulator": "citylearn-v2",
         "schema_path": str(config.schema_path),
+        "training_config": {
+            "yaml": str(TRAINING_CONFIG_YAML),
+            "json": str(TRAINING_CONFIG_JSON),
+            "lock_metadata": backend_lock.get("citylearn_v3_training_config", {}),
+        },
         "dec_pomdp": {
             "central_agent": config.central_agent,
             "reward_aggregation": config.reward_aggregation,

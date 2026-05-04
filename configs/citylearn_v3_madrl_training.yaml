@@ -1,0 +1,301 @@
+schema_version: 2
+name: citylearn_v3_madrl_training
+updated_date: "2026-05-04"
+purpose: "Canonical CityLearn v3 MADRL training overlay for the thesis project."
+version_layer: "citylearn-v3-madrl"
+simulator: "citylearn-v2"
+
+dataset:
+  name: "citylearn_challenge_2022_phase_all_plus_evs"
+  schema_path: "CityLearn/data/datasets/citylearn_challenge_2022_phase_all_plus_evs/schema.json"
+  buildings: 17
+  includes_evs: true
+  includes_washing_machine_flexible_load: true
+  seconds_per_time_step: 3600
+
+dec_pomdp:
+  formulation: "decentralized_partially_observable_markov_decision_process"
+  central_agent: false
+  centralized_training: true
+  decentralized_execution: true
+  ctde_state: "concatenated_local_observations"
+  reward_aggregation: "team_mean"
+  agents: "CityLearn buildings; EV chargers and flexible loads remain inside each building action space."
+
+official_training:
+  scenarios:
+    - "E1"
+    - "E2"
+    - "E3"
+  seed: 0
+  episode_time_steps: 8760
+  episodes: 5
+  num_env_steps: 43800
+  execution: "sequential"
+  cuda: true
+  torch_build: "torch 2.8.0+cu126"
+  torch_threads: 12
+  output_root: "outputs/citylearn_v3_madrl_official_full_cuda_v2"
+  launcher: "CityLearn/scripts/launch_citylearn_v3_official_training.ps1"
+  monitor: "CityLearn/scripts/monitor_citylearn_v3_official_training.ps1"
+
+reward:
+  function: "citylearn.reward_function.CityLearnV3MADRLRewardFunction"
+  not_using_marl_base_weights: true
+  citylearn_v2_kpis_are_evaluation_metrics: true
+  axis_weights:
+    E1:
+      flex: 0.70
+      carbon: 0.15
+      cost: 0.15
+    E2:
+      flex: 0.15
+      carbon: 0.70
+      cost: 0.15
+    E3:
+      flex: 0.25
+      carbon: 0.15
+      cost: 0.60
+  profiles:
+    HAPPO:
+      profile_name: "happo_on_policy_cooperative_ctde"
+      axis_weight_multipliers:
+        flex: 1.00
+        carbon: 1.00
+        cost: 1.00
+      team_reward_ratio: 0.75
+      ev_weight: 0.15
+      reward_scale: 1.00
+      ramp_weight: 0.35
+      peak_weight: 0.45
+    MASAC:
+      profile_name: "masac_entropy_regularized_dense_local_signal"
+      axis_weight_multipliers:
+        flex: 0.95
+        carbon: 1.00
+        cost: 1.05
+      team_reward_ratio: 0.55
+      ev_weight: 0.12
+      reward_scale: 0.80
+      ramp_weight: 0.30
+      peak_weight: 0.40
+    MATD3:
+      profile_name: "matd3_deterministic_peak_ramp_control"
+      axis_weight_multipliers:
+        flex: 1.15
+        carbon: 0.95
+        cost: 1.10
+      team_reward_ratio: 0.65
+      ev_weight: 0.10
+      reward_scale: 1.10
+      ramp_weight: 0.45
+      peak_weight: 0.50
+    MAAC:
+      profile_name: "maac_attention_coordinated_multiagent"
+      axis_weight_multipliers:
+        flex: 1.05
+        carbon: 1.05
+        cost: 1.00
+      team_reward_ratio: 0.80
+      ev_weight: 0.16
+      reward_scale: 1.00
+      ramp_weight: 0.38
+      peak_weight: 0.42
+
+objectives:
+  E1:
+    name: "flexibilidad_energetica"
+    objective: "Increase load shifting capacity and use batteries, EVs and PV self-consumption."
+    kpis:
+      - "grid_import"
+      - "grid_import_control"
+      - "grid_import_baseline"
+      - "grid_import_delta"
+      - "zero_net_energy"
+      - "zero_net_energy_control"
+      - "zero_net_energy_baseline"
+      - "zero_net_energy_delta"
+      - "grid_export"
+      - "grid_export_control"
+      - "grid_export_baseline"
+      - "grid_export_delta"
+      - "peak_average"
+      - "ramping_average"
+      - "one_minus_load_factor_average"
+  E2:
+    name: "emisiones_de_co2"
+    objective: "Reduce district greenhouse gas footprint and avoid imports during high carbon intensity hours."
+    kpis:
+      - "carbon_emissions"
+      - "carbon_emissions_control"
+      - "carbon_emissions_baseline"
+      - "carbon_emissions_delta"
+      - "carbon_emissions_daily_average_control"
+      - "carbon_emissions_daily_average_baseline"
+      - "carbon_emissions_daily_average_delta"
+  E3:
+    name: "costos_energeticos"
+    objective: "Optimize energy expenditure by reducing demand peaks and using dynamic tariffs."
+    kpis:
+      - "electricity_cost"
+      - "electricity_cost_control"
+      - "electricity_cost_baseline"
+      - "electricity_cost_delta"
+      - "electricity_cost_daily_average_control"
+      - "electricity_cost_daily_average_baseline"
+      - "electricity_cost_daily_average_delta"
+      - "cost_peak_average"
+      - "cost_ramping_average"
+      - "cost_one_minus_load_factor_average"
+      - "price_signal_deviation"
+
+algorithms:
+  HAPPO:
+    script: "CityLearn/scripts/train_citylearn_v3_happo.py"
+    backend: "external/HARL"
+    repository: "https://github.com/PKU-MARL/HARL"
+    training_paradigm: "on_policy_cooperative_ctde"
+    execution_policy: "decentralized_actor_per_building"
+    action_type: "continuous"
+    reward_profile: "HAPPO"
+    cli:
+      num_env_steps: 43800
+      hidden_size: 256
+      torch_threads: 12
+      cuda: true
+    hyperparameters:
+      episodes: 5
+      episode_length: 8760
+      n_rollout_threads: 1
+      hidden_sizes:
+        - 256
+        - 256
+      share_param: false
+      log_interval: 1
+      eval_interval: 1
+      lr: 0.0005
+      critic_lr: 0.0005
+      gamma: 0.99
+      gae_lambda: 0.95
+      clip_param: 0.2
+
+  MASAC:
+    script: "CityLearn/scripts/train_citylearn_v3_masac.py"
+    backend: "external/MARL"
+    repository: "https://github.com/puyuan1996/MARL"
+    training_paradigm: "entropy_regularized_discrete_ctde"
+    execution_policy: "local_discrete_policy_mapped_to_citylearn_actions"
+    action_type: "discretized_continuous"
+    reward_profile: "MASAC"
+    cli:
+      action_bins: 3
+      buffer_size: 2
+      cuda: true
+    hyperparameters:
+      episodes: 5
+      n_epoch: 5
+      n_episodes_per_epoch: 1
+      episode_limit: 8760
+      action_bins: 3
+      critic_batch_size: 1
+      buffer_size: 2
+      state_shape: "CityLearn v3 CTDE state_shape"
+      obs_shape: "CityLearn v3 local obs_shape"
+
+  MATD3:
+    script: "CityLearn/scripts/train_citylearn_v3_matd3.py"
+    backend: "external/off-policy"
+    repository: "https://github.com/marlbenchmark/off-policy"
+    training_paradigm: "off_policy_deterministic_ctde"
+    execution_policy: "local_continuous_actor_per_building"
+    action_type: "continuous"
+    reward_profile: "MATD3"
+    cli:
+      num_env_steps: 43800
+      batch_size: 256
+      buffer_size: 10000
+      hidden_size: 256
+      train_interval: 100
+      num_random_episodes: 1
+      cuda: true
+    hyperparameters:
+      episodes: 5
+      episode_length: 8760
+      num_env_steps: 43800
+      batch_size: 256
+      buffer_size: 10000
+      hidden_size: 256
+      train_interval: 100
+      num_random_episodes: 1
+      share_policy: false
+      use_same_share_obs: true
+      lr: 0.0005
+      gamma: 0.99
+      tau: 0.005
+      target_noise: 0.2
+
+  MAAC:
+    script: "CityLearn/scripts/train_citylearn_v3_maac.py"
+    backend: "external/MAAC"
+    repository: "https://github.com/shariqiqbal2810/MAAC"
+    training_paradigm: "attention_critic_multiagent_ctde"
+    execution_policy: "local_discrete_policy_mapped_to_citylearn_actions"
+    action_type: "discretized_continuous"
+    reward_profile: "MAAC"
+    cli:
+      action_bins: 3
+      batch_size: 256
+      buffer_length: 100000
+      steps_per_update: 100
+      num_updates: 4
+      hidden_size: 256
+      attend_heads: 4
+      pi_lr: 0.0003
+      q_lr: 0.001
+      tau: 0.005
+      gamma: 0.99
+      reward_scale: 100.0
+      cuda: true
+    hyperparameters:
+      episodes: 5
+      episode_length: 8760
+      action_bins: 3
+      batch_size: 256
+      buffer_length: 100000
+      steps_per_update: 100
+      num_updates: 4
+      hidden_size: 256
+      attend_heads: 4
+      pi_lr: 0.0003
+      q_lr: 0.001
+      tau: 0.005
+      gamma: 0.99
+      reward_scale: 100.0
+
+artifacts:
+  per_run_directory: "outputs/<experiment>/<madrl>/<scenario>_seed_<seed>"
+  required_files:
+    - "results.json"
+    - "training_summary.json"
+    - "timeseries.csv"
+    - "trace.csv"
+    - "checkpoint_manifest.json"
+  required_directories:
+    - "data"
+    - "checkpoints"
+    - "figures"
+    - "figures/tables"
+  required_figures:
+    - "reward_timeseries.png"
+    - "convergence_returns.png"
+    - "episode_reward_summary.png"
+    - "learning_efficiency.png"
+    - "citylearn_v2_district_timeseries.png"
+    - "exploration_action_l2.png"
+    - "agent_reward_contribution.png"
+    - "axis_baseline_comparison.png"
+    - "baseline_gain_by_kpi.png"
+    - "core_kpis.png"
+    - "OE1_flexibility_kpis.png"
+    - "OE2_co2_kpis.png"
+    - "OE3_cost_kpis.png"

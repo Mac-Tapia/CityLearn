@@ -3,8 +3,8 @@ param(
     [int]$Seed = 0,
     [int]$EpisodeTimeSteps = 8760,
     [int]$Episodes = 5,
-    [string]$OutputRoot = "outputs\citylearn_v3_madrl_official_full",
-    [int]$TorchThreads = 8,
+    [string]$OutputRoot = "outputs\citylearn_v3_madrl_official_full_cuda_v2",
+    [int]$TorchThreads = 12,
     [switch]$Cuda = $true,
     [switch]$LiveOutput
 )
@@ -18,6 +18,8 @@ $OutputRootPath = Join-Path $ProjectRoot $OutputRoot
 $LogDir = Join-Path $OutputRootPath "logs"
 $ManifestPath = Join-Path $OutputRootPath "official_full_manifest.json"
 $StatusPath = Join-Path $OutputRootPath "official_full_status.json"
+$TrainingConfigYaml = "CityLearn\configs\citylearn_v3_madrl_training.yaml"
+$TrainingConfigJson = "CityLearn\configs\citylearn_v3_madrl_training.json"
 $NumEnvSteps = $EpisodeTimeSteps * $Episodes
 $CudaArgs = if ($Cuda) { @("--cuda") } else { @() }
 $ScenarioList = if ($Scenario.ToUpperInvariant() -in @("ALL", "TODOS", "3EJES")) {
@@ -130,6 +132,16 @@ $manifest = [ordered]@{
     torch = "torch 2.8.0+cu126"
     cuda = [bool]$Cuda
     execution = "sequential"
+    training_config = [ordered]@{
+        yaml = $TrainingConfigYaml
+        json = $TrainingConfigJson
+        schema_version = 2
+    }
+    reward = [ordered]@{
+        function = "citylearn.reward_function.CityLearnV3MADRLRewardFunction"
+        aggregation = "team_mean"
+        not_using_marl_base_weights = $true
+    }
     output_root = $OutputRoot
     jobs = @()
 }
