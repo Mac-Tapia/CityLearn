@@ -63,7 +63,7 @@ def main() -> int:
         episode_time_steps=args.episode_time_steps,
         algorithm="MATD3",
         live_progress_path=str(output_dir / "live_progress.json"),
-        live_progress_interval=100,
+        live_progress_interval=args.live_progress_interval,
     )
     eval_env = CityLearnOffPolicyVecEnv(
         schema_path=args.schema_path,
@@ -144,6 +144,7 @@ def main() -> int:
         "hidden_size": args.hidden_size,
         "train_interval": args.train_interval,
         "num_random_episodes": args.num_random_episodes,
+        "live_progress_interval": args.live_progress_interval,
         "share_policy": all_args.share_policy,
         "use_same_share_obs": all_args.use_same_share_obs,
         "checkpoint_interval_steps": all_args.save_interval,

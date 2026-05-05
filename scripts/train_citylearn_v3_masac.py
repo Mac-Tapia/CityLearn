@@ -28,6 +28,12 @@ def parse_args():
     parser.add_argument("--epochs", default=1, type=int)
     parser.add_argument("--action-bins", default=3, type=int)
     parser.add_argument("--buffer-size", default=2, type=int)
+    parser.add_argument("--critic-batch-size", default=1, type=int)
+    parser.add_argument("--critic-train-steps", default=1, type=int)
+    parser.add_argument("--actor-sample-times", default=5, type=int)
+    parser.add_argument("--rnn-hidden-dim", default=64, type=int)
+    parser.add_argument("--qmix-hidden-dim", default=32, type=int)
+    parser.add_argument("--hyper-hidden-dim", default=64, type=int)
     parser.add_argument("--cuda", action="store_true")
     return parser.parse_args()
 
@@ -51,7 +57,7 @@ def main() -> int:
         action_bins=args.action_bins,
         algorithm="MASAC",
         live_progress_path=str(output_dir / "live_progress.json"),
-        live_progress_interval=100,
+        live_progress_interval=args.live_progress_interval,
     )
     env_info = env.get_env_info()
 
@@ -78,7 +84,12 @@ def main() -> int:
     backend_args.state_shape = env_info["state_shape"]
     backend_args.obs_shape = env_info["obs_shape"]
     backend_args.episode_limit = env_info["episode_limit"]
-    backend_args.critic_batch_size = 1
+    backend_args.critic_batch_size = max(1, int(args.critic_batch_size))
+    backend_args.critic_train_steps = max(1, int(args.critic_train_steps))
+    backend_args.actor_sample_times = max(1, int(args.actor_sample_times))
+    backend_args.rnn_hidden_dim = max(1, int(args.rnn_hidden_dim))
+    backend_args.qmix_hidden_dim = max(1, int(args.qmix_hidden_dim))
+    backend_args.hyper_hidden_dim = max(1, int(args.hyper_hidden_dim))
     backend_args.buffer_size = max(int(args.buffer_size), 2)
 
     torch.manual_seed(args.seed)
@@ -93,7 +104,13 @@ def main() -> int:
         "action_bins": args.action_bins,
         "n_discrete_actions": env_info["n_actions"],
         "critic_batch_size": backend_args.critic_batch_size,
+        "critic_train_steps": backend_args.critic_train_steps,
+        "actor_sample_times": backend_args.actor_sample_times,
         "buffer_size": backend_args.buffer_size,
+        "rnn_hidden_dim": backend_args.rnn_hidden_dim,
+        "qmix_hidden_dim": backend_args.qmix_hidden_dim,
+        "hyper_hidden_dim": backend_args.hyper_hidden_dim,
+        "live_progress_interval": args.live_progress_interval,
         "cuda": backend_args.cuda,
         "ctde_state_shape": backend_args.state_shape,
         "reward_function": "CityLearnV3MADRLRewardFunction",

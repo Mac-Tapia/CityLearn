@@ -67,6 +67,12 @@ def add_common_citylearn_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", default=0, type=int, help="Random seed.")
     parser.add_argument("--episode-time-steps", default=4, type=int, help="Episode length for the launcher.")
     parser.add_argument("--output-dir", default=None, help="Directory for logs, models and summaries.")
+    parser.add_argument(
+        "--live-progress-interval",
+        default=250,
+        type=int,
+        help="Environment steps between live_progress.json writes.",
+    )
 
 
 def resolve_output_dir(output_dir: Optional[str], algorithm: str, scenario: str, seed: int) -> Path:

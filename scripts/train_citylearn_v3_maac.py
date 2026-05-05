@@ -64,7 +64,7 @@ def main() -> int:
         action_bins=args.action_bins,
         algorithm="MAAC",
         live_progress_path=str(output_dir / "live_progress.json"),
-        live_progress_interval=100,
+        live_progress_interval=args.live_progress_interval,
     )
     logger = NoOpLogger()
 
@@ -109,6 +109,7 @@ def main() -> int:
         "tau": args.tau,
         "gamma": args.gamma,
         "reward_scale": args.reward_scale,
+        "live_progress_interval": args.live_progress_interval,
         "cuda": use_gpu,
         "critic": "multi-agent attention critic",
         "reward_function": "CityLearnV3MADRLRewardFunction",

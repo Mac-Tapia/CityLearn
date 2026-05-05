@@ -27,6 +27,9 @@ def parse_args():
     parser.add_argument("--num-env-steps", default=8, type=int)
     parser.add_argument("--hidden-size", default=128, type=int)
     parser.add_argument("--torch-threads", default=1, type=int)
+    parser.add_argument("--n-rollout-threads", default=1, type=int)
+    parser.add_argument("--log-interval", default=1, type=int)
+    parser.add_argument("--eval-interval", default=1, type=int)
     parser.add_argument("--cuda", action="store_true")
     parser.add_argument("--exp-name", default="citylearn_v3_happo")
     return parser.parse_args()
@@ -44,12 +47,13 @@ def main() -> int:
 
     output_dir = resolve_output_dir(args.output_dir, "happo", args.scenario, args.seed)
     artifact_dirs = ensure_artifact_layout(output_dir)
+    rollout_threads = max(1, int(args.n_rollout_threads))
     configured_num_env_steps = max(
         args.num_env_steps,
         args.episode_time_steps,
-        (args.episodes or 0) * args.episode_time_steps,
+        (args.episodes or 0) * args.episode_time_steps * rollout_threads,
     )
-    configured_episodes = max(1, configured_num_env_steps // max(args.episode_time_steps, 1))
+    configured_episodes = max(1, configured_num_env_steps // max(args.episode_time_steps, 1) // rollout_threads)
 
     def make_citylearn_train_env(env_name, seed, n_threads, env_args):
         def make_env(rank):
@@ -61,7 +65,7 @@ def main() -> int:
                     episode_time_steps=args.episode_time_steps,
                     algorithm="HAPPO",
                     live_progress_path=str(output_dir / "live_progress.json"),
-                    live_progress_interval=100,
+                    live_progress_interval=args.live_progress_interval,
                 )
                 env.seed(seed + rank * 1000)
                 return env
@@ -76,11 +80,11 @@ def main() -> int:
     algo_args["seed"]["seed"] = args.seed
     algo_args["device"]["cuda"] = bool(args.cuda and torch.cuda.is_available())
     algo_args["device"]["torch_threads"] = args.torch_threads
-    algo_args["train"]["n_rollout_threads"] = 1
+    algo_args["train"]["n_rollout_threads"] = rollout_threads
     algo_args["train"]["episode_length"] = args.episode_time_steps
     algo_args["train"]["num_env_steps"] = configured_num_env_steps
-    algo_args["train"]["log_interval"] = 1
-    algo_args["train"]["eval_interval"] = 1
+    algo_args["train"]["log_interval"] = max(1, int(args.log_interval))
+    algo_args["train"]["eval_interval"] = max(1, int(args.eval_interval))
     algo_args["eval"]["use_eval"] = False
     algo_args["logger"]["log_dir"] = str(artifact_dirs["checkpoints"])
     algo_args["model"]["hidden_sizes"] = [args.hidden_size, args.hidden_size]
@@ -107,6 +111,7 @@ def main() -> int:
         "n_rollout_threads": algo_args["train"]["n_rollout_threads"],
         "log_interval": algo_args["train"]["log_interval"],
         "checkpoint_interval_episodes": algo_args["train"]["eval_interval"],
+        "live_progress_interval": args.live_progress_interval,
         "cuda": algo_args["device"]["cuda"],
         "reward_function": "CityLearnV3MADRLRewardFunction",
         "reward_profile": "HAPPO",

@@ -1,6 +1,26 @@
 # CityLearn
 CityLearn is an open source Farama Foundation Gymnasium environment for the implementation of Multi-Agent Reinforcement Learning (RL) for building energy coordination and demand response in cities. A major challenge for RL in demand response is the ability to compare algorithm performance. Thus, CityLearn facilitates and standardizes the evaluation of RL agents such that different algorithms can be easily compared with each other.
 
+## CityLearn v3 MADRL thesis overlay
+
+This fork includes a CityLearn v3 experimental layer for cooperative MADRL training over the CityLearn v2 simulator. The active thesis workflow uses the `citylearn_challenge_2022_phase_all_plus_evs` dataset, 17 buildings with EVs, Dec-POMDP/CTDE wrappers, and four official backends: HAPPO, MASAC, MATD3 and MAAC.
+
+The official local launcher is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\launch_citylearn_v3_official_training.ps1 `
+  -Scenario ALL `
+  -Seed 0 `
+  -EpisodeTimeSteps 8760 `
+  -Episodes 5 `
+  -OutputRoot ..\outputs\citylearn_v3_madrl_official_full_cuda_v2 `
+  -TorchThreads 12 `
+  -LiveProgressInterval 250 `
+  -Cuda
+```
+
+The current GPU-tuned profile uses larger neural layers and batches where they help, but keeps one reproducible district rollout per MADRL/scenario for CityLearn v2 vs v3 comparisons. MASAC can show high GPU memory allocation with low instantaneous utilization because rollout collection is CPU/CityLearn-bound and PyTorch updates occur between rollout phases.
+
 ![Demand-response](https://github.com/intelligent-environments-lab/CityLearn/blob/master/assets/images/dr.jpg)
 
 ## Environment Overview

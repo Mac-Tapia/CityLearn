@@ -1141,36 +1141,49 @@ def train_command(
     if algorithm == 'happo':
         command.extend([
             '--num-env-steps', str(num_env_steps),
-            '--hidden-size', '256',
-            '--torch-threads', '8',
+            '--hidden-size', '384',
+            '--torch-threads', '12',
+            '--n-rollout-threads', '1',
+            '--log-interval', '1',
+            '--eval-interval', '1',
+            '--live-progress-interval', '250',
         ])
     elif algorithm == 'masac':
         command.extend([
             '--action-bins', '3',
-            '--buffer-size', '2',
+            '--buffer-size', '8',
+            '--critic-batch-size', '2',
+            '--critic-train-steps', '2',
+            '--actor-sample-times', '8',
+            '--rnn-hidden-dim', '128',
+            '--qmix-hidden-dim', '64',
+            '--hyper-hidden-dim', '128',
+            '--live-progress-interval', '250',
         ])
     elif algorithm == 'matd3':
         command.extend([
             '--num-env-steps', str(num_env_steps),
-            '--batch-size', '256',
-            '--buffer-size', '10000',
-            '--hidden-size', '256',
+            '--batch-size', '512',
+            '--buffer-size', '50000',
+            '--hidden-size', '384',
             '--train-interval', '100',
             '--num-random-episodes', '1',
+            '--live-progress-interval', '250',
         ])
     elif algorithm == 'maac':
         command.extend([
             '--action-bins', '3',
-            '--batch-size', '256',
-            '--buffer-length', '100000',
-            '--steps-per-update', '100',
-            '--num-updates', '4',
-            '--hidden-size', '256',
+            '--batch-size', '512',
+            '--buffer-length', '200000',
+            '--steps-per-update', '250',
+            '--num-updates', '8',
+            '--hidden-size', '384',
             '--attend-heads', '4',
             '--pi-lr', '0.0003',
             '--q-lr', '0.001',
             '--tau', '0.005',
             '--gamma', '0.99',
+            '--live-progress-interval', '250',
         ])
     if cuda:
         command.append('--cuda')
@@ -1202,9 +1215,15 @@ else:
 """)
 
 md("""
+## Perfil GPU local y limite real de MASAC
+
+El lanzamiento oficial vigente usa un perfil **GPU-tuned conservador** para la RTX 4060 Laptop de 8 GB: redes de 384 unidades en HAPPO/MATD3/MAAC, lotes `512` en MATD3/MAAC, `live_progress_interval=250`, y MASAC con `buffer_size=8`, `critic_batch_size=2`, `critic_train_steps=2`, `actor_sample_times=8`, `rnn_hidden_dim=128`, `qmix_hidden_dim=64` e `hyper_hidden_dim=128`.
+
+En MASAC puede verse memoria GPU alta y utilizacion baja. Esto no significa que CUDA este fallando: el backend oficial alterna entre simulacion secuencial del entorno CityLearn para 17 edificios + EV y actualizaciones PyTorch. Durante el rollout, el cuello de botella es CPU/Python/CityLearn; la GPU se activa mas durante las actualizaciones de red. Subir mas los lotes en la GPU local no necesariamente acelera, porque con 8 GB de VRAM aumenta el costo por actualizacion y el riesgo de quedarse sin memoria.
+
 ## Official Full Training
 
-El entrenamiento oficial usa 17 edificios + EV, `-Scenario ALL`, 8760 pasos por episodio y 5 episodios. El lanzador ejecuta 12 trabajos secuenciales: `E1/E2/E3 x HAPPO/MASAC/MATD3/MAAC`. Esta ejecucion secuencial reduce conflictos de memoria GPU y deja salidas separadas por eje:
+El entrenamiento oficial usa 17 edificios + EV, `-Scenario ALL`, 8760 pasos por episodio, 5 episodios y perfil GPU-tuned local conservador. El lanzador ejecuta 12 trabajos secuenciales: `E1/E2/E3 x HAPPO/MASAC/MATD3/MAAC`. Esta ejecucion secuencial reduce conflictos de memoria GPU y deja salidas separadas por eje:
 
 ```text
 outputs/citylearn_v3_madrl_official_full_cuda_v2/
@@ -1306,36 +1325,49 @@ def colab_madrl_command(algorithm: str, scenario: str) -> List[str]:
     if algorithm == 'happo':
         command.extend([
             '--num-env-steps', str(num_env_steps),
-            '--hidden-size', '256',
-            '--torch-threads', '8',
+            '--hidden-size', '384',
+            '--torch-threads', '12',
+            '--n-rollout-threads', '1',
+            '--log-interval', '1',
+            '--eval-interval', '1',
+            '--live-progress-interval', '250',
         ])
     elif algorithm == 'masac':
         command.extend([
             '--action-bins', '3',
-            '--buffer-size', '2',
+            '--buffer-size', '8',
+            '--critic-batch-size', '2',
+            '--critic-train-steps', '2',
+            '--actor-sample-times', '8',
+            '--rnn-hidden-dim', '128',
+            '--qmix-hidden-dim', '64',
+            '--hyper-hidden-dim', '128',
+            '--live-progress-interval', '250',
         ])
     elif algorithm == 'matd3':
         command.extend([
             '--num-env-steps', str(num_env_steps),
-            '--batch-size', '256',
-            '--buffer-size', '10000',
-            '--hidden-size', '256',
+            '--batch-size', '512',
+            '--buffer-size', '50000',
+            '--hidden-size', '384',
             '--train-interval', '100',
             '--num-random-episodes', '1',
+            '--live-progress-interval', '250',
         ])
     elif algorithm == 'maac':
         command.extend([
             '--action-bins', '3',
-            '--batch-size', '256',
-            '--buffer-length', '100000',
-            '--steps-per-update', '100',
-            '--num-updates', '4',
-            '--hidden-size', '256',
+            '--batch-size', '512',
+            '--buffer-length', '200000',
+            '--steps-per-update', '250',
+            '--num-updates', '8',
+            '--hidden-size', '384',
             '--attend-heads', '4',
             '--pi-lr', '0.0003',
             '--q-lr', '0.001',
             '--tau', '0.005',
             '--gamma', '0.99',
+            '--live-progress-interval', '250',
         ])
     else:
         raise ValueError(f'Unknown algorithm: {algorithm}')

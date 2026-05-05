@@ -5,6 +5,7 @@ param(
     [int]$Episodes = 5,
     [string]$OutputRoot = "outputs\citylearn_v3_madrl_official_full_cuda_v2",
     [int]$TorchThreads = 12,
+    [int]$LiveProgressInterval = 250,
     [switch]$Cuda = $true,
     [switch]$LiveOutput
 )
@@ -51,8 +52,12 @@ foreach ($scenarioName in $ScenarioList) {
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
             "--num-env-steps", "$NumEnvSteps",
-            "--hidden-size", "256",
-            "--torch-threads", "$TorchThreads"
+            "--hidden-size", "384",
+            "--torch-threads", "$TorchThreads",
+            "--n-rollout-threads", "1",
+            "--log-interval", "1",
+            "--eval-interval", "1",
+            "--live-progress-interval", "$LiveProgressInterval"
         ) + $CudaArgs + @(
             "--output-dir", (Join-Path $OutputRoot "happo")
         )
@@ -67,7 +72,14 @@ foreach ($scenarioName in $ScenarioList) {
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
             "--action-bins", "3",
-            "--buffer-size", "2"
+            "--buffer-size", "8",
+            "--critic-batch-size", "2",
+            "--critic-train-steps", "2",
+            "--actor-sample-times", "8",
+            "--rnn-hidden-dim", "128",
+            "--qmix-hidden-dim", "64",
+            "--hyper-hidden-dim", "128",
+            "--live-progress-interval", "$LiveProgressInterval"
         ) + $CudaArgs + @(
             "--output-dir", (Join-Path $OutputRoot "masac")
         )
@@ -82,11 +94,12 @@ foreach ($scenarioName in $ScenarioList) {
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
             "--num-env-steps", "$NumEnvSteps",
-            "--batch-size", "256",
-            "--buffer-size", "10000",
-            "--hidden-size", "256",
+            "--batch-size", "512",
+            "--buffer-size", "50000",
+            "--hidden-size", "384",
             "--train-interval", "100",
-            "--num-random-episodes", "1"
+            "--num-random-episodes", "1",
+            "--live-progress-interval", "$LiveProgressInterval"
         ) + $CudaArgs + @(
             "--output-dir", (Join-Path $OutputRoot "matd3")
         )
@@ -101,16 +114,17 @@ foreach ($scenarioName in $ScenarioList) {
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
             "--action-bins", "3",
-            "--batch-size", "256",
-            "--buffer-length", "100000",
-            "--steps-per-update", "100",
-            "--num-updates", "4",
-            "--hidden-size", "256",
+            "--batch-size", "512",
+            "--buffer-length", "200000",
+            "--steps-per-update", "250",
+            "--num-updates", "8",
+            "--hidden-size", "384",
             "--attend-heads", "4",
             "--pi-lr", "0.0003",
             "--q-lr", "0.001",
             "--tau", "0.005",
-            "--gamma", "0.99"
+            "--gamma", "0.99",
+            "--live-progress-interval", "$LiveProgressInterval"
         ) + $CudaArgs + @(
             "--output-dir", (Join-Path $OutputRoot "maac")
         )
@@ -132,6 +146,12 @@ $manifest = [ordered]@{
     torch = "torch 2.8.0+cu126"
     cuda = [bool]$Cuda
     execution = "sequential"
+    gpu_optimization = [ordered]@{
+        enabled = $true
+        live_progress_interval = $LiveProgressInterval
+        strategy = "larger batches, grouped updates, reduced live-progress IO"
+        note = "Environment execution remains sequential to preserve CityLearn episode accounting and reproducible v2/v3 comparisons."
+    }
     training_config = [ordered]@{
         yaml = $TrainingConfigYaml
         json = $TrainingConfigJson
