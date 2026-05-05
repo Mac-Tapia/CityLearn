@@ -1353,6 +1353,7 @@ class CityLearnV3BackendAdapter:
         self.reset_count = 0
         self.trace_records: List[Dict[str, object]] = []
         self.timeseries_records: List[Dict[str, object]] = []
+        self._reset_reward_accumulators()
         self.reward_metadata = self._reward_metadata()
 
     def seed(self, seed: int) -> None:
@@ -1363,6 +1364,37 @@ class CityLearnV3BackendAdapter:
         self.reset_count = 0
         self.trace_records = []
         self.timeseries_records = []
+        self._reset_reward_accumulators()
+
+    def _reset_reward_accumulators(self) -> None:
+        self._episode_reward_sums: Dict[int, float] = {}
+        self._episode_reward_mean_sums: Dict[int, float] = {}
+        self._episode_reward_counts: Dict[int, int] = {}
+        self._episode_reward_mean_counts: Dict[int, int] = {}
+        self._total_reward_sum = 0.0
+        self._total_reward_mean_sum = 0.0
+        self._total_reward_count = 0
+        self._total_reward_mean_count = 0
+
+    def _update_reward_accumulators(self, episode: int, timeseries_row: Mapping[str, object]) -> None:
+        reward_sum = _as_float(timeseries_row.get("reward_sum"))
+        reward_mean = _as_float(timeseries_row.get("reward_mean"))
+
+        if reward_sum is None and reward_mean is None:
+            return
+
+        self._episode_reward_counts[episode] = self._episode_reward_counts.get(episode, 0) + 1
+        self._total_reward_count += 1
+
+        if reward_sum is not None:
+            self._episode_reward_sums[episode] = self._episode_reward_sums.get(episode, 0.0) + reward_sum
+            self._total_reward_sum += reward_sum
+
+        if reward_mean is not None:
+            self._episode_reward_mean_sums[episode] = self._episode_reward_mean_sums.get(episode, 0.0) + reward_mean
+            self._episode_reward_mean_counts[episode] = self._episode_reward_mean_counts.get(episode, 0) + 1
+            self._total_reward_mean_sum += reward_mean
+            self._total_reward_mean_count += 1
 
     def reset(self) -> List[np.ndarray]:
         observations, _infos = self.env.reset(seed=self.seed_value)
@@ -1489,6 +1521,7 @@ class CityLearnV3BackendAdapter:
             "carbon_intensity_mean": _mean_current_building_signal(citylearn_env, "carbon_intensity", "carbon_intensity", time_step),
         }
         self.timeseries_records.append(timeseries_row)
+        self._update_reward_accumulators(episode, timeseries_row)
         self._write_live_progress(timeseries_row)
 
         for agent in self.agents:
@@ -1539,28 +1572,21 @@ class CityLearnV3BackendAdapter:
         if int(timeseries_row["global_step"]) % self.live_progress_interval != 0:
             return
 
-        episode = timeseries_row.get("episode")
-        episode_rows = [row for row in self.timeseries_records if row.get("episode") == episode]
-        episode_reward_sums = [
-            value
-            for value in (_as_float(row.get("reward_sum")) for row in episode_rows)
-            if value is not None
-        ]
-        episode_reward_means = [
-            value
-            for value in (_as_float(row.get("reward_mean")) for row in episode_rows)
-            if value is not None
-        ]
-        total_reward_sums = [
-            value
-            for value in (_as_float(row.get("reward_sum")) for row in self.timeseries_records)
-            if value is not None
-        ]
-        total_reward_means = [
-            value
-            for value in (_as_float(row.get("reward_mean")) for row in self.timeseries_records)
-            if value is not None
-        ]
+        episode = int(timeseries_row.get("episode", 0))
+        episode_steps_recorded = self._episode_reward_counts.get(episode, 0)
+        episode_return_cumulative = self._episode_reward_sums.get(episode)
+        episode_reward_mean_sum = self._episode_reward_mean_sums.get(episode)
+        episode_reward_mean_count = self._episode_reward_mean_counts.get(episode, 0)
+        episode_reward_mean_cumulative = (
+            None
+            if episode_reward_mean_sum is None or episode_reward_mean_count == 0
+            else float(episode_reward_mean_sum / episode_reward_mean_count)
+        )
+        total_reward_mean_cumulative = (
+            None
+            if self._total_reward_mean_count == 0
+            else float(self._total_reward_mean_sum / self._total_reward_mean_count)
+        )
 
         payload = {
             "global_step": int(timeseries_row["global_step"]),
@@ -1578,12 +1604,12 @@ class CityLearnV3BackendAdapter:
             "reward_mean": timeseries_row.get("reward_mean"),
             "reward_sum_semantics": "instant_step_sum_kept_for_backward_compatibility",
             "reward_mean_semantics": "instant_step_mean_kept_for_backward_compatibility",
-            "episode_return_cumulative": None if not episode_reward_sums else float(np.sum(episode_reward_sums)),
-            "episode_reward_mean_cumulative": None if not episode_reward_means else float(np.mean(episode_reward_means)),
-            "episode_steps_recorded": len(episode_reward_sums),
-            "total_return_cumulative": None if not total_reward_sums else float(np.sum(total_reward_sums)),
-            "total_reward_mean_cumulative": None if not total_reward_means else float(np.mean(total_reward_means)),
-            "total_steps_recorded": len(total_reward_sums),
+            "episode_return_cumulative": episode_return_cumulative,
+            "episode_reward_mean_cumulative": episode_reward_mean_cumulative,
+            "episode_steps_recorded": episode_steps_recorded,
+            "total_return_cumulative": float(self._total_reward_sum) if self._total_reward_count else None,
+            "total_reward_mean_cumulative": total_reward_mean_cumulative,
+            "total_steps_recorded": self._total_reward_count,
             "district_net_electricity_consumption": timeseries_row.get("district_net_electricity_consumption"),
             "district_net_electricity_consumption_cost": timeseries_row.get("district_net_electricity_consumption_cost"),
             "district_net_electricity_consumption_emission": timeseries_row.get("district_net_electricity_consumption_emission"),
