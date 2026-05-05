@@ -31,6 +31,9 @@ class ObjectiveAxis:
     code: str
     name: str
     statement: str
+    # ``scenario`` is kept for backward-compatible artifacts. ``axis_scenario``
+    # is the explicit name used in reports to avoid confusing the objective
+    # label with the scenario of a specific MADRL run.
     scenario: str
     kpis: tuple[str, ...]
 
@@ -245,8 +248,15 @@ KPI_TRACES: Mapping[str, KPITrace] = _make_kpi_traces()
 def objective_manifest() -> Dict[str, object]:
     """Return a serializable manifest of objectives and KPI provenance."""
 
+    axes = {}
+    for code, axis in OBJECTIVE_AXES.items():
+        payload = asdict(axis)
+        payload["axis_scenario"] = axis.scenario
+        payload["scenario_semantics"] = "objective_axis_label"
+        axes[code] = payload
+
     return {
-        "axes": {code: asdict(axis) for code, axis in OBJECTIVE_AXES.items()},
+        "axes": axes,
         "project_axis_metrics": PROJECT_AXIS_METRICS,
         "axis_kpis": {name: asdict(trace) for name, trace in KPI_TRACES.items()},
         "metrics": {
@@ -508,8 +518,11 @@ def evaluate_objectives(env) -> Dict[str, object]:
     axes = {}
 
     for code, axis in OBJECTIVE_AXES.items():
+        axis_payload = asdict(axis)
+        axis_payload["axis_scenario"] = axis.scenario
+        axis_payload["scenario_semantics"] = "objective_axis_label"
         axes[code] = {
-            **asdict(axis),
+            **axis_payload,
             "kpis": {
                 kpi: value_report[kpi]
                 for kpi in axis.kpis

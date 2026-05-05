@@ -1217,9 +1217,9 @@ else:
 md("""
 ## Perfil GPU local y limite real de MASAC
 
-El lanzamiento oficial vigente usa un perfil **GPU-tuned conservador** para la RTX 4060 Laptop de 8 GB: redes de 384 unidades en HAPPO/MATD3/MAAC, lotes `512` en MATD3/MAAC, `live_progress_interval=250`, y MASAC con `buffer_size=8`, `critic_batch_size=2`, `critic_train_steps=2`, `actor_sample_times=8`, `rnn_hidden_dim=128`, `qmix_hidden_dim=64` e `hyper_hidden_dim=128`.
+El lanzamiento oficial vigente usa un perfil **GPU-tuned conservador** para la RTX 4060 Laptop de 8 GB: redes de 384 unidades en HAPPO/MATD3/MAAC, lotes `512` en MATD3/MAAC, `live_progress_interval=250`, y MASAC con `buffer_size=2`, `critic_batch_size=1`, `critic_train_steps=1`, `actor_sample_times=5`, `rnn_hidden_dim=64`, `qmix_hidden_dim=32` e `hyper_hidden_dim=64`.
 
-En MASAC puede verse memoria GPU alta y utilizacion baja. Esto no significa que CUDA este fallando: el backend oficial alterna entre simulacion secuencial del entorno CityLearn para 17 edificios + EV y actualizaciones PyTorch. Durante el rollout, el cuello de botella es CPU/Python/CityLearn; la GPU se activa mas durante las actualizaciones de red. Subir mas los lotes en la GPU local no necesariamente acelera, porque con 8 GB de VRAM aumenta el costo por actualizacion y el riesgo de quedarse sin memoria.
+En MASAC puede verse memoria GPU alta y utilizacion baja. Esto no significa que CUDA este fallando: el backend oficial alterna entre simulacion secuencial del entorno CityLearn para 17 edificios + EV y actualizaciones PyTorch. Durante el rollout, el cuello de botella es CPU/Python/CityLearn; la GPU se activa mas durante las actualizaciones de red. Subir mas los lotes en la GPU local no necesariamente acelera, porque con 8 GB de VRAM aumenta el costo por actualizacion y el riesgo de quedarse sin memoria; por eso MASAC queda con un perfil estable de 8 GB sin cambiar sus pesos multiobjetivo ni los KPIs del proyecto.
 
 ## Official Full Training
 

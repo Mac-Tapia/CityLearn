@@ -1,6 +1,6 @@
 schema_version: 2
 name: citylearn_v3_madrl_training
-updated_date: "2026-05-04"
+updated_date: "2026-05-05"
 purpose: "Canonical CityLearn v3 MADRL training overlay for the thesis project."
 version_layer: "citylearn-v3-madrl"
 simulator: "citylearn-v2"
@@ -200,13 +200,13 @@ algorithms:
     reward_profile: "MASAC"
     cli:
       action_bins: 3
-      buffer_size: 8
-      critic_batch_size: 2
-      critic_train_steps: 2
-      actor_sample_times: 8
-      rnn_hidden_dim: 128
-      qmix_hidden_dim: 64
-      hyper_hidden_dim: 128
+      buffer_size: 2
+      critic_batch_size: 1
+      critic_train_steps: 1
+      actor_sample_times: 5
+      rnn_hidden_dim: 64
+      qmix_hidden_dim: 32
+      hyper_hidden_dim: 64
       live_progress_interval: 250
       cuda: true
     hyperparameters:
@@ -215,13 +215,13 @@ algorithms:
       n_episodes_per_epoch: 1
       episode_limit: 8760
       action_bins: 3
-      critic_batch_size: 2
-      critic_train_steps: 2
-      actor_sample_times: 8
-      buffer_size: 8
-      rnn_hidden_dim: 128
-      qmix_hidden_dim: 64
-      hyper_hidden_dim: 128
+      critic_batch_size: 1
+      critic_train_steps: 1
+      actor_sample_times: 5
+      buffer_size: 2
+      rnn_hidden_dim: 64
+      qmix_hidden_dim: 32
+      hyper_hidden_dim: 64
       live_progress_interval: 250
       state_shape: "CityLearn v3 CTDE state_shape"
       obs_shape: "CityLearn v3 local obs_shape"

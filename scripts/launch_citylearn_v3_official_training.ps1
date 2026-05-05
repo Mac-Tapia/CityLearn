@@ -72,13 +72,13 @@ foreach ($scenarioName in $ScenarioList) {
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
             "--action-bins", "3",
-            "--buffer-size", "8",
-            "--critic-batch-size", "2",
-            "--critic-train-steps", "2",
-            "--actor-sample-times", "8",
-            "--rnn-hidden-dim", "128",
-            "--qmix-hidden-dim", "64",
-            "--hyper-hidden-dim", "128",
+            "--buffer-size", "2",
+            "--critic-batch-size", "1",
+            "--critic-train-steps", "1",
+            "--actor-sample-times", "5",
+            "--rnn-hidden-dim", "64",
+            "--qmix-hidden-dim", "32",
+            "--hyper-hidden-dim", "64",
             "--live-progress-interval", "$LiveProgressInterval"
         ) + $CudaArgs + @(
             "--output-dir", (Join-Path $OutputRoot "masac")
