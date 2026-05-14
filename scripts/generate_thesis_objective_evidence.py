@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import json
+import math
+import random
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +30,10 @@ if str(CITYLEARN_ROOT) not in sys.path:
 
 
 ALGORITHMS = ("happo", "masac", "matd3", "maac")
+ALGORITHM_NAMES = tuple(algorithm.upper() for algorithm in ALGORITHMS)
 SCENARIOS = ("E1", "E2", "E3")
+STATISTICAL_ALPHA = 0.05
+BOOTSTRAP_ITERATIONS = 2000
 TABLE_NAMES = (
     "episode_summary",
     "objective_kpis",
@@ -224,6 +230,256 @@ def as_bool(value: Any) -> Optional[bool]:
     if text in {"false", "0", "no"}:
         return False
     return None
+
+
+def finite_values(values: Iterable[Any]) -> List[float]:
+    output: List[float] = []
+    for value in values:
+        numeric = as_float(value)
+        if numeric is not None and math.isfinite(numeric):
+            output.append(float(numeric))
+    return output
+
+
+def mean_value(values: Sequence[float]) -> Optional[float]:
+    values = finite_values(values)
+    return None if not values else float(sum(values) / len(values))
+
+
+def median_value(values: Sequence[float]) -> Optional[float]:
+    values = sorted(finite_values(values))
+    if not values:
+        return None
+    midpoint = len(values) // 2
+    if len(values) % 2:
+        return float(values[midpoint])
+    return float((values[midpoint - 1] + values[midpoint]) / 2.0)
+
+
+def sample_variance(values: Sequence[float]) -> Optional[float]:
+    values = finite_values(values)
+    if len(values) < 2:
+        return None
+    avg = float(sum(values) / len(values))
+    return float(sum((value - avg) ** 2 for value in values) / (len(values) - 1))
+
+
+def standard_deviation(values: Sequence[float]) -> Optional[float]:
+    variance = sample_variance(values)
+    if variance is None:
+        return None
+    return float(math.sqrt(max(variance, 0.0)))
+
+
+def scipy_stats_module():
+    try:
+        from scipy import stats  # type: ignore
+
+        return stats
+    except Exception:
+        return None
+
+
+def rankdata_average(values: Sequence[float]) -> List[float]:
+    indexed = sorted((float(value), index) for index, value in enumerate(values))
+    ranks = [0.0] * len(indexed)
+    cursor = 0
+    while cursor < len(indexed):
+        end = cursor + 1
+        while end < len(indexed) and indexed[end][0] == indexed[cursor][0]:
+            end += 1
+        average_rank = (cursor + 1 + end) / 2.0
+        for _, original_index in indexed[cursor:end]:
+            ranks[original_index] = average_rank
+        cursor = end
+    return ranks
+
+
+def kruskal_h_fallback(groups: Mapping[str, Sequence[float]]) -> Optional[float]:
+    clean_groups = {name: finite_values(values) for name, values in groups.items()}
+    clean_groups = {name: values for name, values in clean_groups.items() if values}
+    if len(clean_groups) < 2:
+        return None
+
+    pooled: List[float] = []
+    slices: Dict[str, tuple[int, int]] = {}
+    for name, values in clean_groups.items():
+        start = len(pooled)
+        pooled.extend(values)
+        slices[name] = (start, len(pooled))
+
+    total_n = len(pooled)
+    if total_n < 2:
+        return None
+
+    ranks = rankdata_average(pooled)
+    numerator = 0.0
+    for name, (start, end) in slices.items():
+        group_ranks = ranks[start:end]
+        numerator += (sum(group_ranks) ** 2) / len(clean_groups[name])
+
+    h_statistic = (12.0 / (total_n * (total_n + 1.0))) * numerator - 3.0 * (total_n + 1.0)
+
+    tie_counts: Dict[float, int] = {}
+    for value in pooled:
+        tie_counts[value] = tie_counts.get(value, 0) + 1
+    tie_sum = sum(count ** 3 - count for count in tie_counts.values() if count > 1)
+    if tie_sum and total_n > 1:
+        correction = 1.0 - tie_sum / (total_n ** 3 - total_n)
+        if correction > 0:
+            h_statistic /= correction
+
+    return float(max(h_statistic, 0.0))
+
+
+def mann_whitney_u_fallback(group_a: Sequence[float], group_b: Sequence[float]) -> Optional[float]:
+    a_values = finite_values(group_a)
+    b_values = finite_values(group_b)
+    if not a_values or not b_values:
+        return None
+    pooled = a_values + b_values
+    ranks = rankdata_average(pooled)
+    rank_sum_a = sum(ranks[: len(a_values)])
+    u_a = rank_sum_a - len(a_values) * (len(a_values) + 1) / 2.0
+    return float(u_a)
+
+
+def brown_forsythe_w_fallback(groups: Mapping[str, Sequence[float]]) -> Optional[float]:
+    clean_groups = {name: finite_values(values) for name, values in groups.items()}
+    clean_groups = {name: values for name, values in clean_groups.items() if len(values) >= 2}
+    group_count = len(clean_groups)
+    total_n = sum(len(values) for values in clean_groups.values())
+    if group_count < 2 or total_n <= group_count:
+        return None
+
+    deviations: Dict[str, List[float]] = {}
+    for name, values in clean_groups.items():
+        center = median_value(values)
+        if center is None:
+            continue
+        deviations[name] = [abs(value - center) for value in values]
+
+    all_deviations = [value for values in deviations.values() for value in values]
+    grand_mean = mean_value(all_deviations)
+    if grand_mean is None:
+        return None
+
+    numerator = 0.0
+    denominator = 0.0
+    for name, values in deviations.items():
+        group_mean = mean_value(values)
+        if group_mean is None:
+            continue
+        numerator += len(values) * (group_mean - grand_mean) ** 2
+        denominator += sum((value - group_mean) ** 2 for value in values)
+
+    if denominator <= 0.0:
+        return 0.0
+    return float(((total_n - group_count) / (group_count - 1)) * (numerator / denominator))
+
+
+def stable_seed(*parts: object) -> int:
+    seed = 0
+    for char in "|".join(str(part) for part in parts):
+        seed = (seed * 131 + ord(char)) % (2 ** 32)
+    return seed
+
+
+def bootstrap_mean_difference_ci(
+    group_a: Sequence[float],
+    group_b: Sequence[float],
+    *,
+    iterations: int = BOOTSTRAP_ITERATIONS,
+    confidence: float = 0.95,
+    rng_seed: int = 0,
+) -> tuple[Optional[float], Optional[float]]:
+    a_values = finite_values(group_a)
+    b_values = finite_values(group_b)
+    if not a_values or not b_values or iterations <= 0:
+        return None, None
+
+    rng = random.Random(rng_seed)
+    diffs: List[float] = []
+    for _ in range(iterations):
+        sample_a = [a_values[rng.randrange(len(a_values))] for _ in a_values]
+        sample_b = [b_values[rng.randrange(len(b_values))] for _ in b_values]
+        mean_a = mean_value(sample_a)
+        mean_b = mean_value(sample_b)
+        if mean_a is not None and mean_b is not None:
+            diffs.append(mean_a - mean_b)
+
+    if not diffs:
+        return None, None
+
+    diffs.sort()
+    alpha = max(0.0, min(1.0, 1.0 - confidence))
+    low_index = int(math.floor((alpha / 2.0) * (len(diffs) - 1)))
+    high_index = int(math.ceil((1.0 - alpha / 2.0) * (len(diffs) - 1)))
+    return float(diffs[low_index]), float(diffs[high_index])
+
+
+def cliffs_delta(group_a: Sequence[float], group_b: Sequence[float]) -> Optional[float]:
+    a_values = finite_values(group_a)
+    b_values = finite_values(group_b)
+    if not a_values or not b_values:
+        return None
+    greater = 0
+    lower = 0
+    for value_a in a_values:
+        for value_b in b_values:
+            if value_a > value_b:
+                greater += 1
+            elif value_a < value_b:
+                lower += 1
+    return float((greater - lower) / (len(a_values) * len(b_values)))
+
+
+def vargha_delaney_a12(group_a: Sequence[float], group_b: Sequence[float]) -> Optional[float]:
+    delta = cliffs_delta(group_a, group_b)
+    if delta is None:
+        return None
+    return float((delta + 1.0) / 2.0)
+
+
+def cohen_d(group_a: Sequence[float], group_b: Sequence[float]) -> Optional[float]:
+    a_values = finite_values(group_a)
+    b_values = finite_values(group_b)
+    if len(a_values) < 2 or len(b_values) < 2:
+        return None
+    var_a = sample_variance(a_values)
+    var_b = sample_variance(b_values)
+    mean_a = mean_value(a_values)
+    mean_b = mean_value(b_values)
+    if var_a is None or var_b is None or mean_a is None or mean_b is None:
+        return None
+    pooled = ((len(a_values) - 1) * var_a + (len(b_values) - 1) * var_b) / (len(a_values) + len(b_values) - 2)
+    if pooled <= 0.0:
+        return None
+    return float((mean_a - mean_b) / math.sqrt(pooled))
+
+
+def hedges_g(group_a: Sequence[float], group_b: Sequence[float]) -> Optional[float]:
+    d_value = cohen_d(group_a, group_b)
+    if d_value is None:
+        return None
+    degrees_of_freedom = len(finite_values(group_a)) + len(finite_values(group_b)) - 2
+    if degrees_of_freedom <= 1:
+        return d_value
+    correction = 1.0 - (3.0 / (4.0 * degrees_of_freedom - 1.0))
+    return float(d_value * correction)
+
+
+def cliffs_delta_magnitude(delta: Optional[float]) -> str:
+    if delta is None:
+        return "no_calculable"
+    absolute = abs(delta)
+    if absolute < 0.147:
+        return "negligible"
+    if absolute < 0.33:
+        return "pequeno"
+    if absolute < 0.474:
+        return "mediano"
+    return "grande"
 
 
 def objective_manifest() -> Dict[str, Any]:
@@ -508,6 +764,428 @@ def build_demonstration_statement(
     )
 
 
+def algorithm_kpi_score_rows(objective_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Build baseline-aware KPI scores for cross-algorithm statistics.
+
+    The score is a signed relative gain against the baseline. Positive values
+    are better for both lower-is-better and higher-is-better KPIs.
+    """
+
+    rows: List[Dict[str, Any]] = []
+    for row in objective_rows:
+        algorithm = str(row.get("algorithm", "")).upper()
+        axis = str(row.get("axis", ""))
+        scenario = str(row.get("scenario", ""))
+        kpi = str(row.get("kpi", ""))
+        value = as_float(row.get("value"))
+        baseline = as_float(row.get("baseline"))
+        lower_is_better = as_bool(row.get("lower_is_better"))
+        available = as_bool(row.get("available"))
+
+        if (
+            algorithm not in ALGORITHM_NAMES
+            or axis not in OBJECTIVE_DEFINITIONS
+            or value is None
+            or baseline is None
+            or lower_is_better is None
+            or available is not True
+        ):
+            continue
+
+        raw_delta = value - baseline
+        signed_absolute_gain = -raw_delta if lower_is_better else raw_delta
+        denominator = abs(baseline)
+        baseline_zero_normalization = False
+        if denominator < 1.0e-12:
+            denominator = max(abs(value), 1.0)
+            baseline_zero_normalization = True
+
+        signed_relative_gain = signed_absolute_gain / denominator
+        rows.append({
+            "scope": axis,
+            "axis": axis,
+            "scenario": scenario,
+            "dimension": OBJECTIVE_DEFINITIONS[axis]["dimension"],
+            "output_profile": row.get("output_profile", ""),
+            "algorithm": algorithm,
+            "kpi": kpi,
+            "value": value,
+            "baseline": baseline,
+            "lower_is_better": lower_is_better,
+            "raw_delta_value_minus_baseline": raw_delta,
+            "signed_absolute_gain": signed_absolute_gain,
+            "signed_relative_gain": signed_relative_gain,
+            "improved_vs_baseline": as_bool(row.get("improved_vs_baseline")),
+            "baseline_zero_normalization": baseline_zero_normalization,
+            "score_rule": "positive_signed_relative_gain_is_better",
+            "source": row.get("source", ""),
+            "run_path": row.get("run_path", ""),
+        })
+
+    return rows
+
+
+def statistical_scopes(score_rows: Sequence[Mapping[str, Any]]) -> List[str]:
+    axes = [
+        axis for axis in OBJECTIVE_DEFINITIONS
+        if any(row.get("axis") == axis for row in score_rows)
+    ]
+    return axes + (["ALL"] if score_rows else [])
+
+
+def score_groups(score_rows: Sequence[Mapping[str, Any]], scope: str) -> Dict[str, List[float]]:
+    groups: Dict[str, List[float]] = {algorithm: [] for algorithm in ALGORITHM_NAMES}
+    for row in score_rows:
+        if scope != "ALL" and row.get("axis") != scope:
+            continue
+        algorithm = str(row.get("algorithm", "")).upper()
+        if algorithm not in groups:
+            continue
+        value = as_float(row.get("signed_relative_gain"))
+        if value is not None and math.isfinite(value):
+            groups[algorithm].append(value)
+    return groups
+
+
+def group_summary_payload(groups: Mapping[str, Sequence[float]], reducer) -> Dict[str, Any]:
+    output: Dict[str, Any] = {}
+    for algorithm in ALGORITHM_NAMES:
+        values = finite_values(groups.get(algorithm, []))
+        reduced = reducer(values) if values else None
+        output[algorithm] = reduced
+    return output
+
+
+def best_algorithm_by_median(groups: Mapping[str, Sequence[float]]) -> tuple[str, Optional[float]]:
+    medians = group_summary_payload(groups, median_value)
+    valid = {algorithm: value for algorithm, value in medians.items() if value is not None}
+    if not valid:
+        return "", None
+    algorithm = max(valid, key=lambda name: valid[name])
+    return algorithm, valid[algorithm]
+
+
+def statistical_omnibus_rows(score_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    stats = scipy_stats_module()
+
+    for scope in statistical_scopes(score_rows):
+        groups = score_groups(score_rows, scope)
+        clean_groups = {name: values for name, values in groups.items() if values}
+        scenario = "ALL" if scope == "ALL" else OBJECTIVE_DEFINITIONS[scope]["scenario"]
+        dimension = "Todos los ejes" if scope == "ALL" else OBJECTIVE_DEFINITIONS[scope]["dimension"]
+        kruskal_h = kruskal_h_fallback(clean_groups)
+        kruskal_p = None
+        kruskal_status = "fallback_statistic_without_p_value"
+        brown_w = brown_forsythe_w_fallback(clean_groups)
+        brown_p = None
+        brown_status = "fallback_statistic_without_p_value"
+
+        if len(clean_groups) >= 2 and stats is not None:
+            try:
+                result = stats.kruskal(*[clean_groups[name] for name in sorted(clean_groups)])
+                kruskal_h = float(result.statistic)
+                kruskal_p = float(result.pvalue)
+                kruskal_status = "ok"
+            except ValueError as exc:
+                if "All numbers are identical" in str(exc):
+                    kruskal_h = 0.0
+                    kruskal_p = 1.0
+                    kruskal_status = "all_values_identical"
+                else:
+                    kruskal_status = f"not_calculable: {exc}"
+            except Exception as exc:
+                kruskal_status = f"not_calculable: {exc}"
+
+            try:
+                result = stats.levene(*[clean_groups[name] for name in sorted(clean_groups)], center="median")
+                brown_w = float(result.statistic)
+                brown_p = float(result.pvalue)
+                if not math.isfinite(brown_w) or not math.isfinite(brown_p):
+                    brown_w = 0.0
+                    brown_p = 1.0
+                    brown_status = "all_deviations_identical"
+                else:
+                    brown_status = "ok"
+            except Exception as exc:
+                brown_status = f"not_calculable: {exc}"
+
+        best_algorithm, best_median = best_algorithm_by_median(clean_groups)
+        rows.append({
+            "scope": scope,
+            "scenario": scenario,
+            "dimension": dimension,
+            "method": "Kruskal-Wallis omnibus; Levene/Brown-Forsythe median-centered variance test",
+            "alpha": STATISTICAL_ALPHA,
+            "n_algorithms": len(clean_groups),
+            "algorithms": ", ".join(name for name in ALGORITHM_NAMES if name in clean_groups),
+            "n_total": sum(len(values) for values in clean_groups.values()),
+            "group_n_json": json.dumps({name: len(clean_groups.get(name, [])) for name in ALGORITHM_NAMES}, sort_keys=True),
+            "group_mean_signed_relative_gain_json": json.dumps(group_summary_payload(clean_groups, mean_value), sort_keys=True),
+            "group_median_signed_relative_gain_json": json.dumps(group_summary_payload(clean_groups, median_value), sort_keys=True),
+            "best_algorithm_by_median_gain": best_algorithm,
+            "best_median_signed_relative_gain": best_median,
+            "kruskal_h_statistic": kruskal_h,
+            "kruskal_p_value": kruskal_p,
+            "kruskal_status": kruskal_status,
+            "kruskal_significant_alpha_0_05": None if kruskal_p is None else kruskal_p < STATISTICAL_ALPHA,
+            "brown_forsythe_w_statistic": brown_w,
+            "brown_forsythe_p_value": brown_p,
+            "brown_forsythe_status": brown_status,
+            "variance_heterogeneity_alpha_0_05": None if brown_p is None else brown_p < STATISTICAL_ALPHA,
+            "method_note": (
+                "Samples are KPI-level signed relative gains against baseline; "
+                "positive values favor the algorithm. Interpret p-values as exploratory "
+                "when only one seed is available."
+            ),
+        })
+
+    return rows
+
+
+def pairwise_statistical_rows(
+    score_rows: Sequence[Mapping[str, Any]],
+    *,
+    bootstrap_iterations: int = BOOTSTRAP_ITERATIONS,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    stats = scipy_stats_module()
+
+    for scope in statistical_scopes(score_rows):
+        groups = score_groups(score_rows, scope)
+        scenario = "ALL" if scope == "ALL" else OBJECTIVE_DEFINITIONS[scope]["scenario"]
+        dimension = "Todos los ejes" if scope == "ALL" else OBJECTIVE_DEFINITIONS[scope]["dimension"]
+
+        for algorithm_a, algorithm_b in itertools.combinations(ALGORITHM_NAMES, 2):
+            values_a = finite_values(groups.get(algorithm_a, []))
+            values_b = finite_values(groups.get(algorithm_b, []))
+            mean_a = mean_value(values_a)
+            mean_b = mean_value(values_b)
+            median_a = median_value(values_a)
+            median_b = median_value(values_b)
+            u_statistic = mann_whitney_u_fallback(values_a, values_b)
+            u_p_value = None
+            u_status = "fallback_statistic_without_p_value"
+
+            if values_a and values_b and stats is not None:
+                try:
+                    result = stats.mannwhitneyu(values_a, values_b, alternative="two-sided", method="auto")
+                    u_statistic = float(result.statistic)
+                    u_p_value = float(result.pvalue)
+                    u_status = "ok"
+                except Exception as exc:
+                    u_status = f"not_calculable: {exc}"
+            elif not values_a or not values_b:
+                u_status = "insufficient_data"
+
+            ci_low, ci_high = bootstrap_mean_difference_ci(
+                values_a,
+                values_b,
+                iterations=bootstrap_iterations,
+                rng_seed=stable_seed(scope, algorithm_a, algorithm_b, "bootstrap"),
+            )
+            delta = cliffs_delta(values_a, values_b)
+            a12 = vargha_delaney_a12(values_a, values_b)
+            d_value = cohen_d(values_a, values_b)
+            g_value = hedges_g(values_a, values_b)
+            mean_difference = None if mean_a is None or mean_b is None else mean_a - mean_b
+            median_difference = None if median_a is None or median_b is None else median_a - median_b
+            if median_difference is None:
+                better_by_median = ""
+            elif median_difference > 0:
+                better_by_median = algorithm_a
+            elif median_difference < 0:
+                better_by_median = algorithm_b
+            else:
+                better_by_median = "empate"
+
+            rows.append({
+                "scope": scope,
+                "scenario": scenario,
+                "dimension": dimension,
+                "algorithm_a": algorithm_a,
+                "algorithm_b": algorithm_b,
+                "n_a": len(values_a),
+                "n_b": len(values_b),
+                "mean_a": mean_a,
+                "mean_b": mean_b,
+                "median_a": median_a,
+                "median_b": median_b,
+                "mean_difference_a_minus_b": mean_difference,
+                "median_difference_a_minus_b": median_difference,
+                "mann_whitney_u": u_statistic,
+                "mann_whitney_p_value": u_p_value,
+                "mann_whitney_status": u_status,
+                "mann_whitney_significant_alpha_0_05": None if u_p_value is None else u_p_value < STATISTICAL_ALPHA,
+                "cliffs_delta": delta,
+                "cliffs_delta_magnitude": cliffs_delta_magnitude(delta),
+                "vargha_delaney_a12": a12,
+                "cohen_d": d_value,
+                "hedges_g": g_value,
+                "bootstrap_mean_diff_ci_low": ci_low,
+                "bootstrap_mean_diff_ci_high": ci_high,
+                "bootstrap_iterations": bootstrap_iterations,
+                "better_by_median": better_by_median,
+                "effect_direction_note": (
+                    "Positive differences, Cliff's delta, Cohen d and Hedges g favor algorithm_a; "
+                    "A12 > 0.5 favors algorithm_a."
+                ),
+            })
+
+    return rows
+
+
+def enrich_objective_compliance_with_statistics(
+    objective_compliance: Sequence[Mapping[str, Any]],
+    omnibus_rows: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    omnibus_by_scope = {str(row.get("scope")): row for row in omnibus_rows}
+    enriched: List[Dict[str, Any]] = []
+
+    for row in objective_compliance:
+        axis = str(row.get("axis", ""))
+        stats_row = omnibus_by_scope.get(axis, {})
+        p_value = as_float(stats_row.get("kruskal_p_value"))
+        variance_p_value = as_float(stats_row.get("brown_forsythe_p_value"))
+        significant = as_bool(stats_row.get("kruskal_significant_alpha_0_05"))
+        best_algorithm = str(stats_row.get("best_algorithm_by_median_gain", ""))
+
+        if not stats_row:
+            interpretation = "Analisis estadistico no calculable por falta de scores KPI-normalizados."
+        elif significant is True:
+            interpretation = (
+                f"Kruskal-Wallis detecta diferencias globales entre algoritmos MADRL en {axis}; "
+                f"el mejor por mediana de ganancia relativa KPI-normalizada es {best_algorithm}."
+            )
+        else:
+            interpretation = (
+                f"Kruskal-Wallis no detecta diferencias globales significativas en {axis} con alpha=0.05; "
+                f"el ranking KPI observado se conserva como evidencia descriptiva, con {best_algorithm or 'sin algoritmo dominante'} "
+                "por mediana de ganancia relativa."
+            )
+
+        output = dict(row)
+        output.update({
+            "statistical_method": (
+                "Kruskal-Wallis; Mann-Whitney U por pares de algoritmos; "
+                "Cliff's delta; Vargha-Delaney A12; Cohen d; Hedges g; "
+                "Levene/Brown-Forsythe; bootstrap CI 95%"
+            ),
+            "statistical_score_unit": "signed_relative_gain_vs_baseline_positive_is_better",
+            "statistical_best_algorithm_by_median_gain": best_algorithm,
+            "kruskal_p_value": p_value,
+            "kruskal_significant_alpha_0_05": significant,
+            "brown_forsythe_p_value": variance_p_value,
+            "variance_heterogeneity_alpha_0_05": as_bool(stats_row.get("variance_heterogeneity_alpha_0_05")),
+            "statistical_interpretation": interpretation,
+            "statistical_evidence_files": (
+                "scores_kpi_algoritmo_madrl.csv; analisis_estadistico_madrl.csv; "
+                "comparaciones_por_pares_madrl.csv; hipotesis_estadisticas_madrl.csv"
+            ),
+            "statistical_limitation": (
+                "Contrastes exploratorios sobre KPIs normalizados de una corrida por algoritmo; "
+                "no sustituyen replicacion por multiples semillas."
+            ),
+        })
+        enriched.append(output)
+
+    return enriched
+
+
+def statistical_hypothesis_rows(
+    objective_compliance: Sequence[Mapping[str, Any]],
+    omnibus_rows: Sequence[Mapping[str, Any]],
+    pairwise_rows: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    omnibus_by_scope = {str(row.get("scope")): row for row in omnibus_rows}
+    rows: List[Dict[str, Any]] = []
+
+    for axis_code, definition in OBJECTIVE_DEFINITIONS.items():
+        compliance = next((row for row in objective_compliance if row.get("axis") == axis_code), {})
+        omnibus = omnibus_by_scope.get(axis_code, {})
+        best_algorithm = str(omnibus.get("best_algorithm_by_median_gain", ""))
+        best_pairs = [
+            row for row in pairwise_rows
+            if row.get("scope") == axis_code
+            and (row.get("algorithm_a") == best_algorithm or row.get("algorithm_b") == best_algorithm)
+        ]
+        significant_pairs = [
+            row for row in best_pairs
+            if as_bool(row.get("mann_whitney_significant_alpha_0_05")) is True
+        ]
+        rows.append({
+            "axis": axis_code,
+            "scenario": definition["scenario"],
+            "dimension": definition["dimension"],
+            "hypothesis_or_expected_result": definition["expected_result"],
+            "observed_compliance_status": compliance.get("objective_compliance_status", ""),
+            "observed_demonstration_statement": compliance.get("demonstration_statement", ""),
+            "statistical_best_algorithm_by_median_gain": best_algorithm,
+            "kruskal_h_statistic": omnibus.get("kruskal_h_statistic"),
+            "kruskal_p_value": omnibus.get("kruskal_p_value"),
+            "kruskal_significant_alpha_0_05": omnibus.get("kruskal_significant_alpha_0_05"),
+            "brown_forsythe_w_statistic": omnibus.get("brown_forsythe_w_statistic"),
+            "brown_forsythe_p_value": omnibus.get("brown_forsythe_p_value"),
+            "variance_heterogeneity_alpha_0_05": omnibus.get("variance_heterogeneity_alpha_0_05"),
+            "pairwise_comparisons_with_best": len(best_pairs),
+            "significant_pairwise_comparisons_with_best": len(significant_pairs),
+            "effect_sizes_reported": "Cliff's delta, Vargha-Delaney A12, Cohen d, Hedges g",
+            "bootstrap_ci_reported": "95% CI for mean signed-relative-gain difference",
+            "decision_rule": (
+                "Use KPI compliance as primary thesis evidence; use non-parametric tests and "
+                "effect sizes as statistical support. Do not infer unobserved results."
+            ),
+            "evidence_files": (
+                "objetivos_especificos_cumplimiento.csv; matriz_resultados_madrl.csv; "
+                "analisis_estadistico_madrl.csv; comparaciones_por_pares_madrl.csv"
+            ),
+            "limitations": (
+                "Single seed and KPI-level samples; formal confirmation requires more seeds "
+                "or independent experimental repetitions."
+            ),
+        })
+
+    overall = omnibus_by_scope.get("ALL", {})
+    rows.append({
+        "axis": "OG",
+        "scenario": "ALL",
+        "dimension": "Gestion coordinada integral",
+        "hypothesis_or_expected_result": "Determinar el mejor MADRL en los tres ejes integrados.",
+        "observed_compliance_status": "ranking_integrado_por_kpis",
+        "observed_demonstration_statement": "La evidencia descriptiva integrada se calcula sobre los KPIs comparables de OE1, OE2 y OE3.",
+        "statistical_best_algorithm_by_median_gain": overall.get("best_algorithm_by_median_gain", ""),
+        "kruskal_h_statistic": overall.get("kruskal_h_statistic"),
+        "kruskal_p_value": overall.get("kruskal_p_value"),
+        "kruskal_significant_alpha_0_05": overall.get("kruskal_significant_alpha_0_05"),
+        "brown_forsythe_w_statistic": overall.get("brown_forsythe_w_statistic"),
+        "brown_forsythe_p_value": overall.get("brown_forsythe_p_value"),
+        "variance_heterogeneity_alpha_0_05": overall.get("variance_heterogeneity_alpha_0_05"),
+        "pairwise_comparisons_with_best": len([
+            row for row in pairwise_rows
+            if row.get("scope") == "ALL"
+            and (
+                row.get("algorithm_a") == overall.get("best_algorithm_by_median_gain")
+                or row.get("algorithm_b") == overall.get("best_algorithm_by_median_gain")
+            )
+        ]),
+        "significant_pairwise_comparisons_with_best": len([
+            row for row in pairwise_rows
+            if row.get("scope") == "ALL"
+            and as_bool(row.get("mann_whitney_significant_alpha_0_05")) is True
+            and (
+                row.get("algorithm_a") == overall.get("best_algorithm_by_median_gain")
+                or row.get("algorithm_b") == overall.get("best_algorithm_by_median_gain")
+            )
+        ]),
+        "effect_sizes_reported": "Cliff's delta, Vargha-Delaney A12, Cohen d, Hedges g",
+        "bootstrap_ci_reported": "95% CI for mean signed-relative-gain difference",
+        "decision_rule": "Use integrated KPI ranking as primary O.G. evidence and omnibus/pairwise tests as support.",
+        "evidence_files": "analisis_estadistico_madrl.csv; comparaciones_por_pares_madrl.csv",
+        "limitations": "Single seed and KPI-level samples; formal confirmation requires more seeds.",
+    })
+    return rows
+
+
 def methodological_matrix_rows(manifest_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for row in manifest_rows:
@@ -519,7 +1197,11 @@ def methodological_matrix_rows(manifest_rows: Sequence[Mapping[str, Any]]) -> Li
             "scenario": row["scenario"],
             "measurement_source": row["source"],
             "instrument": "CityLearn v2 evaluate_v2 + CityLearn v3 proposed MADRL artifact tables",
-            "technique": "Simulacion computacional, entrenamiento MADRL, comparacion contra baseline y analisis de KPIs",
+            "technique": (
+                "Simulacion computacional, entrenamiento MADRL, comparacion contra baseline, "
+                "analisis de KPIs, Kruskal-Wallis, Mann-Whitney U, Cliff's delta, "
+                "Vargha-Delaney A12, Cohen d, Hedges g, Levene/Brown-Forsythe y bootstrap CI"
+            ),
             "scale": "Numerica continua o ratio segun KPI",
             "interpretation_rule": "Usar lower_is_better y delta_vs_baseline cuando exista baseline disponible",
         })
@@ -540,8 +1222,14 @@ def consistency_matrix_rows() -> List[Dict[str, Any]]:
             "dimension": definition["dimension"],
             "scenario": definition["scenario"],
             "method": "Simulacion computacional no experimental con CityLearn v2 y capa CityLearn v3 propuesta",
-            "technique": "Entrenamiento MADRL CTDE, extraccion de KPIs y comparacion contra baseline",
-            "instrument": "Scripts train_citylearn_v3_*.py, objective_kpis.csv, axis_baseline_comparison.csv, figures_manifest.json",
+            "technique": (
+                "Entrenamiento MADRL CTDE, extraccion de KPIs, comparacion contra baseline "
+                "y contrastes no parametricos con tamanos de efecto"
+            ),
+            "instrument": (
+                "Scripts train_citylearn_v3_*.py, objective_kpis.csv, axis_baseline_comparison.csv, "
+                "figures_manifest.json, analisis_estadistico_madrl.csv, comparaciones_por_pares_madrl.csv"
+            ),
         })
     return rows
 
@@ -670,8 +1358,12 @@ def citylearn_v3_rows() -> List[Dict[str, Any]]:
         },
         {
             "section": "Instrumentacion",
-            "content": "La capa de entrenamiento exporta resumenes, trazas, series de tiempo, KPIs, comparacion contra baseline, figuras y checkpoints.",
-            "evidence": "CityLearn/scripts/citylearn_v3_training_common.py; run_artifact_inventory.csv",
+            "content": (
+                "La capa de entrenamiento exporta resumenes, trazas, series de tiempo, KPIs, "
+                "comparacion contra baseline, figuras, checkpoints y matrices estadisticas "
+                "MADRL multialgoritmo."
+            ),
+            "evidence": "CityLearn/scripts/citylearn_v3_training_common.py; run_artifact_inventory.csv; analisis_estadistico_madrl.csv",
             "thesis_use": "Definir tecnicas e instrumentos de recoleccion de datos.",
         },
         {
@@ -797,6 +1489,7 @@ def write_summary_markdown(
     *,
     objective_compliance: Sequence[Mapping[str, Any]],
     run_inventory: Sequence[Mapping[str, Any]],
+    statistical_omnibus: Sequence[Mapping[str, Any]],
     table_names: Sequence[str],
 ) -> None:
     lines = [
@@ -817,8 +1510,31 @@ def write_summary_markdown(
             f"- Algoritmos con KPIs: {row['algorithms_with_kpis'] or 'pendiente'}",
             f"- KPIs medidos/esperados: {row['measured_kpi_count']}/{row['expected_kpi_count']}",
             f"- KPIs mejorados/no mejorados: {row['improved_kpi_records']}/{row['not_improved_kpi_records']}",
+            f"- Mejor algoritmo por mediana estadistica: {row.get('statistical_best_algorithm_by_median_gain') or 'no calculable'}",
+            f"- Kruskal-Wallis p-value: {row.get('kruskal_p_value') if row.get('kruskal_p_value') not in (None, '') else 'no calculable'}",
             "",
             row["demonstration_statement"],
+            "",
+            row.get("statistical_interpretation", ""),
+            "",
+        ])
+
+    if statistical_omnibus:
+        lines.extend([
+            "## Analisis estadistico MADRL",
+            "",
+            "Los contrastes se calculan sobre `signed_relative_gain` por KPI comparable; valores positivos favorecen al algoritmo frente al baseline.",
+            "",
+        ])
+        for row in statistical_omnibus:
+            lines.append(
+                f"- `{row.get('scope')}`: Kruskal p={row.get('kruskal_p_value')}; "
+                f"Brown-Forsythe p={row.get('brown_forsythe_p_value')}; "
+                f"mejor mediana={row.get('best_algorithm_by_median_gain') or 'no calculable'}."
+            )
+        lines.extend([
+            "",
+            "Estos p-values son apoyo exploratorio cuando solo existe una semilla por algoritmo; la evidencia primaria sigue siendo la matriz KPI/baseline.",
             "",
         ])
 
@@ -861,6 +1577,18 @@ def main() -> int:
         objective_rows=objective_rows,
         axis_rows=axis_rows,
     )
+    statistical_score_rows = algorithm_kpi_score_rows(objective_rows)
+    statistical_omnibus = statistical_omnibus_rows(statistical_score_rows)
+    statistical_pairwise = pairwise_statistical_rows(statistical_score_rows)
+    objective_compliance = enrich_objective_compliance_with_statistics(
+        objective_compliance,
+        statistical_omnibus,
+    )
+    statistical_hypotheses = statistical_hypothesis_rows(
+        objective_compliance,
+        statistical_omnibus,
+        statistical_pairwise,
+    )
     methodology_rows = methodological_matrix_rows(manifest_rows)
     consistency_rows = consistency_matrix_rows()
     backends = backend_rows()
@@ -881,6 +1609,10 @@ def main() -> int:
         "matriz_kpis_tesis": manifest_rows,
         "matriz_resultados_madrl": objective_rows,
         "matriz_baseline_por_eje": axis_rows,
+        "scores_kpi_algoritmo_madrl": statistical_score_rows,
+        "analisis_estadistico_madrl": statistical_omnibus,
+        "comparaciones_por_pares_madrl": statistical_pairwise,
+        "hipotesis_estadisticas_madrl": statistical_hypotheses,
         "matriz_operacionalizacion_variables": methodology_rows,
         "Marco_metodologico_MADRL": methodology_rows,
         "CityLearn_v3_Propuesto": citylearn_v3,
@@ -918,6 +1650,7 @@ def main() -> int:
         output_dir / "resumen_evidencia_tesis.md",
         objective_compliance=objective_compliance,
         run_inventory=run_inventory,
+        statistical_omnibus=statistical_omnibus,
         table_names=sorted(tables),
     )
 
@@ -925,6 +1658,9 @@ def main() -> int:
         "output_dir": str(output_dir),
         "run_count": len(run_inventory),
         "objective_rows": len(objective_rows),
+        "statistical_score_rows": len(statistical_score_rows),
+        "statistical_omnibus_rows": len(statistical_omnibus),
+        "statistical_pairwise_rows": len(statistical_pairwise),
         "objective_compliance": objective_compliance,
     }, indent=2, ensure_ascii=False))
     return 0
