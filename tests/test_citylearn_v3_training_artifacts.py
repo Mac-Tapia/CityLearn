@@ -16,7 +16,70 @@ class _Args:
     episode_time_steps = 2
 
 
+class _Space:
+    def __init__(self, dim):
+        self.low = [-1.0] * dim
+        self.high = [1.0] * dim
+
+
+class _KPIFrame:
+    def to_dict(self, orient):
+        assert orient == "records"
+        return [
+            {
+                "level": "building",
+                "name": "Building_1",
+                "cost_function": "building_energy_grid_total_import_control_kwh",
+                "value": 10.0,
+            },
+            {
+                "level": "building",
+                "name": "Building_1",
+                "cost_function": "building_energy_grid_total_export_control_kwh",
+                "value": 2.0,
+            },
+            {
+                "level": "building",
+                "name": "Building_2",
+                "cost_function": "building_energy_grid_total_import_control_kwh",
+                "value": 1.0,
+            },
+            {
+                "level": "building",
+                "name": "Building_2",
+                "cost_function": "building_energy_grid_total_export_control_kwh",
+                "value": 4.0,
+            },
+        ]
+
+
+class _CoreEnv:
+    action_names = [["electrical_storage"], ["electrical_storage"]]
+    observation_names = [
+        ["net_electricity_consumption", "electrical_storage_soc"],
+        ["net_electricity_consumption", "electrical_storage_soc"],
+    ]
+
+
+class _ObjectiveEnv:
+    possible_agents = ["Building_1", "Building_2"]
+    env = _CoreEnv()
+
+    def action_space(self, agent):
+        return _Space(1)
+
+    def observation_space(self, agent):
+        return _Space(2)
+
+    def get_kpi_frame(self):
+        return _KPIFrame()
+
+
 class _Adapter:
+    env = _ObjectiveEnv()
+    agents = ["Building_1", "Building_2"]
+    action_dims = {"Building_1": 1, "Building_2": 1}
+    observation_dims = {"Building_1": 2, "Building_2": 2}
     timeseries_records = [
         {
             "global_step": 0,
@@ -183,9 +246,17 @@ def test_training_artifacts_use_data_checkpoints_and_figures_layout(tmp_path):
     assert (tables_dir / "training_efficiency.csv").is_file()
     assert (tables_dir / "exploration_summary.csv").is_file()
     assert (tables_dir / "agent_reward_summary.csv").is_file()
+    assert (tables_dir / "building_behavior_summary.csv").is_file()
+    assert (tables_dir / "building_kpis.csv").is_file()
+    assert (tables_dir / "building_observation_action_schema.csv").is_file()
+    assert (tables_dir / "building_trace_sample.csv").is_file()
     assert (tables_dir / "checkpoint_inventory.csv").is_file()
+    assert (data_dir / "building_behavior_summary.csv").is_file()
+    assert (output_dir / "building_behavior_summary.csv").is_file()
 
     results = json.loads((data_dir / "results.json").read_text(encoding="utf-8"))
     assert results["artifact_layout"]["data"] == str(data_dir)
     assert results["artifact_layout"]["checkpoints"] == str(output_dir / "checkpoints")
     assert results["figures"]["figure_count"] >= 12
+    assert results["building_count"] == 2
+    assert results["building_detail"]["building_behavior_summary"]["rows"] == 2

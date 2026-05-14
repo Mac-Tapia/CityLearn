@@ -239,7 +239,10 @@ def _resolve_objective_env(candidate):
         return None
 
     if hasattr(candidate, "adapter"):
-        return candidate.adapter.env
+        adapter = getattr(candidate, "adapter", None)
+
+        if hasattr(adapter, "env"):
+            return adapter.env
 
     if hasattr(candidate, "envs"):
         envs = getattr(candidate, "envs")
@@ -597,6 +600,403 @@ def _agent_reward_rows(trace_rows: Sequence[Mapping[str, object]]) -> List[Dict[
         })
 
     return output
+
+
+BUILDING_DETAIL_KPI_COLUMNS: Mapping[str, str] = {
+    "building_energy_grid_total_import_control_kwh": "grid_import_control_kwh",
+    "building_energy_grid_total_import_baseline_kwh": "grid_import_baseline_kwh",
+    "building_energy_grid_total_import_delta_kwh": "grid_import_delta_kwh",
+    "building_energy_grid_daily_average_import_control_kwh": "grid_import_daily_average_control_kwh",
+    "building_energy_grid_daily_average_import_baseline_kwh": "grid_import_daily_average_baseline_kwh",
+    "building_energy_grid_daily_average_import_delta_kwh": "grid_import_daily_average_delta_kwh",
+    "building_energy_grid_total_export_control_kwh": "grid_export_control_kwh",
+    "building_energy_grid_total_export_baseline_kwh": "grid_export_baseline_kwh",
+    "building_energy_grid_total_export_delta_kwh": "grid_export_delta_kwh",
+    "building_energy_grid_daily_average_export_control_kwh": "grid_export_daily_average_control_kwh",
+    "building_energy_grid_daily_average_export_baseline_kwh": "grid_export_daily_average_baseline_kwh",
+    "building_energy_grid_daily_average_export_delta_kwh": "grid_export_daily_average_delta_kwh",
+    "building_energy_grid_total_net_exchange_control_kwh": "net_exchange_control_kwh",
+    "building_energy_grid_total_net_exchange_baseline_kwh": "net_exchange_baseline_kwh",
+    "building_energy_grid_total_net_exchange_delta_kwh": "net_exchange_delta_kwh",
+    "building_energy_grid_ratio_to_baseline_import_total_ratio": "grid_import_ratio_to_baseline",
+    "building_energy_grid_ratio_to_baseline_export_total_ratio": "grid_export_ratio_to_baseline",
+    "building_energy_grid_ratio_to_baseline_net_exchange_total_ratio": "net_exchange_ratio_to_baseline",
+    "building_cost_total_control_eur": "electricity_cost_control_eur",
+    "building_cost_total_baseline_eur": "electricity_cost_baseline_eur",
+    "building_cost_total_delta_eur": "electricity_cost_delta_eur",
+    "building_cost_ratio_to_baseline_total_ratio": "electricity_cost_ratio_to_baseline",
+    "building_emissions_total_control_kgco2": "carbon_emissions_control_kgco2",
+    "building_emissions_total_baseline_kgco2": "carbon_emissions_baseline_kgco2",
+    "building_emissions_total_delta_kgco2": "carbon_emissions_delta_kgco2",
+    "building_emissions_ratio_to_baseline_total_ratio": "carbon_emissions_ratio_to_baseline",
+    "building_solar_self_consumption_total_generation_kwh": "pv_generation_total_kwh",
+    "building_solar_self_consumption_total_export_kwh": "pv_export_total_kwh",
+    "building_solar_self_consumption_daily_average_generation_kwh": "pv_generation_daily_average_kwh",
+    "building_solar_self_consumption_daily_average_export_kwh": "pv_export_daily_average_kwh",
+    "building_solar_self_consumption_ratio_self_consumption_ratio": "pv_self_consumption_ratio",
+    "building_battery_total_charge_kwh": "battery_charge_total_kwh",
+    "building_battery_total_discharge_kwh": "battery_discharge_total_kwh",
+    "building_battery_total_throughput_kwh": "battery_throughput_total_kwh",
+    "building_battery_health_equivalent_full_cycles_count": "battery_equivalent_full_cycles",
+    "building_battery_health_capacity_fade_ratio": "battery_capacity_fade_ratio",
+    "building_ev_events_departure_count": "ev_departure_count",
+    "building_ev_events_departure_met_count": "ev_departure_met_count",
+    "building_ev_events_departure_within_tolerance_count": "ev_departure_within_tolerance_count",
+    "building_ev_performance_departure_success_ratio": "ev_departure_success_rate",
+    "building_ev_performance_departure_within_tolerance_ratio": "ev_departure_within_tolerance_rate",
+    "building_ev_performance_departure_soc_deficit_mean_ratio": "ev_departure_soc_deficit_mean",
+    "building_ev_total_charge_kwh": "ev_charge_total_kwh",
+    "building_ev_total_v2g_export_kwh": "ev_v2g_export_total_kwh",
+    "building_electrical_service_phase_violations_energy_total_kwh": "electrical_service_violation_total_kwh",
+    "building_electrical_service_phase_violations_event_count": "electrical_service_violation_time_step_count",
+    "building_electrical_service_phase_imbalance_phase_average_ratio": "phase_imbalance_ratio_average",
+    "building_equity_benefit_relative_percent": "equity_relative_benefit_percent",
+    # Legacy evaluate() names are accepted so tests and older runs can still be summarized.
+    "electricity_consumption_control_total_kwh": "grid_import_control_kwh",
+    "electricity_consumption_baseline_total_kwh": "grid_import_baseline_kwh",
+    "electricity_consumption_delta_total_kwh": "grid_import_delta_kwh",
+    "electricity_export_control_total_kwh": "grid_export_control_kwh",
+    "electricity_export_baseline_total_kwh": "grid_export_baseline_kwh",
+    "electricity_export_delta_total_kwh": "grid_export_delta_kwh",
+    "zero_net_energy_control_total_kwh": "net_exchange_control_kwh",
+    "zero_net_energy_baseline_total_kwh": "net_exchange_baseline_kwh",
+    "zero_net_energy_delta_total_kwh": "net_exchange_delta_kwh",
+    "cost_control_total_eur": "electricity_cost_control_eur",
+    "cost_baseline_total_eur": "electricity_cost_baseline_eur",
+    "cost_delta_total_eur": "electricity_cost_delta_eur",
+    "carbon_emissions_control_total_kgco2": "carbon_emissions_control_kgco2",
+    "carbon_emissions_baseline_total_kgco2": "carbon_emissions_baseline_kgco2",
+    "carbon_emissions_delta_total_kgco2": "carbon_emissions_delta_kgco2",
+    "pv_generation_total_kwh": "pv_generation_total_kwh",
+    "pv_export_total_kwh": "pv_export_total_kwh",
+    "pv_self_consumption_ratio": "pv_self_consumption_ratio",
+    "bess_charge_total_kwh": "battery_charge_total_kwh",
+    "bess_discharge_total_kwh": "battery_discharge_total_kwh",
+    "bess_throughput_total_kwh": "battery_throughput_total_kwh",
+    "bess_equivalent_full_cycles": "battery_equivalent_full_cycles",
+    "bess_capacity_fade_ratio": "battery_capacity_fade_ratio",
+    "ev_charge_total_kwh": "ev_charge_total_kwh",
+    "ev_v2g_export_total_kwh": "ev_v2g_export_total_kwh",
+}
+
+KEY_OBSERVATION_NAMES = {
+    "net_electricity_consumption",
+    "solar_generation",
+    "electricity_pricing",
+    "carbon_intensity",
+    "electrical_storage_soc",
+    "cooling_storage_soc",
+    "heating_storage_soc",
+    "dhw_storage_soc",
+    "cooling_demand",
+    "heating_demand",
+    "dhw_demand",
+    "non_shiftable_load",
+    "outdoor_dry_bulb_temperature",
+    "occupant_count",
+}
+
+
+def _sort_agent_key(agent: object) -> Tuple[str, int, str]:
+    text = str(agent)
+    suffix = text.rsplit("_", 1)[-1]
+
+    try:
+        number = int(suffix)
+    except ValueError:
+        number = 0
+
+    prefix = text[: -len(suffix)] if suffix else text
+    return prefix, number, text
+
+
+def _slug_name(name: object) -> str:
+    text = str(name).strip().lower()
+    output = "".join(character if character.isalnum() else "_" for character in text)
+    output = "_".join(part for part in output.split("_") if part)
+    return output or "value"
+
+
+def _space_bound(space, attribute: str, index: int) -> Optional[float]:
+    try:
+        values = np.asarray(getattr(space, attribute), dtype=float).reshape(-1)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+    if index >= values.size:
+        return None
+
+    return _as_float(values[index])
+
+
+def _dataframe_like_rows(frame) -> List[Dict[str, object]]:
+    if frame is None:
+        return []
+
+    if hasattr(frame, "to_dict"):
+        try:
+            return [dict(row) for row in frame.to_dict(orient="records")]
+        except TypeError:
+            pass
+
+    if isinstance(frame, Sequence) and not isinstance(frame, (str, bytes)):
+        rows = []
+        for row in frame:
+            if isinstance(row, Mapping):
+                rows.append(dict(row))
+        return rows
+
+    return []
+
+
+def _citylearn_kpi_frame_rows(candidate) -> List[Dict[str, object]]:
+    objective_env = _resolve_objective_env(candidate)
+
+    if objective_env is None:
+        return []
+
+    frame = None
+
+    if hasattr(objective_env, "get_kpi_frame"):
+        frame = objective_env.get_kpi_frame()
+    elif hasattr(objective_env, "evaluate_v2"):
+        frame = objective_env.evaluate_v2()
+    elif hasattr(objective_env, "env") and hasattr(objective_env.env, "evaluate_v2"):
+        frame = objective_env.env.evaluate_v2()
+
+    return _dataframe_like_rows(frame)
+
+
+def _core_citylearn_env(candidate):
+    objective_env = _resolve_objective_env(candidate)
+
+    if objective_env is None:
+        return None
+
+    core = getattr(objective_env, "env", objective_env)
+    return getattr(core, "unwrapped", core)
+
+
+def _building_schema_rows(candidate, adapter=None) -> List[Dict[str, object]]:
+    objective_env = _resolve_objective_env(candidate)
+    core_env = _core_citylearn_env(candidate)
+
+    if objective_env is None or core_env is None:
+        return []
+
+    agents = list(getattr(adapter, "agents", [])) or list(getattr(objective_env, "possible_agents", []))
+    action_names = getattr(core_env, "action_names", []) or []
+    observation_names = getattr(core_env, "observation_names", []) or []
+    rows: List[Dict[str, object]] = []
+
+    for agent_index, agent in enumerate(agents):
+        for variable_type, all_names, space_getter in [
+            ("action", action_names, getattr(objective_env, "action_space", None)),
+            ("observation", observation_names, getattr(objective_env, "observation_space", None)),
+        ]:
+            names = list(all_names[agent_index]) if agent_index < len(all_names) else []
+
+            if not names:
+                dim = int(getattr(adapter, f"{variable_type}_dims", {}).get(agent, 0)) if adapter is not None else 0
+                names = [f"{variable_type}_{idx}" for idx in range(dim)]
+
+            space = space_getter(agent) if callable(space_getter) else None
+
+            for variable_index, variable_name in enumerate(names):
+                rows.append({
+                    "agent": agent,
+                    "agent_index": agent_index,
+                    "variable_type": variable_type,
+                    "variable_index": variable_index,
+                    "variable_name": variable_name,
+                    "csv_column": f"{variable_type}__{_slug_name(variable_name)}",
+                    "space_low": _space_bound(space, "low", variable_index) if space is not None else None,
+                    "space_high": _space_bound(space, "high", variable_index) if space is not None else None,
+                })
+
+    return rows
+
+
+def _trace_agent_summary_rows(trace_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
+    grouped: Dict[str, List[Mapping[str, object]]] = {}
+
+    for row in trace_rows:
+        agent = row.get("agent")
+
+        if agent is None:
+            continue
+
+        grouped.setdefault(str(agent), []).append(row)
+
+    output: List[Dict[str, object]] = []
+
+    for agent, rows in sorted(grouped.items(), key=lambda item: _sort_agent_key(item[0])):
+        summary: Dict[str, object] = {
+            "agent": agent,
+            "agent_steps": len(rows),
+            "agent_index": rows[0].get("agent_index"),
+        }
+
+        for source_key, prefix in [
+            ("reward", "team_reward"),
+            ("individual_reward", "individual_reward"),
+            ("action_l2", "action_l2"),
+            ("action_mean", "action_mean"),
+            ("observation_l2", "observation_l2"),
+            ("observation_mean", "observation_mean"),
+            ("grid_import_kwh", "grid_import"),
+            ("grid_export_kwh", "grid_export"),
+            ("net_electricity_consumption_kwh", "net_electricity_consumption"),
+            ("net_electricity_consumption_cost", "electricity_cost"),
+            ("net_electricity_consumption_emission", "carbon_emissions"),
+        ]:
+            values = [_as_float(row.get(source_key)) for row in rows]
+            values = [value for value in values if value is not None]
+
+            if not values:
+                continue
+
+            summary[f"{prefix}_mean"] = float(np.mean(values))
+            summary[f"{prefix}_min"] = float(np.min(values))
+            summary[f"{prefix}_max"] = float(np.max(values))
+            summary[f"{prefix}_total"] = float(np.sum(values))
+
+        output.append(summary)
+
+    return output
+
+
+def _building_kpi_summary_rows(kpi_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
+    output_by_building: Dict[str, Dict[str, object]] = {}
+
+    for row in kpi_rows:
+        level = str(row.get("level", "")).lower()
+
+        if level != "building":
+            continue
+
+        building = str(row.get("name", ""))
+
+        if not building:
+            continue
+
+        cost_function = str(row.get("cost_function", ""))
+        column = BUILDING_DETAIL_KPI_COLUMNS.get(cost_function)
+
+        if column is None:
+            continue
+
+        output_by_building.setdefault(building, {"agent": building})[column] = _as_float(row.get("value"))
+
+    for building, row in output_by_building.items():
+        grid_import = _as_float(row.get("grid_import_control_kwh"))
+        grid_export = _as_float(row.get("grid_export_control_kwh"))
+
+        if grid_import is not None and grid_export is not None:
+            row["grid_import_minus_export_control_kwh"] = grid_import - grid_export
+
+            if grid_import > grid_export + 1.0e-9:
+                row["grid_role_control"] = "net_importer"
+            elif grid_export > grid_import + 1.0e-9:
+                row["grid_role_control"] = "net_exporter"
+            else:
+                row["grid_role_control"] = "balanced"
+
+    return [
+        output_by_building[name]
+        for name in sorted(output_by_building, key=_sort_agent_key)
+    ]
+
+
+def _building_behavior_summary_rows(
+    *,
+    trace_rows: Sequence[Mapping[str, object]],
+    kpi_rows: Sequence[Mapping[str, object]],
+    schema_rows: Sequence[Mapping[str, object]],
+) -> List[Dict[str, object]]:
+    output: Dict[str, Dict[str, object]] = {}
+
+    for row in _building_kpi_summary_rows(kpi_rows):
+        output[str(row["agent"])] = dict(row)
+
+    for row in _trace_agent_summary_rows(trace_rows):
+        agent = str(row["agent"])
+        target = output.setdefault(agent, {"agent": agent})
+        target.update(row)
+
+    for row in schema_rows:
+        agent = str(row.get("agent", ""))
+
+        if not agent:
+            continue
+
+        target = output.setdefault(agent, {"agent": agent})
+        variable_type = str(row.get("variable_type"))
+        count_key = f"{variable_type}_dim"
+        target[count_key] = int(target.get(count_key, 0)) + 1
+        target.setdefault("agent_index", row.get("agent_index"))
+
+    return [
+        output[name]
+        for name in sorted(output, key=_sort_agent_key)
+    ]
+
+
+def _schema_action_names(schema_rows: Sequence[Mapping[str, object]]) -> Dict[str, Dict[int, str]]:
+    output: Dict[str, Dict[int, str]] = {}
+
+    for row in schema_rows:
+        if row.get("variable_type") != "action":
+            continue
+
+        agent = str(row.get("agent"))
+        index = row.get("variable_index")
+
+        if index is None:
+            continue
+
+        output.setdefault(agent, {})[int(index)] = str(row.get("variable_name"))
+
+    return output
+
+
+def _building_trace_sample_rows(
+    trace_rows: Sequence[Mapping[str, object]],
+    schema_rows: Sequence[Mapping[str, object]],
+    *,
+    max_rows: int = 120,
+) -> List[Dict[str, object]]:
+    if not trace_rows:
+        return []
+
+    if len(trace_rows) <= max_rows:
+        selected = list(trace_rows)
+    else:
+        head_count = max_rows // 2
+        tail_count = max_rows - head_count
+        selected = list(trace_rows[:head_count]) + list(trace_rows[-tail_count:])
+
+    action_names = _schema_action_names(schema_rows)
+    rows: List[Dict[str, object]] = []
+
+    for row in selected:
+        agent = str(row.get("agent"))
+        output = dict(row)
+
+        for index, action_name in action_names.get(agent, {}).items():
+            value = row.get(f"action_{index}")
+
+            if value is None:
+                continue
+
+            column = f"action__{_slug_name(action_name)}"
+            if column in output:
+                column = f"{column}_{index}"
+            output[column] = value
+
+        rows.append(output)
+
+    return rows
 
 
 def _safe_ratio(numerator: Optional[float], denominator: Optional[float]) -> Optional[float]:
@@ -1051,6 +1451,7 @@ def _write_training_figures_and_tables(
     trace_rows: Sequence[Mapping[str, object]],
     episode_summaries: Sequence[Mapping[str, object]],
     checkpoints: Sequence[Mapping[str, object]],
+    extra_tables: Optional[Mapping[str, Sequence[Mapping[str, object]]]] = None,
 ) -> Dict[str, object]:
     figures_dir = dirs["figures"]
     tables_dir = dirs["tables"]
@@ -1073,6 +1474,7 @@ def _write_training_figures_and_tables(
         ("agent_reward_summary", agent_rows),
         ("checkpoint_inventory", list(checkpoints)),
     ]
+    table_specs.extend((name, list(rows)) for name, rows in (extra_tables or {}).items())
 
     for table_name, rows in table_specs:
         csv_path = tables_dir / f"{table_name}.csv"
@@ -1143,6 +1545,23 @@ def write_training_artifacts(
     timeseries_rows = list(getattr(adapter, "timeseries_records", [])) if adapter is not None else []
     trace_rows = list(getattr(adapter, "trace_records", [])) if adapter is not None else []
     episode_summaries = _episode_summaries(timeseries_rows)
+    citylearn_kpi_frame_rows = _citylearn_kpi_frame_rows(candidate)
+    building_schema_rows = _building_schema_rows(candidate, adapter=adapter)
+    building_summary_rows = _building_behavior_summary_rows(
+        trace_rows=trace_rows,
+        kpi_rows=citylearn_kpi_frame_rows,
+        schema_rows=building_schema_rows,
+    )
+    building_trace_sample_rows = _building_trace_sample_rows(trace_rows, building_schema_rows)
+    building_detail_tables = {
+        "building_behavior_summary": building_summary_rows,
+        "building_kpis": [
+            row for row in citylearn_kpi_frame_rows
+            if str(row.get("level", "")).lower() == "building"
+        ],
+        "building_observation_action_schema": building_schema_rows,
+        "building_trace_sample": building_trace_sample_rows,
+    }
 
     timeseries_path = data_dir / "timeseries.csv"
     trace_path = data_dir / "trace.csv"
@@ -1150,6 +1569,16 @@ def write_training_artifacts(
     root_trace_path = output_dir / "trace.csv"
     _write_csv_mirrors([timeseries_path, root_timeseries_path], timeseries_rows)
     _write_csv_mirrors([trace_path, root_trace_path], trace_rows)
+    building_detail_paths: Dict[str, Dict[str, object]] = {}
+    for table_name, rows in building_detail_tables.items():
+        data_path = data_dir / f"{table_name}.csv"
+        root_path = output_dir / f"{table_name}.csv"
+        _write_csv_mirrors([data_path, root_path], rows)
+        building_detail_paths[table_name] = {
+            "rows": len(rows),
+            "csv": str(data_path),
+            "csv_root": str(root_path),
+        }
 
     checkpoints = _checkpoint_files(output_dir, dirs["checkpoints"])
     checkpoint_manifest = {
@@ -1170,6 +1599,7 @@ def write_training_artifacts(
         trace_rows=trace_rows,
         episode_summaries=episode_summaries,
         checkpoints=checkpoints,
+        extra_tables=building_detail_tables,
     )
 
     results = {
@@ -1190,6 +1620,8 @@ def write_training_artifacts(
         "checkpoint_manifest": str(checkpoint_manifest_path),
         "checkpoint_manifest_root": str(root_checkpoint_manifest_path),
         "checkpoint_count": len(checkpoints),
+        "building_detail": building_detail_paths,
+        "building_count": len(building_summary_rows),
         "episode_summaries": episode_summaries,
         "hyperparameters": dict(hyperparameters or {}),
         "figures_manifest": str(dirs["figures"] / "figures_manifest.json"),
@@ -1212,6 +1644,7 @@ def write_training_artifacts(
         "timeseries_csv_root": str(root_timeseries_path),
         "trace_csv": str(trace_path),
         "trace_csv_root": str(root_trace_path),
+        "building_detail": building_detail_paths,
         "checkpoint_manifest": str(checkpoint_manifest_path),
         "checkpoint_manifest_root": str(root_checkpoint_manifest_path),
         "figures_manifest": str(dirs["figures"] / "figures_manifest.json"),
@@ -1300,6 +1733,16 @@ class CityLearnV3BackendAdapter:
             agent: int(space.shape[0])
             for agent, space in self._act_spaces.items()
         }
+        self.observation_names_by_agent = self._variable_names_by_agent(
+            "observation_names",
+            self.observation_dims,
+            "observation",
+        )
+        self.action_names_by_agent = self._variable_names_by_agent(
+            "action_names",
+            self.action_dims,
+            "action",
+        )
         self.max_observation_dim = max(self.observation_dims.values())
         self.max_action_dim = max(self.action_dims.values())
         self.state_dim = int(self.env.state_space.shape[0])
@@ -1421,6 +1864,27 @@ class CityLearnV3BackendAdapter:
             "scenario": self.scenario,
         }
 
+    def _variable_names_by_agent(
+        self,
+        attribute_name: str,
+        dimensions: Mapping[str, int],
+        fallback_prefix: str,
+    ) -> Dict[str, List[str]]:
+        core_env = self._core_env()
+        all_names = getattr(core_env, attribute_name, []) or []
+        output: Dict[str, List[str]] = {}
+
+        for index, agent in enumerate(self.agents):
+            names = list(all_names[index]) if index < len(all_names) else []
+            dimension = int(dimensions.get(agent, len(names)))
+
+            if len(names) < dimension:
+                names.extend(f"{fallback_prefix}_{idx}" for idx in range(len(names), dimension))
+
+            output[agent] = names[:dimension]
+
+        return output
+
     def padded_observations(self, observations: Mapping[str, np.ndarray]) -> List[np.ndarray]:
         return [
             _pad(observations[agent], self.max_observation_dim)
@@ -1489,12 +1953,96 @@ class CityLearnV3BackendAdapter:
     def _core_env(self):
         return getattr(self.env, "env", getattr(self.env, "unwrapped", self.env))
 
+    def _building_for_agent(self, citylearn_env, agent: str):
+        buildings = list(getattr(citylearn_env, "buildings", []) or [])
+        agent_index = self.agents.index(agent)
+        return buildings[agent_index] if agent_index < len(buildings) else None
+
+    def _building_step_metrics(self, building, time_step: int) -> Dict[str, object]:
+        if building is None:
+            return {}
+
+        net = _series_value(building, "net_electricity_consumption", time_step)
+        net_without_storage = _series_value(building, "net_electricity_consumption_without_storage", time_step)
+        solar = _series_value(building, "solar_generation", time_step)
+        storage = getattr(building, "electrical_storage", None)
+        ev_consumption = 0.0
+        ev_has_value = False
+
+        for charger in getattr(building, "electric_vehicle_chargers", []) or []:
+            value = _series_value(charger, "electricity_consumption", time_step)
+
+            if value is not None:
+                ev_has_value = True
+                ev_consumption += value
+
+        metrics = {
+            "net_electricity_consumption_kwh": net,
+            "grid_import_kwh": None if net is None else max(net, 0.0),
+            "grid_export_kwh": None if net is None else max(-net, 0.0),
+            "net_electricity_consumption_without_storage_kwh": net_without_storage,
+            "net_electricity_consumption_cost": _series_value(building, "net_electricity_consumption_cost", time_step),
+            "net_electricity_consumption_emission": _series_value(building, "net_electricity_consumption_emission", time_step),
+            "solar_generation_raw_kwh": solar,
+            "pv_generation_kwh": None if solar is None else max(-solar, 0.0),
+            "pv_export_kwh": None if net is None or solar is None else min(max(-solar, 0.0), max(-net, 0.0)),
+            "electrical_storage_soc": _series_value(storage, "soc", time_step) if storage is not None else None,
+            "electrical_storage_energy_balance_kwh": _series_value(storage, "energy_balance", time_step) if storage is not None else None,
+            "electrical_storage_electricity_consumption_kwh": _series_value(building, "electrical_storage_electricity_consumption", time_step),
+            "ev_electricity_consumption_kwh": ev_consumption if ev_has_value else None,
+            "ev_charge_kwh": max(ev_consumption, 0.0) if ev_has_value else None,
+            "ev_v2g_export_kwh": max(-ev_consumption, 0.0) if ev_has_value else None,
+            "electricity_price": _series_value(getattr(building, "pricing", None), "electricity_pricing", time_step),
+            "carbon_intensity": _series_value(getattr(building, "carbon_intensity", None), "carbon_intensity", time_step),
+        }
+        return metrics
+
+    def _named_action_values(self, agent: str, action: np.ndarray) -> Dict[str, object]:
+        output: Dict[str, object] = {}
+
+        for index, value in enumerate(action):
+            if index >= len(self.action_names_by_agent.get(agent, [])):
+                continue
+
+            name = self.action_names_by_agent[agent][index]
+            column = f"action__{_slug_name(name)}"
+            if column in output:
+                column = f"{column}_{index}"
+            output[column] = _as_float(value)
+
+        return output
+
+    def _selected_observation_values(self, agent: str, observation: np.ndarray) -> Dict[str, object]:
+        output: Dict[str, object] = {}
+        names = self.observation_names_by_agent.get(agent, [])
+
+        for index, value in enumerate(observation):
+            if index >= len(names):
+                continue
+
+            name = names[index]
+            normalized_name = str(name)
+            if (
+                normalized_name not in KEY_OBSERVATION_NAMES
+                and "electric_vehicle" not in normalized_name
+                and not normalized_name.startswith("charging_")
+            ):
+                continue
+
+            column = f"observation__{_slug_name(normalized_name)}"
+            if column in output:
+                column = f"{column}_{index}"
+            output[column] = _as_float(value)
+
+        return output
+
     def _record_step(self, action_dict, observations, rewards, dones, infos) -> None:
         episode_length = max(int(self.episode_time_steps), 1)
         episode = int(self.global_step // episode_length)
         episode_step = int(self.global_step % episode_length)
         citylearn_env = self._core_env()
         time_step = int(getattr(citylearn_env, "time_step", self.global_step))
+        state_stats = _compact_array_stats(self.ctde_state())
         reward_values = [_as_float(rewards.get(agent)) for agent in self.agents]
         reward_values = [value for value in reward_values if value is not None]
         timeseries_row = {
@@ -1540,6 +2088,11 @@ class CityLearnV3BackendAdapter:
                 "reward_profile": timeseries_row.get("reward_profile"),
                 "agent": agent,
                 "agent_index": self.agents.index(agent),
+                "state_dim": int(self.state_dim),
+                "state_mean": state_stats["mean"],
+                "state_min": state_stats["min"],
+                "state_max": state_stats["max"],
+                "state_l2": state_stats["l2"],
                 "reward": _as_float(rewards.get(agent)),
                 "done": bool(dones.get(agent, False)),
                 "action_dim": int(action.size),
@@ -1553,6 +2106,9 @@ class CityLearnV3BackendAdapter:
                 "observation_max": observation_stats["max"],
                 "observation_l2": observation_stats["l2"],
             }
+            row.update(self._building_step_metrics(self._building_for_agent(citylearn_env, agent), time_step))
+            row.update(self._named_action_values(agent, action))
+            row.update(self._selected_observation_values(agent, observation))
 
             for idx, value in enumerate(action[: self.max_action_dim]):
                 row[f"action_{idx}"] = _as_float(value)
