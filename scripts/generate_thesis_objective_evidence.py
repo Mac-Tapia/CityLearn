@@ -1133,20 +1133,35 @@ def enrich_objective_compliance_with_statistics(
         variance_p_value = as_float(stats_row.get("brown_forsythe_p_value"))
         significant = as_bool(stats_row.get("kruskal_significant_alpha_0_05"))
         best_algorithm = str(stats_row.get("best_algorithm_by_median_gain", ""))
+        normality_violated = as_bool(stats_row.get("normality_assumption_violated_any_group"))
+        sw_p_happo = as_float(stats_row.get("shapiro_wilk_p_value_HAPPO"))
+        sw_p_masac = as_float(stats_row.get("shapiro_wilk_p_value_MASAC"))
+        sw_p_matd3 = as_float(stats_row.get("shapiro_wilk_p_value_MATD3"))
+        sw_p_maac = as_float(stats_row.get("shapiro_wilk_p_value_MAAC"))
 
         if not stats_row:
             interpretation = "Analisis estadistico no calculable por falta de scores KPI-normalizados."
-        elif significant is True:
-            interpretation = (
-                f"Kruskal-Wallis detecta diferencias globales entre algoritmos MADRL en {axis}; "
-                f"el mejor por mediana de ganancia relativa KPI-normalizada es {best_algorithm}."
-            )
         else:
-            interpretation = (
-                f"Kruskal-Wallis no detecta diferencias globales significativas en {axis} con alpha=0.05; "
-                f"el ranking KPI observado se conserva como evidencia descriptiva, con {best_algorithm or 'sin algoritmo dominante'} "
-                "por mediana de ganancia relativa."
+            sw_verdict = (
+                "Shapiro-Wilk rechaza normalidad en al menos un grupo (tests no parametricos justificados)."
+                if normality_violated is True
+                else "Shapiro-Wilk no rechaza normalidad en ningún grupo (tests no parametricos aplicados por precaucion)."
+                if normality_violated is False
+                else "Shapiro-Wilk no calculable."
             )
+            if significant is True:
+                interpretation = (
+                    f"{sw_verdict} "
+                    f"Kruskal-Wallis detecta diferencias globales entre algoritmos MADRL en {axis}; "
+                    f"el mejor por mediana de ganancia relativa KPI-normalizada es {best_algorithm}."
+                )
+            else:
+                interpretation = (
+                    f"{sw_verdict} "
+                    f"Kruskal-Wallis no detecta diferencias globales significativas en {axis} con alpha=0.05; "
+                    f"el ranking KPI observado se conserva como evidencia descriptiva, "
+                    f"con {best_algorithm or 'sin algoritmo dominante'} por mediana de ganancia relativa."
+                )
 
         output = dict(row)
         output.update({
@@ -1158,6 +1173,11 @@ def enrich_objective_compliance_with_statistics(
             ),
             "statistical_score_unit": "signed_relative_gain_vs_baseline_positive_is_better",
             "statistical_best_algorithm_by_median_gain": best_algorithm,
+            "normality_assumption_violated_any_group": normality_violated,
+            "shapiro_wilk_p_value_HAPPO": sw_p_happo,
+            "shapiro_wilk_p_value_MASAC": sw_p_masac,
+            "shapiro_wilk_p_value_MATD3": sw_p_matd3,
+            "shapiro_wilk_p_value_MAAC": sw_p_maac,
             "kruskal_p_value": p_value,
             "kruskal_significant_alpha_0_05": significant,
             "brown_forsythe_p_value": variance_p_value,
@@ -1249,6 +1269,11 @@ def statistical_hypothesis_rows(
         "observed_compliance_status": "ranking_integrado_por_kpis",
         "observed_demonstration_statement": "La evidencia descriptiva integrada se calcula sobre los KPIs comparables de OE1, OE2 y OE3.",
         "statistical_best_algorithm_by_median_gain": overall.get("best_algorithm_by_median_gain", ""),
+        "normality_assumption_violated_any_group": overall.get("normality_assumption_violated_any_group"),
+        "shapiro_wilk_p_value_HAPPO": overall.get("shapiro_wilk_p_value_HAPPO"),
+        "shapiro_wilk_p_value_MASAC": overall.get("shapiro_wilk_p_value_MASAC"),
+        "shapiro_wilk_p_value_MATD3": overall.get("shapiro_wilk_p_value_MATD3"),
+        "shapiro_wilk_p_value_MAAC": overall.get("shapiro_wilk_p_value_MAAC"),
         "kruskal_h_statistic": overall.get("kruskal_h_statistic"),
         "kruskal_p_value": overall.get("kruskal_p_value"),
         "kruskal_significant_alpha_0_05": overall.get("kruskal_significant_alpha_0_05"),
