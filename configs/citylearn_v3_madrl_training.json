@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "name": "citylearn_v3_madrl_training",
-  "updated_date": "2026-05-05",
+  "updated_date": "2026-05-15",
   "purpose": "Canonical CityLearn v3 MADRL training overlay for the thesis project.",
   "version_layer": "citylearn-v3-madrl",
   "simulator": "citylearn-v2",
@@ -12,6 +12,24 @@
     "includes_evs": true,
     "includes_washing_machine_flexible_load": true,
     "seconds_per_time_step": 3600
+  },
+  "dataset_iquitos": {
+    "name": "citylearn_iquitos_2023_2025",
+    "schema_path": "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json",
+    "buildings": 17,
+    "total_hours": 26304,
+    "years": [2023, 2024, 2025],
+    "location": "Iquitos, Loreto, Peru",
+    "lat": -3.7491,
+    "lon": -73.2538,
+    "grid_type": "sistema_aislado_diesel_electro_oriente",
+    "includes_evs": true,
+    "ev_chargers": 50,
+    "includes_washing_machine_flexible_load": true,
+    "seconds_per_time_step": 3600,
+    "launcher": "CityLearn/scripts/launch_citylearn_v3_iquitos_training.ps1",
+    "monitor": "CityLearn/scripts/monitor_citylearn_v3_iquitos_training.ps1",
+    "output_root": "outputs/citylearn_v3_madrl_iquitos"
   },
   "dec_pomdp": {
     "formulation": "decentralized_partially_observable_markov_decision_process",
