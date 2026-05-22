@@ -1005,11 +1005,16 @@ def statistical_omnibus_rows(score_rows: Sequence[Mapping[str, Any]]) -> List[Di
     return rows
 
 
-def pairwise_statistical_rows(
+def mann_whitney_pairwise_rows(
     score_rows: Sequence[Mapping[str, Any]],
     *,
     bootstrap_iterations: int = BOOTSTRAP_ITERATIONS,
 ) -> List[Dict[str, Any]]:
+    """Mann-Whitney U para muestras INDEPENDIENTES.
+
+    Hipotesis: H0: las distribuciones de ganancias KPI de algoritmo_a y
+    algoritmo_b son identicas (muestras no pareadas).
+    """
     rows: List[Dict[str, Any]] = []
     stats = scipy_stats_module()
 
@@ -1028,9 +1033,6 @@ def pairwise_statistical_rows(
             u_statistic = mann_whitney_u_fallback(values_a, values_b)
             u_p_value = None
             u_status = "fallback_statistic_without_p_value"
-            wilcoxon_statistic = None
-            wilcoxon_p_value = None
-            wilcoxon_status = "not_computed"
 
             if values_a and values_b and stats is not None:
                 try:
@@ -1040,23 +1042,8 @@ def pairwise_statistical_rows(
                     u_status = "ok"
                 except Exception as exc:
                     u_status = f"not_calculable: {exc}"
-
-                n_paired = min(len(values_a), len(values_b))
-                paired_a = values_a[:n_paired]
-                paired_b = values_b[:n_paired]
-                if n_paired >= 1 and any(a != b for a, b in zip(paired_a, paired_b)):
-                    try:
-                        wc_result = stats.wilcoxon(paired_a, paired_b, alternative="two-sided")
-                        wilcoxon_statistic = float(wc_result.statistic)
-                        wilcoxon_p_value = float(wc_result.pvalue)
-                        wilcoxon_status = f"ok_n_paired={n_paired}"
-                    except Exception as exc:
-                        wilcoxon_status = f"not_calculable: {exc}"
-                else:
-                    wilcoxon_status = "all_differences_zero_or_empty"
             elif not values_a or not values_b:
                 u_status = "insufficient_data"
-                wilcoxon_status = "insufficient_data"
 
             ci_low, ci_high = bootstrap_mean_difference_ci(
                 values_a,
@@ -1079,10 +1066,24 @@ def pairwise_statistical_rows(
             else:
                 better_by_median = "empate"
 
+            if u_p_value is not None:
+                mwu_interpretation = (
+                    f"p={u_p_value:.4f} < alpha={STATISTICAL_ALPHA} → se rechaza H0: "
+                    f"las distribuciones de {algorithm_a} y {algorithm_b} difieren significativamente."
+                    if u_p_value < STATISTICAL_ALPHA
+                    else f"p={u_p_value:.4f} >= alpha={STATISTICAL_ALPHA} → no se rechaza H0: "
+                    f"no hay diferencia significativa entre las distribuciones de {algorithm_a} y {algorithm_b}."
+                )
+            else:
+                mwu_interpretation = "no calculable"
+
             rows.append({
                 "scope": scope,
                 "scenario": scenario,
                 "dimension": dimension,
+                "test": "Mann-Whitney U",
+                "hypothesis_H0": f"Las distribuciones de {algorithm_a} y {algorithm_b} son identicas (muestras independientes)",
+                "sample_type": "independiente",
                 "algorithm_a": algorithm_a,
                 "algorithm_b": algorithm_b,
                 "n_a": len(values_a),
@@ -1093,14 +1094,13 @@ def pairwise_statistical_rows(
                 "median_b": median_b,
                 "mean_difference_a_minus_b": mean_difference,
                 "median_difference_a_minus_b": median_difference,
+                "better_by_median": better_by_median,
                 "mann_whitney_u": u_statistic,
                 "mann_whitney_p_value": u_p_value,
                 "mann_whitney_status": u_status,
                 "mann_whitney_significant_alpha_0_05": None if u_p_value is None else u_p_value < STATISTICAL_ALPHA,
-                "wilcoxon_statistic": wilcoxon_statistic,
-                "wilcoxon_p_value": wilcoxon_p_value,
-                "wilcoxon_status": wilcoxon_status,
-                "wilcoxon_significant_alpha_0_05": None if wilcoxon_p_value is None else wilcoxon_p_value < STATISTICAL_ALPHA,
+                "alpha": STATISTICAL_ALPHA,
+                "mwu_interpretation": mwu_interpretation,
                 "cliffs_delta": delta,
                 "cliffs_delta_magnitude": cliffs_delta_magnitude(delta),
                 "vargha_delaney_a12": a12,
@@ -1109,10 +1109,107 @@ def pairwise_statistical_rows(
                 "bootstrap_mean_diff_ci_low": ci_low,
                 "bootstrap_mean_diff_ci_high": ci_high,
                 "bootstrap_iterations": bootstrap_iterations,
-                "better_by_median": better_by_median,
                 "effect_direction_note": (
                     "Positive differences, Cliff's delta, Cohen d and Hedges g favor algorithm_a; "
                     "A12 > 0.5 favors algorithm_a."
+                ),
+            })
+
+    return rows
+
+
+def wilcoxon_pairwise_rows(
+    score_rows: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Wilcoxon signed-rank para muestras PAREADAS.
+
+    Hipotesis: H0: la mediana de las diferencias pareadas d_i = A_i - B_i
+    es cero (mismo KPI, mismo edificio/episodio, dos algoritmos distintos).
+    Completamente independiente de Mann-Whitney U.
+    """
+    rows: List[Dict[str, Any]] = []
+    stats = scipy_stats_module()
+
+    for scope in statistical_scopes(score_rows):
+        groups = score_groups(score_rows, scope)
+        scenario = "ALL" if scope == "ALL" else OBJECTIVE_DEFINITIONS[scope]["scenario"]
+        dimension = "Todos los ejes" if scope == "ALL" else OBJECTIVE_DEFINITIONS[scope]["dimension"]
+
+        for algorithm_a, algorithm_b in itertools.combinations(ALGORITHM_NAMES, 2):
+            values_a = finite_values(groups.get(algorithm_a, []))
+            values_b = finite_values(groups.get(algorithm_b, []))
+            n_paired = min(len(values_a), len(values_b))
+            paired_a = values_a[:n_paired]
+            paired_b = values_b[:n_paired]
+            differences = [a - b for a, b in zip(paired_a, paired_b)]
+            n_nonzero = sum(1 for d in differences if d != 0)
+            median_diff = median_value(differences) if differences else None
+
+            wc_statistic = None
+            wc_p_value = None
+            wc_status = "not_computed"
+
+            if n_paired >= 1 and stats is not None:
+                if n_nonzero > 0:
+                    try:
+                        wc_result = stats.wilcoxon(paired_a, paired_b, alternative="two-sided")
+                        wc_statistic = float(wc_result.statistic)
+                        wc_p_value = float(wc_result.pvalue)
+                        wc_status = f"ok_n_paired={n_paired}_n_nonzero={n_nonzero}"
+                    except Exception as exc:
+                        wc_status = f"not_calculable: {exc}"
+                else:
+                    wc_status = "all_differences_zero"
+            elif n_paired < 1:
+                wc_status = "no_paired_data"
+
+            if median_diff is None:
+                better_by_diff = ""
+            elif median_diff > 0:
+                better_by_diff = algorithm_a
+            elif median_diff < 0:
+                better_by_diff = algorithm_b
+            else:
+                better_by_diff = "empate"
+
+            if wc_p_value is not None:
+                wc_interpretation = (
+                    f"p={wc_p_value:.4f} < alpha={STATISTICAL_ALPHA} → se rechaza H0: "
+                    f"las diferencias pareadas {algorithm_a}-{algorithm_b} son sistematicamente distintas de cero."
+                    if wc_p_value < STATISTICAL_ALPHA
+                    else f"p={wc_p_value:.4f} >= alpha={STATISTICAL_ALPHA} → no se rechaza H0: "
+                    f"no hay diferencia sistematica detectada en las diferencias pareadas {algorithm_a}-{algorithm_b}."
+                )
+            else:
+                wc_interpretation = "no calculable"
+
+            rows.append({
+                "scope": scope,
+                "scenario": scenario,
+                "dimension": dimension,
+                "test": "Wilcoxon signed-rank",
+                "hypothesis_H0": (
+                    f"La mediana de las diferencias pareadas d_i = {algorithm_a}_i - {algorithm_b}_i es cero"
+                ),
+                "sample_type": "pareado_por_indice_kpi",
+                "algorithm_a": algorithm_a,
+                "algorithm_b": algorithm_b,
+                "n_a": len(values_a),
+                "n_b": len(values_b),
+                "n_paired": n_paired,
+                "n_nonzero_differences": n_nonzero,
+                "median_difference_a_minus_b": median_diff,
+                "better_by_median_difference": better_by_diff,
+                "wilcoxon_T_statistic": wc_statistic,
+                "wilcoxon_p_value": wc_p_value,
+                "wilcoxon_status": wc_status,
+                "wilcoxon_significant_alpha_0_05": None if wc_p_value is None else wc_p_value < STATISTICAL_ALPHA,
+                "alpha": STATISTICAL_ALPHA,
+                "wilcoxon_interpretation": wc_interpretation,
+                "method_note": (
+                    "Wilcoxon signed-rank es un test NO parametrico para muestras PAREADAS. "
+                    "Difiere de Mann-Whitney U (muestras independientes): aqui se comparan "
+                    "diferencias d_i = A_i - B_i sobre el mismo KPI/edificio en ambos algoritmos."
                 ),
             })
 
@@ -1184,8 +1281,9 @@ def enrich_objective_compliance_with_statistics(
             "variance_heterogeneity_alpha_0_05": as_bool(stats_row.get("variance_heterogeneity_alpha_0_05")),
             "statistical_interpretation": interpretation,
             "statistical_evidence_files": (
-                "scores_kpi_algoritmo_madrl.csv; analisis_estadistico_madrl.csv; "
-                "comparaciones_por_pares_madrl.csv; hipotesis_estadisticas_madrl.csv"
+                "scores_kpi_algoritmo_madrl.csv; analisis_estadistico_madrl.csv (SW+KW); "
+                "comparaciones_mwu_madrl.csv (MWU); comparaciones_wilcoxon_madrl.csv (Wilcoxon SR); "
+                "hipotesis_estadisticas_madrl.csv"
             ),
             "statistical_limitation": (
                 "Contrastes exploratorios sobre KPIs normalizados de una corrida por algoritmo; "
@@ -1200,118 +1298,211 @@ def enrich_objective_compliance_with_statistics(
 def statistical_hypothesis_rows(
     objective_compliance: Sequence[Mapping[str, Any]],
     omnibus_rows: Sequence[Mapping[str, Any]],
-    pairwise_rows: Sequence[Mapping[str, Any]],
+    mwu_rows: Sequence[Mapping[str, Any]],
+    wilcoxon_rows: Sequence[Mapping[str, Any]],
 ) -> List[Dict[str, Any]]:
+    """Tabla de demostracion de hipotesis con los 4 tests separados.
+
+    Fuente de datos: KPIs de entrenamiento de los 4 MADRL
+    (HAPPO, MASAC, MATD3, MAAC) sobre los 3 ejes OE1/OE2/OE3.
+
+    - Shapiro-Wilk  : normalidad por grupo de algoritmo (analisis_estadistico_madrl.csv)
+    - Kruskal-Wallis: diferencias globales entre los 4 MADRL (analisis_estadistico_madrl.csv)
+    - Mann-Whitney U: comparacion por pares, muestras independientes (comparaciones_mwu_madrl.csv)
+    - Wilcoxon SR   : comparacion por pares, muestras pareadas (comparaciones_wilcoxon_madrl.csv)
+    """
     omnibus_by_scope = {str(row.get("scope")): row for row in omnibus_rows}
+    best_alg = lambda scope: str(omnibus_by_scope.get(scope, {}).get("best_algorithm_by_median_gain", ""))
+
+    def best_mwu_pairs(scope: str, algorithm: str) -> List[Mapping[str, Any]]:
+        return [
+            r for r in mwu_rows
+            if r.get("scope") == scope
+            and (r.get("algorithm_a") == algorithm or r.get("algorithm_b") == algorithm)
+        ]
+
+    def best_wc_pairs(scope: str, algorithm: str) -> List[Mapping[str, Any]]:
+        return [
+            r for r in wilcoxon_rows
+            if r.get("scope") == scope
+            and (r.get("algorithm_a") == algorithm or r.get("algorithm_b") == algorithm)
+        ]
+
     rows: List[Dict[str, Any]] = []
 
     for axis_code, definition in OBJECTIVE_DEFINITIONS.items():
         compliance = next((row for row in objective_compliance if row.get("axis") == axis_code), {})
         omnibus = omnibus_by_scope.get(axis_code, {})
-        best_algorithm = str(omnibus.get("best_algorithm_by_median_gain", ""))
-        best_pairs = [
-            row for row in pairwise_rows
-            if row.get("scope") == axis_code
-            and (row.get("algorithm_a") == best_algorithm or row.get("algorithm_b") == best_algorithm)
-        ]
-        significant_pairs_mwu = [
-            row for row in best_pairs
-            if as_bool(row.get("mann_whitney_significant_alpha_0_05")) is True
-        ]
-        significant_pairs_wilcoxon = [
-            row for row in best_pairs
-            if as_bool(row.get("wilcoxon_significant_alpha_0_05")) is True
-        ]
+        best_algorithm = best_alg(axis_code)
+        mwu_best = best_mwu_pairs(axis_code, best_algorithm)
+        wc_best = best_wc_pairs(axis_code, best_algorithm)
+        sig_mwu = [r for r in mwu_best if as_bool(r.get("mann_whitney_significant_alpha_0_05")) is True]
+        sig_wc = [r for r in wc_best if as_bool(r.get("wilcoxon_significant_alpha_0_05")) is True]
+
         rows.append({
             "axis": axis_code,
             "scenario": definition["scenario"],
             "dimension": definition["dimension"],
             "hypothesis_or_expected_result": definition["expected_result"],
+            "data_source": (
+                "KPIs de entrenamiento de 4 algoritmos MADRL "
+                "(HAPPO, MASAC, MATD3, MAAC) sobre resultados de simulacion CityLearn v3"
+            ),
             "observed_compliance_status": compliance.get("objective_compliance_status", ""),
             "observed_demonstration_statement": compliance.get("demonstration_statement", ""),
             "statistical_best_algorithm_by_median_gain": best_algorithm,
-            "normality_assumption_violated_any_group": omnibus.get("normality_assumption_violated_any_group"),
-            "shapiro_wilk_p_value_HAPPO": omnibus.get("shapiro_wilk_p_value_HAPPO"),
-            "shapiro_wilk_p_value_MASAC": omnibus.get("shapiro_wilk_p_value_MASAC"),
-            "shapiro_wilk_p_value_MATD3": omnibus.get("shapiro_wilk_p_value_MATD3"),
-            "shapiro_wilk_p_value_MAAC": omnibus.get("shapiro_wilk_p_value_MAAC"),
-            "kruskal_h_statistic": omnibus.get("kruskal_h_statistic"),
-            "kruskal_p_value": omnibus.get("kruskal_p_value"),
-            "kruskal_significant_alpha_0_05": omnibus.get("kruskal_significant_alpha_0_05"),
-            "brown_forsythe_w_statistic": omnibus.get("brown_forsythe_w_statistic"),
-            "brown_forsythe_p_value": omnibus.get("brown_forsythe_p_value"),
-            "variance_heterogeneity_alpha_0_05": omnibus.get("variance_heterogeneity_alpha_0_05"),
-            "pairwise_comparisons_with_best": len(best_pairs),
-            "significant_pairwise_mwu_with_best": len(significant_pairs_mwu),
-            "significant_pairwise_wilcoxon_with_best": len(significant_pairs_wilcoxon),
-            "effect_sizes_reported": "Cliff's delta, Vargha-Delaney A12, Cohen d, Hedges g",
-            "bootstrap_ci_reported": "95% CI for mean signed-relative-gain difference",
-            "decision_rule": (
-                "Use KPI compliance as primary thesis evidence; use non-parametric tests and "
-                "effect sizes as statistical support. Do not infer unobserved results."
+            # --- TEST 1: Shapiro-Wilk (normalidad por grupo) ---
+            "SW_test": "Shapiro-Wilk",
+            "SW_H0": "Los KPI-gains de cada algoritmo MADRL siguen distribucion normal",
+            "SW_normality_violated_any_group": omnibus.get("normality_assumption_violated_any_group"),
+            "SW_p_value_HAPPO": omnibus.get("shapiro_wilk_p_value_HAPPO"),
+            "SW_p_value_MASAC": omnibus.get("shapiro_wilk_p_value_MASAC"),
+            "SW_p_value_MATD3": omnibus.get("shapiro_wilk_p_value_MATD3"),
+            "SW_p_value_MAAC": omnibus.get("shapiro_wilk_p_value_MAAC"),
+            "SW_conclusion": (
+                "Normalidad rechazada en al menos un grupo → tests no parametricos justificados."
+                if as_bool(omnibus.get("normality_assumption_violated_any_group")) is True
+                else "Ningún grupo rechaza normalidad → tests no parametricos aplicados por precaucion."
+                if as_bool(omnibus.get("normality_assumption_violated_any_group")) is False
+                else "SW no calculable."
             ),
+            # --- TEST 2: Kruskal-Wallis (omnibus, 4 grupos) ---
+            "KW_test": "Kruskal-Wallis",
+            "KW_H0": f"Las distribuciones de KPI-gains de HAPPO, MASAC, MATD3 y MAAC son identicas en {axis_code}",
+            "KW_H_statistic": omnibus.get("kruskal_h_statistic"),
+            "KW_p_value": omnibus.get("kruskal_p_value"),
+            "KW_significant_alpha_0_05": omnibus.get("kruskal_significant_alpha_0_05"),
+            "KW_conclusion": (
+                f"p={omnibus.get('kruskal_p_value')} < 0.05 → se rechaza H0: existe diferencia entre los 4 MADRL en {axis_code}."
+                if as_bool(omnibus.get("kruskal_significant_alpha_0_05")) is True
+                else f"p={omnibus.get('kruskal_p_value')} >= 0.05 → no se rechaza H0: no se detecta diferencia global en {axis_code}."
+                if as_bool(omnibus.get("kruskal_significant_alpha_0_05")) is False
+                else "KW no calculable."
+            ),
+            # --- TEST 3: Mann-Whitney U (pares independientes) ---
+            "MWU_test": "Mann-Whitney U",
+            "MWU_H0": f"Distribuciones de {best_algorithm} y cada rival son identicas (muestras independientes) en {axis_code}",
+            "MWU_pairs_with_best": len(mwu_best),
+            "MWU_significant_pairs_with_best": len(sig_mwu),
+            "MWU_p_values_with_best": "; ".join(
+                f"{r.get('algorithm_a')} vs {r.get('algorithm_b')}: p={r.get('mann_whitney_p_value')}"
+                for r in mwu_best
+            ),
+            "MWU_conclusion": (
+                f"{len(sig_mwu)}/{len(mwu_best)} pares con {best_algorithm} son significativos (MWU p<0.05)."
+                if mwu_best else "Sin pares calculables."
+            ),
+            # --- TEST 4: Wilcoxon signed-rank (pares pareados) ---
+            "WC_test": "Wilcoxon signed-rank",
+            "WC_H0": f"Mediana de diferencias pareadas {best_algorithm}_i - rival_i es cero en {axis_code}",
+            "WC_pairs_with_best": len(wc_best),
+            "WC_significant_pairs_with_best": len(sig_wc),
+            "WC_p_values_with_best": "; ".join(
+                f"{r.get('algorithm_a')} vs {r.get('algorithm_b')}: p={r.get('wilcoxon_p_value')}"
+                for r in wc_best
+            ),
+            "WC_conclusion": (
+                f"{len(sig_wc)}/{len(wc_best)} pares con {best_algorithm} son significativos (Wilcoxon p<0.05)."
+                if wc_best else "Sin pares calculables."
+            ),
+            # --- Metadatos comunes ---
+            "alpha": STATISTICAL_ALPHA,
+            "effect_sizes_reported": "Cliff's delta, Vargha-Delaney A12, Cohen d, Hedges g (en comparaciones_mwu_madrl.csv)",
+            "bootstrap_ci_reported": "95% CI diferencia de medias (en comparaciones_mwu_madrl.csv)",
             "evidence_files": (
-                "objetivos_especificos_cumplimiento.csv; matriz_resultados_madrl.csv; "
-                "analisis_estadistico_madrl.csv; comparaciones_por_pares_madrl.csv"
+                "analisis_estadistico_madrl.csv (SW+KW); "
+                "comparaciones_mwu_madrl.csv (MWU+tamanos efecto); "
+                "comparaciones_wilcoxon_madrl.csv (Wilcoxon SR)"
+            ),
+            "decision_rule": (
+                "KPI compliance es la evidencia primaria de tesis; los 4 tests estadisticos "
+                "son soporte confirmatorio aplicado sobre KPI-gains de entrenamiento MADRL."
             ),
             "limitations": (
-                "Single seed and KPI-level samples; formal confirmation requires more seeds "
-                "or independent experimental repetitions."
+                "Contrastes exploratorios sobre KPI-gains de una corrida por algoritmo; "
+                "no sustituyen replicacion con multiples semillas."
             ),
         })
 
     overall = omnibus_by_scope.get("ALL", {})
+    best_all = best_alg("ALL")
+    mwu_best_all = best_mwu_pairs("ALL", best_all)
+    wc_best_all = best_wc_pairs("ALL", best_all)
+    sig_mwu_all = [r for r in mwu_best_all if as_bool(r.get("mann_whitney_significant_alpha_0_05")) is True]
+    sig_wc_all = [r for r in wc_best_all if as_bool(r.get("wilcoxon_significant_alpha_0_05")) is True]
+
     rows.append({
         "axis": "OG",
         "scenario": "ALL",
         "dimension": "Gestion coordinada integral",
         "hypothesis_or_expected_result": "Determinar el mejor MADRL en los tres ejes integrados.",
+        "data_source": (
+            "KPIs de entrenamiento de 4 algoritmos MADRL "
+            "(HAPPO, MASAC, MATD3, MAAC) sobre resultados de simulacion CityLearn v3"
+        ),
         "observed_compliance_status": "ranking_integrado_por_kpis",
         "observed_demonstration_statement": "La evidencia descriptiva integrada se calcula sobre los KPIs comparables de OE1, OE2 y OE3.",
-        "statistical_best_algorithm_by_median_gain": overall.get("best_algorithm_by_median_gain", ""),
-        "normality_assumption_violated_any_group": overall.get("normality_assumption_violated_any_group"),
-        "shapiro_wilk_p_value_HAPPO": overall.get("shapiro_wilk_p_value_HAPPO"),
-        "shapiro_wilk_p_value_MASAC": overall.get("shapiro_wilk_p_value_MASAC"),
-        "shapiro_wilk_p_value_MATD3": overall.get("shapiro_wilk_p_value_MATD3"),
-        "shapiro_wilk_p_value_MAAC": overall.get("shapiro_wilk_p_value_MAAC"),
-        "kruskal_h_statistic": overall.get("kruskal_h_statistic"),
-        "kruskal_p_value": overall.get("kruskal_p_value"),
-        "kruskal_significant_alpha_0_05": overall.get("kruskal_significant_alpha_0_05"),
-        "brown_forsythe_w_statistic": overall.get("brown_forsythe_w_statistic"),
-        "brown_forsythe_p_value": overall.get("brown_forsythe_p_value"),
-        "variance_heterogeneity_alpha_0_05": overall.get("variance_heterogeneity_alpha_0_05"),
-        "pairwise_comparisons_with_best": len([
-            row for row in pairwise_rows
-            if row.get("scope") == "ALL"
-            and (
-                row.get("algorithm_a") == overall.get("best_algorithm_by_median_gain")
-                or row.get("algorithm_b") == overall.get("best_algorithm_by_median_gain")
-            )
-        ]),
-        "significant_pairwise_mwu_with_best": len([
-            row for row in pairwise_rows
-            if row.get("scope") == "ALL"
-            and as_bool(row.get("mann_whitney_significant_alpha_0_05")) is True
-            and (
-                row.get("algorithm_a") == overall.get("best_algorithm_by_median_gain")
-                or row.get("algorithm_b") == overall.get("best_algorithm_by_median_gain")
-            )
-        ]),
-        "significant_pairwise_wilcoxon_with_best": len([
-            row for row in pairwise_rows
-            if row.get("scope") == "ALL"
-            and as_bool(row.get("wilcoxon_significant_alpha_0_05")) is True
-            and (
-                row.get("algorithm_a") == overall.get("best_algorithm_by_median_gain")
-                or row.get("algorithm_b") == overall.get("best_algorithm_by_median_gain")
-            )
-        ]),
-        "normality_assumption_violated_any_group": overall.get("normality_assumption_violated_any_group"),
-        "effect_sizes_reported": "Cliff's delta, Vargha-Delaney A12, Cohen d, Hedges g",
-        "bootstrap_ci_reported": "95% CI for mean signed-relative-gain difference",
-        "decision_rule": "Use integrated KPI ranking as primary O.G. evidence and omnibus/pairwise tests as support.",
-        "evidence_files": "analisis_estadistico_madrl.csv; comparaciones_por_pares_madrl.csv",
-        "limitations": "Single seed and KPI-level samples; formal confirmation requires more seeds.",
+        "statistical_best_algorithm_by_median_gain": best_all,
+        "SW_test": "Shapiro-Wilk",
+        "SW_H0": "Los KPI-gains de cada algoritmo MADRL siguen distribucion normal (ALL ejes)",
+        "SW_normality_violated_any_group": overall.get("normality_assumption_violated_any_group"),
+        "SW_p_value_HAPPO": overall.get("shapiro_wilk_p_value_HAPPO"),
+        "SW_p_value_MASAC": overall.get("shapiro_wilk_p_value_MASAC"),
+        "SW_p_value_MATD3": overall.get("shapiro_wilk_p_value_MATD3"),
+        "SW_p_value_MAAC": overall.get("shapiro_wilk_p_value_MAAC"),
+        "SW_conclusion": (
+            "Normalidad rechazada en al menos un grupo → tests no parametricos justificados."
+            if as_bool(overall.get("normality_assumption_violated_any_group")) is True
+            else "Ningún grupo rechaza normalidad → tests no parametricos aplicados por precaucion."
+            if as_bool(overall.get("normality_assumption_violated_any_group")) is False
+            else "SW no calculable."
+        ),
+        "KW_test": "Kruskal-Wallis",
+        "KW_H0": "Las distribuciones de KPI-gains de HAPPO, MASAC, MATD3 y MAAC son identicas (ALL ejes)",
+        "KW_H_statistic": overall.get("kruskal_h_statistic"),
+        "KW_p_value": overall.get("kruskal_p_value"),
+        "KW_significant_alpha_0_05": overall.get("kruskal_significant_alpha_0_05"),
+        "KW_conclusion": (
+            f"p={overall.get('kruskal_p_value')} < 0.05 → diferencia global entre los 4 MADRL (ALL ejes)."
+            if as_bool(overall.get("kruskal_significant_alpha_0_05")) is True
+            else f"p={overall.get('kruskal_p_value')} >= 0.05 → no se detecta diferencia global (ALL ejes)."
+            if as_bool(overall.get("kruskal_significant_alpha_0_05")) is False
+            else "KW no calculable."
+        ),
+        "MWU_test": "Mann-Whitney U",
+        "MWU_H0": f"Distribuciones de {best_all} y cada rival son identicas (independientes, ALL ejes)",
+        "MWU_pairs_with_best": len(mwu_best_all),
+        "MWU_significant_pairs_with_best": len(sig_mwu_all),
+        "MWU_p_values_with_best": "; ".join(
+            f"{r.get('algorithm_a')} vs {r.get('algorithm_b')}: p={r.get('mann_whitney_p_value')}"
+            for r in mwu_best_all
+        ),
+        "MWU_conclusion": (
+            f"{len(sig_mwu_all)}/{len(mwu_best_all)} pares con {best_all} son significativos (MWU p<0.05)."
+            if mwu_best_all else "Sin pares calculables."
+        ),
+        "WC_test": "Wilcoxon signed-rank",
+        "WC_H0": f"Mediana de diferencias pareadas {best_all}_i - rival_i es cero (ALL ejes)",
+        "WC_pairs_with_best": len(wc_best_all),
+        "WC_significant_pairs_with_best": len(sig_wc_all),
+        "WC_p_values_with_best": "; ".join(
+            f"{r.get('algorithm_a')} vs {r.get('algorithm_b')}: p={r.get('wilcoxon_p_value')}"
+            for r in wc_best_all
+        ),
+        "WC_conclusion": (
+            f"{len(sig_wc_all)}/{len(wc_best_all)} pares con {best_all} son significativos (Wilcoxon p<0.05)."
+            if wc_best_all else "Sin pares calculables."
+        ),
+        "alpha": STATISTICAL_ALPHA,
+        "effect_sizes_reported": "Cliff's delta, Vargha-Delaney A12, Cohen d, Hedges g (en comparaciones_mwu_madrl.csv)",
+        "bootstrap_ci_reported": "95% CI diferencia de medias (en comparaciones_mwu_madrl.csv)",
+        "evidence_files": (
+            "analisis_estadistico_madrl.csv (SW+KW); "
+            "comparaciones_mwu_madrl.csv (MWU+tamanos efecto); "
+            "comparaciones_wilcoxon_madrl.csv (Wilcoxon SR)"
+        ),
+        "decision_rule": "Usar ranking KPI integrado como evidencia primaria O.G.; tests como soporte.",
+        "limitations": "Contrastes exploratorios sobre KPI-gains de una corrida; requiere mas semillas.",
     })
     return rows
 
@@ -1360,7 +1551,8 @@ def consistency_matrix_rows() -> List[Dict[str, Any]]:
             ),
             "instrument": (
                 "Scripts train_citylearn_v3_*.py, objective_kpis.csv, axis_baseline_comparison.csv, "
-                "figures_manifest.json, analisis_estadistico_madrl.csv, comparaciones_por_pares_madrl.csv"
+                "figures_manifest.json, analisis_estadistico_madrl.csv (SW+KW), "
+                "comparaciones_mwu_madrl.csv (MWU), comparaciones_wilcoxon_madrl.csv (Wilcoxon SR)"
             ),
         })
     return rows
@@ -1711,7 +1903,8 @@ def main() -> int:
     )
     statistical_score_rows = algorithm_kpi_score_rows(objective_rows)
     statistical_omnibus = statistical_omnibus_rows(statistical_score_rows)
-    statistical_pairwise = pairwise_statistical_rows(statistical_score_rows)
+    statistical_mwu = mann_whitney_pairwise_rows(statistical_score_rows)
+    statistical_wilcoxon = wilcoxon_pairwise_rows(statistical_score_rows)
     objective_compliance = enrich_objective_compliance_with_statistics(
         objective_compliance,
         statistical_omnibus,
@@ -1719,7 +1912,8 @@ def main() -> int:
     statistical_hypotheses = statistical_hypothesis_rows(
         objective_compliance,
         statistical_omnibus,
-        statistical_pairwise,
+        statistical_mwu,
+        statistical_wilcoxon,
     )
     methodology_rows = methodological_matrix_rows(manifest_rows)
     consistency_rows = consistency_matrix_rows()
@@ -1743,7 +1937,8 @@ def main() -> int:
         "matriz_baseline_por_eje": axis_rows,
         "scores_kpi_algoritmo_madrl": statistical_score_rows,
         "analisis_estadistico_madrl": statistical_omnibus,
-        "comparaciones_por_pares_madrl": statistical_pairwise,
+        "comparaciones_mwu_madrl": statistical_mwu,
+        "comparaciones_wilcoxon_madrl": statistical_wilcoxon,
         "hipotesis_estadisticas_madrl": statistical_hypotheses,
         "matriz_operacionalizacion_variables": methodology_rows,
         "Marco_metodologico_MADRL": methodology_rows,
@@ -1792,7 +1987,8 @@ def main() -> int:
         "objective_rows": len(objective_rows),
         "statistical_score_rows": len(statistical_score_rows),
         "statistical_omnibus_rows": len(statistical_omnibus),
-        "statistical_pairwise_rows": len(statistical_pairwise),
+        "statistical_mwu_rows": len(statistical_mwu),
+        "statistical_wilcoxon_rows": len(statistical_wilcoxon),
         "objective_compliance": objective_compliance,
     }, indent=2, ensure_ascii=False))
     return 0
