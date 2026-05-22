@@ -880,6 +880,10 @@ def statistical_omnibus_rows(score_rows: Sequence[Mapping[str, Any]]) -> List[Di
         brown_w = brown_forsythe_w_fallback(clean_groups)
         brown_p = None
         brown_status = "fallback_statistic_without_p_value"
+        shapiro_results: Dict[str, Dict[str, Any]] = {
+            algo: {"statistic": None, "p_value": None, "status": "not_computed"}
+            for algo in ALGORITHM_NAMES
+        }
 
         if len(clean_groups) >= 2 and stats is not None:
             try:
@@ -910,12 +914,37 @@ def statistical_omnibus_rows(score_rows: Sequence[Mapping[str, Any]]) -> List[Di
             except Exception as exc:
                 brown_status = f"not_calculable: {exc}"
 
+            for algo_name in ALGORITHM_NAMES:
+                sw_values = finite_values(clean_groups.get(algo_name, []))
+                if len(sw_values) >= 3:
+                    try:
+                        sw_result = stats.shapiro(sw_values)
+                        shapiro_results[algo_name] = {
+                            "statistic": float(sw_result.statistic),
+                            "p_value": float(sw_result.pvalue),
+                            "status": "ok",
+                        }
+                    except Exception as exc:
+                        shapiro_results[algo_name]["status"] = f"not_calculable: {exc}"
+                elif sw_values:
+                    shapiro_results[algo_name]["status"] = "insufficient_data_n<3"
+                else:
+                    shapiro_results[algo_name]["status"] = "no_data"
+
+        normality_violated = any(
+            r["p_value"] is not None and r["p_value"] < STATISTICAL_ALPHA
+            for r in shapiro_results.values()
+        )
+
         best_algorithm, best_median = best_algorithm_by_median(clean_groups)
         rows.append({
             "scope": scope,
             "scenario": scenario,
             "dimension": dimension,
-            "method": "Kruskal-Wallis omnibus; Levene/Brown-Forsythe median-centered variance test",
+            "method": (
+                "Shapiro-Wilk normalidad por grupo; Kruskal-Wallis omnibus; "
+                "Levene/Brown-Forsythe varianza homogenea"
+            ),
             "alpha": STATISTICAL_ALPHA,
             "n_algorithms": len(clean_groups),
             "algorithms": ", ".join(name for name in ALGORITHM_NAMES if name in clean_groups),
@@ -925,6 +954,39 @@ def statistical_omnibus_rows(score_rows: Sequence[Mapping[str, Any]]) -> List[Di
             "group_median_signed_relative_gain_json": json.dumps(group_summary_payload(clean_groups, median_value), sort_keys=True),
             "best_algorithm_by_median_gain": best_algorithm,
             "best_median_signed_relative_gain": best_median,
+            "shapiro_wilk_statistic_HAPPO": shapiro_results["HAPPO"]["statistic"],
+            "shapiro_wilk_p_value_HAPPO": shapiro_results["HAPPO"]["p_value"],
+            "shapiro_wilk_normality_rejected_HAPPO": (
+                None if shapiro_results["HAPPO"]["p_value"] is None
+                else shapiro_results["HAPPO"]["p_value"] < STATISTICAL_ALPHA
+            ),
+            "shapiro_wilk_status_HAPPO": shapiro_results["HAPPO"]["status"],
+            "shapiro_wilk_statistic_MASAC": shapiro_results["MASAC"]["statistic"],
+            "shapiro_wilk_p_value_MASAC": shapiro_results["MASAC"]["p_value"],
+            "shapiro_wilk_normality_rejected_MASAC": (
+                None if shapiro_results["MASAC"]["p_value"] is None
+                else shapiro_results["MASAC"]["p_value"] < STATISTICAL_ALPHA
+            ),
+            "shapiro_wilk_status_MASAC": shapiro_results["MASAC"]["status"],
+            "shapiro_wilk_statistic_MATD3": shapiro_results["MATD3"]["statistic"],
+            "shapiro_wilk_p_value_MATD3": shapiro_results["MATD3"]["p_value"],
+            "shapiro_wilk_normality_rejected_MATD3": (
+                None if shapiro_results["MATD3"]["p_value"] is None
+                else shapiro_results["MATD3"]["p_value"] < STATISTICAL_ALPHA
+            ),
+            "shapiro_wilk_status_MATD3": shapiro_results["MATD3"]["status"],
+            "shapiro_wilk_statistic_MAAC": shapiro_results["MAAC"]["statistic"],
+            "shapiro_wilk_p_value_MAAC": shapiro_results["MAAC"]["p_value"],
+            "shapiro_wilk_normality_rejected_MAAC": (
+                None if shapiro_results["MAAC"]["p_value"] is None
+                else shapiro_results["MAAC"]["p_value"] < STATISTICAL_ALPHA
+            ),
+            "shapiro_wilk_status_MAAC": shapiro_results["MAAC"]["status"],
+            "normality_assumption_violated_any_group": normality_violated,
+            "shapiro_wilk_note": (
+                "SW p<0.05 rechaza normalidad; si algun grupo la rechaza, "
+                "los tests no parametricos (Kruskal-Wallis, Wilcoxon, Mann-Whitney) quedan justificados."
+            ),
             "kruskal_h_statistic": kruskal_h,
             "kruskal_p_value": kruskal_p,
             "kruskal_status": kruskal_status,
@@ -966,6 +1028,9 @@ def pairwise_statistical_rows(
             u_statistic = mann_whitney_u_fallback(values_a, values_b)
             u_p_value = None
             u_status = "fallback_statistic_without_p_value"
+            wilcoxon_statistic = None
+            wilcoxon_p_value = None
+            wilcoxon_status = "not_computed"
 
             if values_a and values_b and stats is not None:
                 try:
@@ -975,8 +1040,23 @@ def pairwise_statistical_rows(
                     u_status = "ok"
                 except Exception as exc:
                     u_status = f"not_calculable: {exc}"
+
+                n_paired = min(len(values_a), len(values_b))
+                paired_a = values_a[:n_paired]
+                paired_b = values_b[:n_paired]
+                if n_paired >= 1 and any(a != b for a, b in zip(paired_a, paired_b)):
+                    try:
+                        wc_result = stats.wilcoxon(paired_a, paired_b, alternative="two-sided")
+                        wilcoxon_statistic = float(wc_result.statistic)
+                        wilcoxon_p_value = float(wc_result.pvalue)
+                        wilcoxon_status = f"ok_n_paired={n_paired}"
+                    except Exception as exc:
+                        wilcoxon_status = f"not_calculable: {exc}"
+                else:
+                    wilcoxon_status = "all_differences_zero_or_empty"
             elif not values_a or not values_b:
                 u_status = "insufficient_data"
+                wilcoxon_status = "insufficient_data"
 
             ci_low, ci_high = bootstrap_mean_difference_ci(
                 values_a,
@@ -1017,6 +1097,10 @@ def pairwise_statistical_rows(
                 "mann_whitney_p_value": u_p_value,
                 "mann_whitney_status": u_status,
                 "mann_whitney_significant_alpha_0_05": None if u_p_value is None else u_p_value < STATISTICAL_ALPHA,
+                "wilcoxon_statistic": wilcoxon_statistic,
+                "wilcoxon_p_value": wilcoxon_p_value,
+                "wilcoxon_status": wilcoxon_status,
+                "wilcoxon_significant_alpha_0_05": None if wilcoxon_p_value is None else wilcoxon_p_value < STATISTICAL_ALPHA,
                 "cliffs_delta": delta,
                 "cliffs_delta_magnitude": cliffs_delta_magnitude(delta),
                 "vargha_delaney_a12": a12,
@@ -1067,7 +1151,8 @@ def enrich_objective_compliance_with_statistics(
         output = dict(row)
         output.update({
             "statistical_method": (
-                "Kruskal-Wallis; Mann-Whitney U por pares de algoritmos; "
+                "Shapiro-Wilk normalidad por grupo; Kruskal-Wallis omnibus; "
+                "Mann-Whitney U + Wilcoxon signed-rank por pares; "
                 "Cliff's delta; Vargha-Delaney A12; Cohen d; Hedges g; "
                 "Levene/Brown-Forsythe; bootstrap CI 95%"
             ),
@@ -1109,9 +1194,13 @@ def statistical_hypothesis_rows(
             if row.get("scope") == axis_code
             and (row.get("algorithm_a") == best_algorithm or row.get("algorithm_b") == best_algorithm)
         ]
-        significant_pairs = [
+        significant_pairs_mwu = [
             row for row in best_pairs
             if as_bool(row.get("mann_whitney_significant_alpha_0_05")) is True
+        ]
+        significant_pairs_wilcoxon = [
+            row for row in best_pairs
+            if as_bool(row.get("wilcoxon_significant_alpha_0_05")) is True
         ]
         rows.append({
             "axis": axis_code,
@@ -1121,6 +1210,11 @@ def statistical_hypothesis_rows(
             "observed_compliance_status": compliance.get("objective_compliance_status", ""),
             "observed_demonstration_statement": compliance.get("demonstration_statement", ""),
             "statistical_best_algorithm_by_median_gain": best_algorithm,
+            "normality_assumption_violated_any_group": omnibus.get("normality_assumption_violated_any_group"),
+            "shapiro_wilk_p_value_HAPPO": omnibus.get("shapiro_wilk_p_value_HAPPO"),
+            "shapiro_wilk_p_value_MASAC": omnibus.get("shapiro_wilk_p_value_MASAC"),
+            "shapiro_wilk_p_value_MATD3": omnibus.get("shapiro_wilk_p_value_MATD3"),
+            "shapiro_wilk_p_value_MAAC": omnibus.get("shapiro_wilk_p_value_MAAC"),
             "kruskal_h_statistic": omnibus.get("kruskal_h_statistic"),
             "kruskal_p_value": omnibus.get("kruskal_p_value"),
             "kruskal_significant_alpha_0_05": omnibus.get("kruskal_significant_alpha_0_05"),
@@ -1128,7 +1222,8 @@ def statistical_hypothesis_rows(
             "brown_forsythe_p_value": omnibus.get("brown_forsythe_p_value"),
             "variance_heterogeneity_alpha_0_05": omnibus.get("variance_heterogeneity_alpha_0_05"),
             "pairwise_comparisons_with_best": len(best_pairs),
-            "significant_pairwise_comparisons_with_best": len(significant_pairs),
+            "significant_pairwise_mwu_with_best": len(significant_pairs_mwu),
+            "significant_pairwise_wilcoxon_with_best": len(significant_pairs_wilcoxon),
             "effect_sizes_reported": "Cliff's delta, Vargha-Delaney A12, Cohen d, Hedges g",
             "bootstrap_ci_reported": "95% CI for mean signed-relative-gain difference",
             "decision_rule": (
@@ -1168,7 +1263,7 @@ def statistical_hypothesis_rows(
                 or row.get("algorithm_b") == overall.get("best_algorithm_by_median_gain")
             )
         ]),
-        "significant_pairwise_comparisons_with_best": len([
+        "significant_pairwise_mwu_with_best": len([
             row for row in pairwise_rows
             if row.get("scope") == "ALL"
             and as_bool(row.get("mann_whitney_significant_alpha_0_05")) is True
@@ -1177,6 +1272,16 @@ def statistical_hypothesis_rows(
                 or row.get("algorithm_b") == overall.get("best_algorithm_by_median_gain")
             )
         ]),
+        "significant_pairwise_wilcoxon_with_best": len([
+            row for row in pairwise_rows
+            if row.get("scope") == "ALL"
+            and as_bool(row.get("wilcoxon_significant_alpha_0_05")) is True
+            and (
+                row.get("algorithm_a") == overall.get("best_algorithm_by_median_gain")
+                or row.get("algorithm_b") == overall.get("best_algorithm_by_median_gain")
+            )
+        ]),
+        "normality_assumption_violated_any_group": overall.get("normality_assumption_violated_any_group"),
         "effect_sizes_reported": "Cliff's delta, Vargha-Delaney A12, Cohen d, Hedges g",
         "bootstrap_ci_reported": "95% CI for mean signed-relative-gain difference",
         "decision_rule": "Use integrated KPI ranking as primary O.G. evidence and omnibus/pairwise tests as support.",
@@ -1199,7 +1304,8 @@ def methodological_matrix_rows(manifest_rows: Sequence[Mapping[str, Any]]) -> Li
             "instrument": "CityLearn v2 evaluate_v2 + CityLearn v3 proposed MADRL artifact tables",
             "technique": (
                 "Simulacion computacional, entrenamiento MADRL, comparacion contra baseline, "
-                "analisis de KPIs, Kruskal-Wallis, Mann-Whitney U, Cliff's delta, "
+                "analisis de KPIs, Shapiro-Wilk normalidad, Kruskal-Wallis, "
+                "Mann-Whitney U, Wilcoxon signed-rank, Cliff's delta, "
                 "Vargha-Delaney A12, Cohen d, Hedges g, Levene/Brown-Forsythe y bootstrap CI"
             ),
             "scale": "Numerica continua o ratio segun KPI",
@@ -1223,8 +1329,9 @@ def consistency_matrix_rows() -> List[Dict[str, Any]]:
             "scenario": definition["scenario"],
             "method": "Simulacion computacional no experimental con CityLearn v2 y capa CityLearn v3 propuesta",
             "technique": (
-                "Entrenamiento MADRL CTDE, extraccion de KPIs, comparacion contra baseline "
-                "y contrastes no parametricos con tamanos de efecto"
+                "Entrenamiento MADRL CTDE, extraccion de KPIs, comparacion contra baseline, "
+                "Shapiro-Wilk normalidad, Kruskal-Wallis, Mann-Whitney U, "
+                "Wilcoxon signed-rank y contrastes no parametricos con tamanos de efecto"
             ),
             "instrument": (
                 "Scripts train_citylearn_v3_*.py, objective_kpis.csv, axis_baseline_comparison.csv, "
