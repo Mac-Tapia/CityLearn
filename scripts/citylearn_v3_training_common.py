@@ -1938,6 +1938,7 @@ class CityLearnV3BackendAdapter:
         return self._step(action_dict)
 
     def _step(self, action_dict: Mapping[str, np.ndarray]):
+        self._clear_current_step_device_consumption()
         observations, rewards, terminations, truncations, infos = self.env.step(action_dict)
         self._last_observations = {
             agent: np.asarray(observations[agent], dtype=np.float32)
@@ -1949,6 +1950,37 @@ class CityLearnV3BackendAdapter:
         }
         self._record_step(action_dict, observations, rewards, dones, infos)
         return self._last_observations, rewards, dones, infos
+
+    def _clear_current_step_device_consumption(self) -> None:
+        citylearn_env = self._core_env()
+
+        for building in getattr(citylearn_env, "buildings", []) or []:
+            for attribute in (
+                "cooling_device",
+                "heating_device",
+                "dhw_device",
+                "non_shiftable_load_device",
+                "electrical_storage",
+            ):
+                self._set_device_electricity_consumption(getattr(building, attribute, None), 0.0)
+
+            for charger in getattr(building, "electric_vehicle_chargers", []) or []:
+                self._set_device_electricity_consumption(charger, 0.0)
+
+            for washing_machine in getattr(building, "washing_machines", []) or []:
+                self._set_device_electricity_consumption(washing_machine, 0.0)
+
+    @staticmethod
+    def _set_device_electricity_consumption(device, value: float) -> None:
+        setter = getattr(device, "set_electricity_consumption", None)
+
+        if setter is None:
+            return
+
+        try:
+            setter(value, enforce_polarity=False)
+        except TypeError:
+            setter(value)
 
     def _core_env(self):
         return getattr(self.env, "env", getattr(self.env, "unwrapped", self.env))
@@ -2175,7 +2207,15 @@ class CityLearnV3BackendAdapter:
         self.live_progress_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.live_progress_path.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
-        tmp_path.replace(self.live_progress_path)
+
+        try:
+            tmp_path.replace(self.live_progress_path)
+        except PermissionError:
+            try:
+                self.live_progress_path.unlink(missing_ok=True)
+                tmp_path.replace(self.live_progress_path)
+            except PermissionError:
+                tmp_path.unlink(missing_ok=True)
 
     def kpi_summary(self) -> Dict[str, object]:
         return {

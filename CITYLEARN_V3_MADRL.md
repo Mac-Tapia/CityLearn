@@ -85,12 +85,35 @@ env = make_citylearn_v3_project_env(scenario="E1", seed=0)
 
 The project default v3 environment uses:
 
-- Schema: `citylearn_challenge_2022_phase_all_plus_evs/schema.json`
-- Agents: 17 CityLearn buildings
+- Schema: `citylearn_iquitos_2023_2025/schema.json`
+- Agents: 17 real Iquitos buildings
 - EV: charger actions/observations embedded in the building spaces
 - Reward: collaborative team mean by default
 - CTDE state: concatenated local observations
 - KPIs: full CityLearn v2 `evaluate_v2` table, plus thesis summary extraction
+
+## Iquitos Dataset Distillation
+
+The active thesis dataset is generated from real building inputs in
+`CityLearn/data/buildingcsv/` and integrated into
+`CityLearn/data/datasets/citylearn_iquitos_2023_2025/`.
+
+- `building.csv` provides updated building names, roof areas, office counts
+  and controlled-equipment inventory.
+- `B_02.csv` through `B_17.csv` provide monthly measured meter/component
+  inputs for each building. `Building_1.csv` is preserved because there is no
+  matching `buildingcsv` source for B_01.
+- `tools/distill_building_loads.py` converts monthly measurements into hourly
+  CityLearn loads by calendar-aware mathematical transformations, not by
+  arbitrary synthetic load generation.
+- Missing B_06 months in 2023 are forecasted and recorded in
+  `tools/dataset_docs/distillation_report.csv`.
+- `tools/generate_iquitos_dataset.py`, `tools/fix_solar_pvlib.py` and
+  `tools/verify_solar.py` synchronize names, areas, office metadata, controlled
+  equipment counts, PV nominal power and solar generation inputs.
+
+The current validated environment exposes 17 agents, EV actions/observations,
+`state_dim=879`, and full CityLearn v2 KPI tables.
 
 ## Thesis Objective KPIs
 
@@ -164,22 +187,50 @@ Activate and validate it:
 
 ```powershell
 .\.venv39-citylearn-v3\Scripts\Activate.ps1
-python -B CityLearn\scripts\check_citylearn_v3_training_ready.py --strict
-python -B CityLearn\scripts\run_citylearn_v3_env_smoke.py --episode-time-steps 4 --steps 3
+python -B CityLearn\scripts\check_citylearn_v3_training_ready.py `
+  --strict `
+  --schema-path CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json `
+  --scenario E1
+python -B CityLearn\scripts\run_citylearn_v3_env_smoke.py `
+  --schema-path CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json `
+  --scenario E1 `
+  --episode-time-steps 4 `
+  --steps 3
 ```
 
 The readiness check verifies:
 
-- `pip check` has no broken requirements.
-- CityLearn v3 builds the 17-building + EV Dec-POMDP.
+- CityLearn v3 builds the Iquitos 17-building + EV Dec-POMDP.
 - CTDE global state and local decentralized observations/actions are exposed.
 - Full CityLearn v2 KPI tables are available.
 - MARLlib imports and registers `citylearn_v3`.
 - HAPPO, MASAC and MAAC official sources import in Python 3.9.
 - MATD3 PyTorch imports through the `marlbenchmark/off-policy` backend.
-- MATD3 official source is present, but its training entry point imports
-  `tensorflow.contrib`, so official MATD3 training requires a separate legacy
-  TensorFlow 1.x environment or a documented compatibility port.
+- MATD3 legacy TensorFlow 1.x source is present as reference only; active
+  training uses the PyTorch off-policy backend.
+- `pip check` is reported as metadata consistency only unless
+  `--require-pip-check` is explicitly requested. The validated stack keeps
+  `numpy==1.23.5` for Ray/CityLearn compatibility.
+
+## Training Launch Boundary
+
+Full training must not be launched as part of file/documentation validation.
+Use smoke checks first. The official 12-job chain is launched only after an
+explicit user confirmation:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File CityLearn\scripts\launch_citylearn_v3_official_training.ps1 `
+  -Scenario ALL `
+  -Seed 0 `
+  -EpisodeTimeSteps 8760 `
+  -Episodes 5 `
+  -SchemaPath CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json `
+  -OutputRoot outputs\citylearn_v3_madrl_iquitos_official_full_cuda_v1 `
+  -TorchThreads 12 `
+  -LiveProgressInterval 250 `
+  -LiveOutput `
+  -Cuda
+```
 
 ## MATD3 PyTorch Backend
 

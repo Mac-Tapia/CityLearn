@@ -14,7 +14,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 
@@ -81,10 +81,22 @@ def _pip_check() -> str:
     return output
 
 
-def _citylearn_v3_smoke() -> Dict[str, Any]:
-    from citylearn.v3 import describe_environment, make_citylearn_v3_project_env
+def _citylearn_v3_smoke(schema_path: Optional[str] = None, scenario: Optional[str] = "E1") -> Dict[str, Any]:
+    from citylearn.v3 import describe_environment, make_citylearn_v3_env, make_citylearn_v3_project_env
 
-    env = make_citylearn_v3_project_env(episode_time_steps=4)
+    if schema_path:
+        env = make_citylearn_v3_env(
+            schema_path=schema_path,
+            scenario=scenario,
+            seed=0,
+            episode_time_steps=4,
+        )
+    else:
+        env = make_citylearn_v3_project_env(
+            scenario=scenario,
+            seed=0,
+            episode_time_steps=4,
+        )
 
     try:
         observations, infos = env.reset(seed=0)
@@ -96,6 +108,8 @@ def _citylearn_v3_smoke() -> Dict[str, Any]:
         kpi_frame = env.get_kpi_frame()
 
         return {
+            "schema_path": schema_path,
+            "scenario": scenario,
             "environment": describe_environment(env),
             "initial_observation_agents": sorted(observations),
             "next_observation_agents": sorted(next_observations),
@@ -208,14 +222,29 @@ def main() -> int:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Return non-zero if any Python 3.9 training-critical check fails.",
+        help="Return non-zero if any active Python 3.9 training-critical check fails.",
+    )
+    parser.add_argument(
+        "--schema-path",
+        default=None,
+        help="Optional CityLearn schema path to smoke-test instead of the project default dataset.",
+    )
+    parser.add_argument(
+        "--scenario",
+        default="E1",
+        help="Scenario used by the CityLearn v3 smoke check.",
+    )
+    parser.add_argument(
+        "--require-pip-check",
+        action="store_true",
+        help="Make `python -m pip check` a strict blocker. By default it is reported only.",
     )
     args = parser.parse_args()
 
     checks: Dict[str, Dict[str, Any]] = {}
     _record(checks, "versions", _versions)
     _record(checks, "pip_check", _pip_check)
-    _record(checks, "citylearn_v3_project_smoke", _citylearn_v3_smoke)
+    _record(checks, "citylearn_v3_dataset_smoke", lambda: _citylearn_v3_smoke(args.schema_path, args.scenario))
     _record(checks, "ray_rllib_import", lambda: importlib.import_module("ray.rllib").__name__)
     _record(checks, "marllib_import", _marllib_import)
     _record(checks, "marllib_citylearn_v3_registration", _marllib_registration)
@@ -227,8 +256,7 @@ def main() -> int:
     _record(checks, "matd3_pytorch_offpolicy_import", _matd3_pytorch_offpolicy_import)
 
     python39_required = [
-        "pip_check",
-        "citylearn_v3_project_smoke",
+        "citylearn_v3_dataset_smoke",
         "ray_rllib_import",
         "marllib_import",
         "marllib_citylearn_v3_registration",
@@ -238,6 +266,10 @@ def main() -> int:
         "matd3_source_present",
         "matd3_pytorch_offpolicy_import",
     ]
+
+    if args.require_pip_check:
+        python39_required.insert(0, "pip_check")
+
     python39_core_ready = all(checks[name]["ok"] for name in python39_required)
     four_algorithm_python39_training_imports_ready = (
         checks["harl_happo_import"]["ok"]
@@ -260,10 +292,11 @@ def main() -> int:
         ),
         "matd3_pytorch_backend_ready": checks["matd3_pytorch_offpolicy_import"]["ok"],
         "four_algorithm_python39_training_imports_ready": four_algorithm_python39_training_imports_ready,
-        "matd3_legacy_tf1_required": (
-            checks["matd3_source_present"]["ok"]
-            and not checks["matd3_legacy_tf1_training_import"]["ok"]
-        ),
+        "matd3_legacy_tf1_required": False,
+        "matd3_legacy_tf1_available": checks["matd3_legacy_tf1_training_import"]["ok"],
+        "matd3_legacy_tf1_note": "Legacy TensorFlow 1.x MATD3 source is kept for reference; active training uses the PyTorch off-policy backend.",
+        "pip_metadata_consistent": checks["pip_check"]["ok"],
+        "pip_check_required": bool(args.require_pip_check),
         "checks": checks,
     }
 

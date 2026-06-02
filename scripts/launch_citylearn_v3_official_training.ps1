@@ -3,9 +3,18 @@ param(
     [int]$Seed = 0,
     [int]$EpisodeTimeSteps = 8760,
     [int]$Episodes = 5,
-    [string]$OutputRoot = "outputs\citylearn_v3_madrl_official_full_cuda_v2",
+    [string]$OutputRoot = "outputs\citylearn_v3_madrl_iquitos_official_full_cuda_v1",
+    [string]$SchemaPath = "CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json",
     [int]$TorchThreads = 12,
     [int]$LiveProgressInterval = 250,
+    [int]$HappoHiddenSize = 384,
+    [int]$Matd3BatchSize = 256,
+    [int]$Matd3BufferSize = 4096,
+    [int]$Matd3HiddenSize = 256,
+    [int]$Matd3TrainInterval = 100,
+    [int]$MaacBatchSize = 64,
+    [int]$MaacBufferLength = 256,
+    [int]$MaacHiddenSize = 128,
     [switch]$Cuda = $true,
     [switch]$LiveOutput
 )
@@ -13,7 +22,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ProjectRoot = Resolve-Path (Join-Path $ScriptPath "..\..")
+$ProjectRoot = (Resolve-Path (Join-Path $ScriptPath "..\..")).Path
 $Python = Join-Path $ProjectRoot ".venv39-citylearn-v3\Scripts\python.exe"
 $OutputRootPath = Join-Path $ProjectRoot $OutputRoot
 $LogDir = Join-Path $OutputRootPath "logs"
@@ -23,6 +32,31 @@ $TrainingConfigYaml = "CityLearn\configs\citylearn_v3_madrl_training.yaml"
 $TrainingConfigJson = "CityLearn\configs\citylearn_v3_madrl_training.json"
 $NumEnvSteps = $EpisodeTimeSteps * $Episodes
 $CudaArgs = if ($Cuda) { @("--cuda") } else { @() }
+$SchemaPathInput = $SchemaPath.Trim()
+
+if ([string]::IsNullOrWhiteSpace($SchemaPathInput)) {
+    throw "SchemaPath cannot be empty."
+}
+
+$SchemaPathFull = if ([System.IO.Path]::IsPathRooted($SchemaPathInput)) {
+    $SchemaPathInput
+}
+else {
+    Join-Path $ProjectRoot $SchemaPathInput
+}
+
+if (-not (Test-Path -LiteralPath $SchemaPathFull)) {
+    throw "SchemaPath not found: $SchemaPathFull"
+}
+
+$SchemaPathResolved = (Resolve-Path -LiteralPath $SchemaPathFull).Path
+$SchemaPathForArgs = if ([System.IO.Path]::IsPathRooted($SchemaPathInput)) {
+    $SchemaPathResolved
+}
+else {
+    $SchemaPathInput
+}
+$DatasetName = Split-Path -Leaf (Split-Path -Parent $SchemaPathResolved)
 $ScenarioList = if ($Scenario.ToUpperInvariant() -in @("ALL", "TODOS", "3EJES")) {
     @("E1", "E2", "E3")
 }
@@ -48,11 +82,12 @@ foreach ($scenarioName in $ScenarioList) {
         script = "CityLearn\scripts\train_citylearn_v3_happo.py"
         args = @(
             "--scenario", $scenarioName,
+            "--schema-path", $SchemaPathForArgs,
             "--seed", "$Seed",
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
             "--num-env-steps", "$NumEnvSteps",
-            "--hidden-size", "384",
+            "--hidden-size", "$HappoHiddenSize",
             "--torch-threads", "$TorchThreads",
             "--n-rollout-threads", "1",
             "--log-interval", "1",
@@ -68,6 +103,7 @@ foreach ($scenarioName in $ScenarioList) {
         script = "CityLearn\scripts\train_citylearn_v3_masac.py"
         args = @(
             "--scenario", $scenarioName,
+            "--schema-path", $SchemaPathForArgs,
             "--seed", "$Seed",
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
@@ -90,14 +126,15 @@ foreach ($scenarioName in $ScenarioList) {
         script = "CityLearn\scripts\train_citylearn_v3_matd3.py"
         args = @(
             "--scenario", $scenarioName,
+            "--schema-path", $SchemaPathForArgs,
             "--seed", "$Seed",
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
             "--num-env-steps", "$NumEnvSteps",
-            "--batch-size", "512",
-            "--buffer-size", "50000",
-            "--hidden-size", "384",
-            "--train-interval", "100",
+            "--batch-size", "$Matd3BatchSize",
+            "--buffer-size", "$Matd3BufferSize",
+            "--hidden-size", "$Matd3HiddenSize",
+            "--train-interval", "$Matd3TrainInterval",
             "--num-random-episodes", "1",
             "--live-progress-interval", "$LiveProgressInterval"
         ) + $CudaArgs + @(
@@ -110,15 +147,16 @@ foreach ($scenarioName in $ScenarioList) {
         script = "CityLearn\scripts\train_citylearn_v3_maac.py"
         args = @(
             "--scenario", $scenarioName,
+            "--schema-path", $SchemaPathForArgs,
             "--seed", "$Seed",
             "--episode-time-steps", "$EpisodeTimeSteps",
             "--episodes", "$Episodes",
             "--action-bins", "3",
-            "--batch-size", "512",
-            "--buffer-length", "200000",
+            "--batch-size", "$MaacBatchSize",
+            "--buffer-length", "$MaacBufferLength",
             "--steps-per-update", "250",
             "--num-updates", "8",
-            "--hidden-size", "384",
+            "--hidden-size", "$MaacHiddenSize",
             "--attend-heads", "4",
             "--pi-lr", "0.0003",
             "--q-lr", "0.001",
@@ -135,8 +173,9 @@ $manifest = [ordered]@{
     started_at = (Get-Date).ToString("o")
     completed_at = $null
     status = "running"
-    dataset = "citylearn_challenge_2022_phase_all_plus_evs"
-    schema_path = "CityLearn\data\datasets\citylearn_challenge_2022_phase_all_plus_evs\schema.json"
+    dataset = $DatasetName
+    schema_path = $SchemaPathForArgs
+    schema_path_resolved = $SchemaPathResolved
     scenario = $Scenario
     scenarios = $ScenarioList
     seed = $Seed
@@ -151,6 +190,16 @@ $manifest = [ordered]@{
         live_progress_interval = $LiveProgressInterval
         strategy = "larger batches, grouped updates, reduced live-progress IO"
         note = "Environment execution remains sequential to preserve CityLearn episode accounting and reproducible v2/v3 comparisons."
+    }
+    algorithm_resource_limits = [ordered]@{
+        happo_hidden_size = $HappoHiddenSize
+        matd3_batch_size = $Matd3BatchSize
+        matd3_buffer_size = $Matd3BufferSize
+        matd3_hidden_size = $Matd3HiddenSize
+        matd3_train_interval = $Matd3TrainInterval
+        maac_batch_size = $MaacBatchSize
+        maac_buffer_length = $MaacBufferLength
+        maac_hidden_size = $MaacHiddenSize
     }
     training_config = [ordered]@{
         yaml = $TrainingConfigYaml

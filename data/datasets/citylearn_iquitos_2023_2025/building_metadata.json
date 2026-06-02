@@ -1,0 +1,364 @@
+{
+  "source_inventory": "CityLearn\\data\\buildingcsv",
+  "source_monthly_measurements": "CityLearn/data/buildingcsv/B_02.csv..B_17.csv",
+  "dataset": "CityLearn\\data\\datasets\\citylearn_iquitos_2023_2025",
+  "building_1_policy": "Building_1.csv was not modified because B_01.csv does not exist.",
+  "peak_hours_local": [
+    18,
+    19,
+    20,
+    21,
+    22
+  ],
+  "energy_balance_rule": "For each measured month, EnergiaActivaHoraPunta and EnergiaActivaFueraPunta are allocated only to their corresponding hourly blocks; non_shiftable_load + cooling_demand/COP + dhw_demand/COP equals the measured active energy.",
+  "buildings": [
+    {
+      "building_id": 1,
+      "source_id": "B_01",
+      "name": "ELECTRO ORIENTE S.A.",
+      "area_techada_m2": 14000.0,
+      "tipo_uso_citylearn": "Office",
+      "oficinas_locales": 40,
+      "sistemas_refrigeracion_grandes": "DataCenter Precision AC",
+      "split_units": 50,
+      "area_estacionamiento_m2": 1350.0,
+      "tipo_vehiculo_predominante": "Mixed_Motos_Trucks"
+    },
+    {
+      "building_id": 2,
+      "source_id": "B_02",
+      "name": "MUNICIPALIDAD DISTRITAL DE SAN JUAN BAUTISTA",
+      "area_techada_m2": 8000.0,
+      "tipo_uso_citylearn": "Office",
+      "oficinas_locales": 40,
+      "sistemas_refrigeracion_grandes": "None",
+      "split_units": 40,
+      "area_estacionamiento_m2": 900.0,
+      "tipo_vehiculo_predominante": "Motos_Motokars"
+    },
+    {
+      "building_id": 3,
+      "source_id": "B_03",
+      "name": "AEROPUERTO INTERNACIONAL",
+      "area_techada_m2": 6000.0,
+      "tipo_uso_citylearn": "Assembly",
+      "oficinas_locales": 25,
+      "sistemas_refrigeracion_grandes": "Chiller Central Water-Cooled",
+      "split_units": 30,
+      "area_estacionamiento_m2": 5500.0,
+      "tipo_vehiculo_predominante": "Motos_Taxis_Buses"
+    },
+    {
+      "building_id": 4,
+      "source_id": "B_04",
+      "name": "HIPERMERCADOS TOTTUS ORIENTE SAC",
+      "area_techada_m2": 2500.0,
+      "tipo_uso_citylearn": "Retail",
+      "oficinas_locales": 9,
+      "sistemas_refrigeracion_grandes": "Food Cold Chain Racks / Rooftop",
+      "split_units": 11,
+      "area_estacionamiento_m2": 2500.0,
+      "tipo_vehiculo_predominante": "Motos_Cars"
+    },
+    {
+      "building_id": 5,
+      "source_id": "B_05",
+      "name": "HOTEL PLAZA S.A.",
+      "area_techada_m2": 1141.89,
+      "tipo_uso_citylearn": "MultiFamily_Hotel",
+      "oficinas_locales": 44,
+      "sistemas_refrigeracion_grandes": "Commercial Kitchen Walk-in Cold Rooms",
+      "split_units": 45,
+      "area_estacionamiento_m2": 200.0,
+      "tipo_vehiculo_predominante": "Motos_Cars"
+    },
+    {
+      "building_id": 6,
+      "source_id": "B_06",
+      "name": "MALL AVENTURA S.A.",
+      "area_techada_m2": 20637.0,
+      "tipo_uso_citylearn": "Commercial_Mall",
+      "oficinas_locales": 105,
+      "sistemas_refrigeracion_grandes": "Multi-Chiller Plant",
+      "split_units": 135,
+      "area_estacionamiento_m2": 9000.0,
+      "tipo_vehiculo_predominante": "Motos_Motokars_Massive"
+    },
+    {
+      "building_id": 7,
+      "source_id": "B_07",
+      "name": "UNAP-FACULTAD DE BIOLOGIA-AULAS",
+      "area_techada_m2": 8103.45,
+      "tipo_uso_citylearn": "Education",
+      "oficinas_locales": 30,
+      "sistemas_refrigeracion_grandes": "None",
+      "split_units": 17,
+      "area_estacionamiento_m2": 1250.0,
+      "tipo_vehiculo_predominante": "Motos_Students"
+    },
+    {
+      "building_id": 8,
+      "source_id": "B_08",
+      "name": "PNP- ESCUELA TECNICA SUPERIOR-IQUITOS",
+      "area_techada_m2": 21000.0,
+      "tipo_uso_citylearn": "Assembly_Military",
+      "oficinas_locales": 30,
+      "sistemas_refrigeracion_grandes": "None",
+      "split_units": 30,
+      "area_estacionamiento_m2": 3000.0,
+      "tipo_vehiculo_predominante": "Military_Vehicles"
+    },
+    {
+      "building_id": 9,
+      "source_id": "B_09",
+      "name": "GOBIERNO REGIONAL DE LORETO - COER",
+      "area_techada_m2": 4479.67,
+      "tipo_uso_citylearn": "Office_Critical",
+      "oficinas_locales": 20,
+      "sistemas_refrigeracion_grandes": "DataCenter Precision AC (N+1)",
+      "split_units": 27,
+      "area_estacionamiento_m2": 1500.0,
+      "tipo_vehiculo_predominante": "Emergency_Trucks"
+    },
+    {
+      "building_id": 10,
+      "source_id": "B_10",
+      "name": "GOBIERNO REGIONAL DE LORETO",
+      "area_techada_m2": 14295.73,
+      "tipo_uso_citylearn": "Office",
+      "oficinas_locales": 70,
+      "sistemas_refrigeracion_grandes": "Duct Central Split System",
+      "split_units": 82,
+      "area_estacionamiento_m2": 2500.0,
+      "tipo_vehiculo_predominante": "Motos_Staff"
+    },
+    {
+      "building_id": 11,
+      "source_id": "B_11",
+      "name": "HOSPITAL REGIONAL DE LORETO",
+      "area_techada_m2": 42649.33,
+      "tipo_uso_citylearn": "Healthcare_Hospital",
+      "oficinas_locales": 80,
+      "sistemas_refrigeracion_grandes": "Clinical Chiller + HEPA / Blood Bank Cold Room",
+      "split_units": 120,
+      "area_estacionamiento_m2": 4500.0,
+      "tipo_vehiculo_predominante": "Emergency_Ambulances"
+    },
+    {
+      "building_id": 12,
+      "source_id": "B_12",
+      "name": "SEGURO SOCIAL DE SALUD - ESSALUD",
+      "area_techada_m2": 18197.48,
+      "tipo_uso_citylearn": "Healthcare",
+      "oficinas_locales": 50,
+      "sistemas_refrigeracion_grandes": "Medical Archive AC System",
+      "split_units": 65,
+      "area_estacionamiento_m2": 2000.0,
+      "tipo_vehiculo_predominante": "Ambulances_Staff"
+    },
+    {
+      "building_id": 13,
+      "source_id": "B_13",
+      "name": "UNAP-FACULTAD DE CIENCIAS AD..CONTABLES Y ECO",
+      "area_techada_m2": 2723.0,
+      "tipo_uso_citylearn": "Education",
+      "oficinas_locales": 18,
+      "sistemas_refrigeracion_grandes": "None",
+      "split_units": 13,
+      "area_estacionamiento_m2": 750.0,
+      "tipo_vehiculo_predominante": "Motos_Students"
+    },
+    {
+      "building_id": 14,
+      "source_id": "B_14",
+      "name": "AUTORIDAD PORTUARIA NACIONAL",
+      "area_techada_m2": 17761.0,
+      "tipo_uso_citylearn": "Industrial_Port",
+      "oficinas_locales": 20,
+      "sistemas_refrigeracion_grandes": "None",
+      "split_units": 22,
+      "area_estacionamiento_m2": 3750.0,
+      "tipo_vehiculo_predominante": "Heavy_Cargo_Trucks"
+    },
+    {
+      "building_id": 15,
+      "source_id": "B_15",
+      "name": "DREL- COLEGIO NACIONAL DE IQUITOS",
+      "area_techada_m2": 9889.92,
+      "tipo_uso_citylearn": "Education",
+      "oficinas_locales": 20,
+      "sistemas_refrigeracion_grandes": "None",
+      "split_units": 10,
+      "area_estacionamiento_m2": 1000.0,
+      "tipo_vehiculo_predominante": "Bicycles_Motos"
+    },
+    {
+      "building_id": 16,
+      "source_id": "B_16",
+      "name": "SIMA - IQUITOS S.R.LTDA",
+      "area_techada_m2": 10294.0,
+      "tipo_uso_citylearn": "Industrial",
+      "oficinas_locales": 25,
+      "sistemas_refrigeracion_grandes": "Industrial Mobile Vessel AC Units",
+      "split_units": 25,
+      "area_estacionamiento_m2": 5000.0,
+      "tipo_vehiculo_predominante": "Heavy_Industrial_Cranes"
+    },
+    {
+      "building_id": 17,
+      "source_id": "B_17",
+      "name": "ASOCIACION CIVIL SELVA AMAZONICA",
+      "area_techada_m2": 1611.23,
+      "tipo_uso_citylearn": "Laboratory",
+      "oficinas_locales": 12,
+      "sistemas_refrigeracion_grandes": "Scientific Ultra-Freezers (-80C)",
+      "split_units": 16,
+      "area_estacionamiento_m2": 4000.0,
+      "tipo_vehiculo_predominante": "Medical_Pickups"
+    }
+  ],
+  "measurement_months_by_building": {
+    "2": 36,
+    "3": 36,
+    "4": 36,
+    "5": 36,
+    "6": 36,
+    "7": 36,
+    "8": 36,
+    "9": 36,
+    "10": 36,
+    "11": 36,
+    "12": 36,
+    "13": 36,
+    "14": 36,
+    "15": 36,
+    "16": 36,
+    "17": 36
+  },
+  "forecast_months_by_building": {
+    "2": [],
+    "3": [],
+    "4": [],
+    "5": [],
+    "6": [
+      "2023-01",
+      "2023-02",
+      "2023-03",
+      "2023-04",
+      "2023-05",
+      "2023-06",
+      "2023-07",
+      "2023-08"
+    ],
+    "7": [],
+    "8": [],
+    "9": [],
+    "10": [],
+    "11": [],
+    "12": [],
+    "13": [],
+    "14": [],
+    "15": [],
+    "16": [],
+    "17": []
+  },
+  "forecast_method": "calendar_month_mean_overlap_scaled",
+  "distillation_status_by_building": {
+    "2": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "3": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "4": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "5": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "6": {
+      "months_processed": 36,
+      "forecast_months_processed": 8,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "7": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "8": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "9": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "10": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "11": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "12": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "13": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "14": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "15": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "16": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    },
+    "17": {
+      "months_processed": 36,
+      "forecast_months_processed": 0,
+      "missing_months": [],
+      "max_abs_delta_pct": 0.0
+    }
+  }
+}
