@@ -98,38 +98,63 @@ The active thesis dataset is generated from real building inputs in
 `CityLearn/data/buildingcsv/` and integrated into
 `CityLearn/data/datasets/citylearn_iquitos_2023_2025/`.
 
-- `building.csv` provides updated building names, roof areas, office counts
-  and controlled-equipment inventory.
-- `B_02.csv` through `B_17.csv` provide monthly measured meter/component
-  inputs for each building. `Building_1.csv` is preserved because there is no
-  matching `buildingcsv` source for B_01, but its training CSV keeps the same
-  12-column, 26,304-row CityLearn structure as all other buildings.
-- `tools/distill_building_loads.py` converts monthly measurements into hourly
-  CityLearn loads by calendar-aware mathematical transformations, not by
-  arbitrary synthetic load generation. `EnergiaActivaHoraPunta` and
-  `EnergiaActivaFueraPunta` are the physical kWh source when available because
-  they preserve the time-of-use split used by the hourly allocation.
-  `totalEnergiaActiva`, `EnergiaReactiva` and `FactorCarga` are retained in the
-  distillation report for audit/validation; `totalEnergiaActiva` is used as
-  fallback only when the peak/off-peak active-energy split is missing.
-  The distilled `non_shiftable_load` is residual: selected measured active
-  energy minus controllable electric loads represented in the training CSV
-  (`cooling_demand/COP` and `dhw_demand/COP`). EV, BESS and PV are scenario
-  control/DER assets and are not subtracted from historical building meter
-  energy.
-- `TotalFacturado` and `Tarifa` calibrate `pricing.csv`, not kWh loads. For
-  each month the bill is distilled with
-  `C_mes = p_punta * E_punta + p_fuera * E_fuera` and
-  `p_punta = r_tarifa * p_fuera`; the output is the CityLearn-compatible
-  hourly `electricity_pricing` series plus 1/2/3-hour forecasts.
-- Missing B_06 months in 2023 are forecasted and recorded in
-  `tools/dataset_docs/distillation_report.csv`.
-- `tools/generate_iquitos_dataset.py`, `tools/fix_solar_pvlib.py` and
-  `tools/verify_solar.py` synchronize names, areas, office metadata, controlled
-  equipment counts, PV nominal power and solar generation inputs.
+### Real building parameters (updated 2026-06-04)
 
-The current validated raw environment exposes 17 agents, EV
-actions/observations, `state_dim=879`, and full CityLearn v2 KPI tables.
+`building.csv` provides the authoritative building inventory for all 17 buildings:
+real official names, exact roof areas, CityLearn use types, large cooling systems
+(Chiller Water-Cooled, Multi-Chiller Plant, Clinical Chiller + HEPA,
+DataCenter Precision AC, Industrial Mobile Vessel AC, Scientific Ultra-Freezers -80C),
+estimated split AC unit counts, and predominant vehicle types.
+
+Key area corrections from building.csv vs previous estimates:
+
+| ID | Building | Area m2 | Cooling system |
+|---|---|---:|---|
+| B05 | Hotel Plaza S.A. | 1,141.89 | Commercial Kitchen Cold Rooms |
+| B09 | Gobierno Regional COER | 4,479.67 | DataCenter Precision AC (N+1) |
+| B10 | Gobierno Regional de Loreto | 14,295.73 | Duct Central Split System |
+| B11 | Hospital Regional de Loreto | 42,649.33 | Clinical Chiller + HEPA + Blood Bank |
+| B12 | Seguro Social EsSalud | 18,197.48 | Medical Archive AC System |
+| B14 | Autoridad Portuaria Nacional | 17,761.00 | Splits autonomos |
+| B15 | DREL Colegio Nacional | 9,889.92 | Splits autonomos |
+| B16 | SIMA Iquitos S.R.Ltda | 10,294.00 | Industrial Mobile Vessel AC |
+| B17 | Asociacion Civil Selva Amazonica | 1,611.23 | Scientific Ultra-Freezers -80C |
+
+`cooling_peak` is estimated as `split_units * 3.5 kW` plus large system capacity.
+COP is assigned per real cooling system type (Chiller=4.5, Multi-Chiller=5.0,
+Precision AC=2.0, Ultra-Freezers=0.8, splits=2.8).
+
+### Distillation from monthly measurements
+
+- `B_02.csv` through `B_17.csv` provide monthly measured meter inputs.
+  `Building_1.csv` is preserved because there is no matching `buildingcsv`
+  source for B_01. All building CSVs keep the 12-column, 26,304-row structure.
+- `tools/distill_building_loads.py` converts monthly measurements into hourly
+  CityLearn loads by calendar-aware transformations, not arbitrary synthesis.
+  `EnergiaActivaHoraPunta` and `EnergiaActivaFueraPunta` are the physical kWh
+  source; `totalEnergiaActiva` is used as fallback only when the peak/off-peak
+  split is missing.
+- The distilled `non_shiftable_load` is residual:
+  `NSL = E_medido_mes - cooling_demand/COP - dhw_demand/COP`.
+  Monthly balance delta is guaranteed < 0.1%. EV, BESS and PV are control/DER
+  assets and are not subtracted from historical building meter energy.
+- `TotalFacturado` and `Tarifa` calibrate `pricing.csv` via
+  `C_mes = p_punta * E_punta + p_fuera * E_fuera`. Output is the
+  CityLearn-compatible hourly `electricity_pricing` plus 1/2/3-hour forecasts.
+- Missing months are forecasted with `calendar_month_mean_overlap_scaled` and
+  documented in `tools/dataset_docs/distillation_report.csv`.
+- `tools/generate_iquitos_dataset.py` synchronizes names, areas, PV sizing
+  (pvlib SAPM, SunPower SPR-315E), BESS sizing (Hesse 2017 method), EV charger
+  profiles (50 files) and carbon intensity (0.671-0.790 kgCO2/kWh, RAGEI 2019).
+- `dhw_demand` is non-zero only for B05 (Hotel, 614 kWh/day), B11 (Hospital,
+  1200 kWh/day) and B12 (EsSalud, 780 kWh/day). All other buildings have
+  dhw_demand=0 because tropical Iquitos (28-38 degC) does not require domestic
+  hot water heating in commercial buildings without dedicated DHW devices.
+
+Full pipeline documentation: `docs/dataset_construction_pipeline.md`.
+
+The validated environment exposes 17 agents, EV actions/observations,
+`state_dim=879`, and full CityLearn v2 KPI tables.
 
 ## Training Observation Normalization
 
