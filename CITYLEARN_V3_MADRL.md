@@ -102,18 +102,58 @@ The active thesis dataset is generated from real building inputs in
   and controlled-equipment inventory.
 - `B_02.csv` through `B_17.csv` provide monthly measured meter/component
   inputs for each building. `Building_1.csv` is preserved because there is no
-  matching `buildingcsv` source for B_01.
+  matching `buildingcsv` source for B_01, but its training CSV keeps the same
+  12-column, 26,304-row CityLearn structure as all other buildings.
 - `tools/distill_building_loads.py` converts monthly measurements into hourly
   CityLearn loads by calendar-aware mathematical transformations, not by
-  arbitrary synthetic load generation.
+  arbitrary synthetic load generation. `EnergiaActivaHoraPunta` and
+  `EnergiaActivaFueraPunta` are the physical kWh source when available because
+  they preserve the time-of-use split used by the hourly allocation.
+  `totalEnergiaActiva`, `EnergiaReactiva` and `FactorCarga` are retained in the
+  distillation report for audit/validation; `totalEnergiaActiva` is used as
+  fallback only when the peak/off-peak active-energy split is missing.
+  The distilled `non_shiftable_load` is residual: selected measured active
+  energy minus controllable electric loads represented in the training CSV
+  (`cooling_demand/COP` and `dhw_demand/COP`). EV, BESS and PV are scenario
+  control/DER assets and are not subtracted from historical building meter
+  energy.
+- `TotalFacturado` and `Tarifa` calibrate `pricing.csv`, not kWh loads. For
+  each month the bill is distilled with
+  `C_mes = p_punta * E_punta + p_fuera * E_fuera` and
+  `p_punta = r_tarifa * p_fuera`; the output is the CityLearn-compatible
+  hourly `electricity_pricing` series plus 1/2/3-hour forecasts.
 - Missing B_06 months in 2023 are forecasted and recorded in
   `tools/dataset_docs/distillation_report.csv`.
 - `tools/generate_iquitos_dataset.py`, `tools/fix_solar_pvlib.py` and
   `tools/verify_solar.py` synchronize names, areas, office metadata, controlled
   equipment counts, PV nominal power and solar generation inputs.
 
-The current validated environment exposes 17 agents, EV actions/observations,
-`state_dim=879`, and full CityLearn v2 KPI tables.
+The current validated raw environment exposes 17 agents, EV
+actions/observations, `state_dim=879`, and full CityLearn v2 KPI tables.
+
+## Training Observation Normalization
+
+Training launchers normalize observations before they enter the MADRL backend.
+This step is applied at the environment-wrapper layer, not by modifying the
+dataset CSV files. The Iquitos dataset keeps physical units such as kWh, kgCO2,
+prices, SOC percentages and charger states so CityLearn simulation, KPIs and
+audits remain traceable to source data.
+
+The common training adapter uses CityLearn's `NormalizedObservationWrapper` by
+default. Temporal observations such as `month`, `day_type` and `hour` are
+encoded cyclically, then active observations are min-max scaled to `[0, 1]`.
+For the 17-building Iquitos EV schema this changes the training CTDE state from
+the raw `state_dim=879` to a normalized `state_dim=930`, while EV
+observations/actions remain exposed.
+
+Use `--raw-observations` only to reproduce legacy raw-input runs. The default
+training behavior is normalized input:
+
+```powershell
+python -B CityLearn\scripts\train_citylearn_v3_matd3.py `
+  --schema-path CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json `
+  --scenario E1
+```
 
 ## Thesis Objective KPIs
 
@@ -217,6 +257,32 @@ The readiness check verifies:
 Full training must not be launched as part of file/documentation validation.
 Use smoke checks first. The official 12-job chain is launched only after an
 explicit user confirmation:
+
+The launchers activate the project environment before spawning training jobs:
+`VIRTUAL_ENV` is set to `.venv39-citylearn-v3`, that environment's `Scripts`
+directory is prepended to `PATH`, and `PYTHONPATH` is set to the project root
+plus `CityLearn/`. Each manifest records the resolved `python.exe`,
+`virtual_env` and `pythonpath` under `active_project_environment`.
+
+MASAC and MAAC use the official discrete-action backends, while CityLearn
+buildings expose multi-dimensional continuous control actions. The adapter maps
+each discrete policy output to a compact one-axis CityLearn action basis by
+default (`--discrete-action-mode axis`). This preserves the official backend
+interface without enumerating the exponential cartesian product of all actuator
+bins, which is not memory-tractable for the 17-building EV schema. HAPPO and
+MATD3 remain continuous-action backends.
+
+Verify the launch environment without starting training:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File CityLearn\scripts\launch_citylearn_v3_official_training.ps1 `
+  -Scenario E1 `
+  -EpisodeTimeSteps 4 `
+  -Episodes 1 `
+  -SchemaPath CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json `
+  -OutputRoot outputs\citylearn_v3_env_dryrun `
+  -DryRun
+```
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File CityLearn\scripts\launch_citylearn_v3_official_training.ps1 `

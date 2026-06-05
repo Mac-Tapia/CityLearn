@@ -84,13 +84,13 @@ function Show-Status {
     foreach ($scenarioName in $scenarios) {
         $labels = @()
         foreach ($algorithmName in $algorithms) {
-            $matches = @($status.jobs | Where-Object { $_.scenario -eq $scenarioName -and $_.name -eq $algorithmName })
-            if ($matches.Count -eq 0) {
+            $jobMatches = @($status.jobs | Where-Object { $_.scenario -eq $scenarioName -and $_.name -eq $algorithmName })
+            if ($jobMatches.Count -eq 0) {
                 $labels += ("{0}:queued" -f $algorithmName)
                 continue
             }
 
-            $job = $matches[-1]
+            $job = $jobMatches[-1]
             $state = if ($null -eq $job.completed_at) { "running" } elseif ($job.exit_code -eq 0) { "done" } else { "failed" }
             $labels += ("{0}:{1}" -f $algorithmName, $state)
         }
@@ -113,17 +113,55 @@ function Get-ActiveJob {
         return $null
     }
 
-    foreach ($job in $status.jobs) {
+    $jobs = @($status.jobs)
+    foreach ($job in $jobs) {
         if ($null -eq $job.completed_at) {
             return $job
         }
     }
 
-    if ($status.jobs.Count -gt 0) {
-        return $status.jobs[$status.jobs.Count - 1]
+    $latestProgressJob = $null
+    $latestProgressTime = $null
+    foreach ($job in $jobs) {
+        $progressPath = Join-Path (Join-Path $ProjectRoot $job.output_dir) "live_progress.json"
+        if (-not (Test-Path -LiteralPath $progressPath)) {
+            continue
+        }
+
+        $progressTime = (Get-Item -LiteralPath $progressPath).LastWriteTime
+        if ($null -eq $latestProgressTime -or $progressTime -gt $latestProgressTime) {
+            $latestProgressTime = $progressTime
+            $latestProgressJob = $job
+        }
+    }
+
+    if ($null -ne $latestProgressJob) {
+        return $latestProgressJob
+    }
+
+    if ($jobs.Count -gt 0) {
+        return $jobs[$jobs.Count - 1]
     }
 
     return $null
+}
+
+function Get-NumericValue {
+    param(
+        $Value,
+        [double]$Default = 0
+    )
+
+    if ($null -eq $Value -or $Value -eq "") {
+        return $Default
+    }
+
+    try {
+        return [double]$Value
+    }
+    catch {
+        return $Default
+    }
 }
 
 function Show-TrainingProgress {
@@ -144,6 +182,7 @@ function Show-TrainingProgress {
     $timeseriesPath = Join-Path $runDir "timeseries.csv"
     $liveProgressPath = Join-Path $runDir "live_progress.json"
     $checkpointManifestPath = Join-Path $runDir "checkpoint_manifest.json"
+    $status = Read-JsonFile -Path $StatusPath
 
     $summary = Read-JsonFile -Path $summaryPath
     if ($null -eq $summary) {
@@ -186,9 +225,22 @@ function Show-TrainingProgress {
         }
 
         Write-Host "Progreso vivo:" -ForegroundColor DarkCyan
-        Write-Host ("  global_step={0} episode={1} episode_step={2} time_step={3}" -f $liveProgress.global_step, $liveProgress.episode, $liveProgress.episode_step, $liveProgress.time_step)
+        $episodeTotal = [int](Get-NumericValue -Value $status.episode_time_steps -Default 0)
+        $totalSteps = [int](Get-NumericValue -Value $status.num_env_steps -Default 0)
+        $totalEpisodes = [int](Get-NumericValue -Value $status.episodes -Default 0)
+        $episodeNumber = [int](Get-NumericValue -Value $liveProgress.episode -Default 0) + 1
+        $episodeRecorded = [int](Get-NumericValue -Value $liveProgress.episode_steps_recorded -Default ((Get-NumericValue -Value $liveProgress.episode_step -Default 0) + 1))
+        $globalRecorded = [int](Get-NumericValue -Value $liveProgress.total_steps_recorded -Default ((Get-NumericValue -Value $liveProgress.global_step -Default 0) + 1))
+        $episodePct = if ($episodeTotal -gt 0) { [Math]::Round(100.0 * $episodeRecorded / $episodeTotal, 2) } else { 0 }
+        $globalPct = if ($totalSteps -gt 0) { [Math]::Round(100.0 * $globalRecorded / $totalSteps, 2) } else { 0 }
+        Write-Host ("  episodio={0}/{1} paso_episodio={2}/{3} ({4}%) paso_global={5}/{6} ({7}%)" -f $episodeNumber, $totalEpisodes, $episodeRecorded, $episodeTotal, $episodePct, $globalRecorded, $totalSteps, $globalPct)
+        Write-Host ("  global_step={0} episode_step={1} time_step={2}" -f $liveProgress.global_step, $liveProgress.episode_step, $liveProgress.time_step)
         if ($liveProgress.reward_function) {
-            Write-Host ("  reward_function={0} profile={1} axis_weights={2}" -f $liveProgress.reward_function, $liveProgress.reward_profile, ($liveProgress.reward_axis_weights | ConvertTo-Json -Compress))
+            $weights = $liveProgress.reward_axis_weights
+            if ($weights) {
+                Write-Host ("  multiobjetivo: OE1_flex={0} OE2_CO2={1} OE3_costo={2}" -f $weights.flex, $weights.carbon, $weights.cost)
+            }
+            Write-Host ("  reward_function={0} profile={1}" -f $liveProgress.reward_function, $liveProgress.reward_profile)
         }
         Write-Host ("  instant_reward_sum={0} instant_reward_mean={1}" -f $instantRewardSum, $instantRewardMean)
         if ($null -ne $liveProgress.episode_return_cumulative) {
@@ -249,9 +301,18 @@ function Show-Logs {
             Write-Host ""
             Write-Host "--- $($_.Name) | $($_.Length) bytes | $($_.LastWriteTime) ---" -ForegroundColor DarkCyan
             if ($_.Length -gt 0) {
-                $lines = Get-Content $_.FullName -Tail ([Math]::Max($LogTail * 8, 80)) |
+                $lines = Get-Content $_.FullName -Tail ([Math]::Max($LogTail * 8, 200)) |
                     Where-Object {
-                        $_ -notmatch "^\s*(Box\(|\[?-?1000000\.|1000000\.|inf\s|inf\]|inf,)"
+                        $line = $_.Trim()
+                        # Filtra ruido de inicializacion: arrays numericos, Box(...), shapes, dtypes
+                        $line -ne "" -and
+                        $line -notmatch "^Box\(" -and
+                        $line -notmatch "^\[?[\s\d\.\-e]+\]?,?" -and
+                        $line -notmatch "^\([\d,\s]+\),?\s*(float|int|bool)" -and
+                        $line -notmatch "float(32|64)\)" -and
+                        $line -notmatch "^\s*[\d\.]+\s+[\d\.]+\s+[\d\.]" -and
+                        $line -notmatch "share_observation_space|observation_space" -and
+                        $line -notmatch "^[\s\[\]01\. ,eE\+\-]+$"
                     } |
                     Select-Object -Last $LogTail
 
@@ -277,59 +338,83 @@ function Show-Logs {
 
 function Show-Artifacts {
     Write-Host ""
-    Write-Host "Artefactos recientes" -ForegroundColor Cyan
-    $files = Get-ChildItem $OutputRootPath -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -in @("results.json", "timeseries.csv", "trace.csv", "checkpoint_manifest.json", "figures_manifest.json") -or $_.Extension -in @(".pkl", ".pt", ".pth", ".ckpt") } |
-        Sort-Object LastWriteTime -Descending
+    Write-Host "Artefactos y checkpoints" -ForegroundColor Cyan
 
-    if (-not $files) {
-        Write-Host "Aun no hay artefactos finales/checkpoints visibles."
-        return
+    # Archivos de resultados/metricas
+    $resultFiles = Get-ChildItem $OutputRootPath -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -in @("results.json","timeseries.csv","trace.csv","checkpoint_manifest.json",
+                          "figures_manifest.json","episode_summary.csv","kpis.csv","live_progress.json") -or
+            $_.Extension -in @(".pkl",".pt",".pth",".ckpt")
+        } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 10
+
+    if ($resultFiles) {
+        $resultFiles | ForEach-Object {
+            $rel = $_.FullName.Substring($OutputRootPath.Length).TrimStart("\")
+            if ($rel.Length -gt 85) { $rel = "..." + $rel.Substring($rel.Length - 82) }
+            [pscustomobject]@{
+                Archivo  = $rel
+                KB       = [math]::Round($_.Length / 1KB, 1)
+                Hora     = $_.LastWriteTime.ToString("HH:mm:ss")
+            }
+        } | Format-Table -AutoSize
     }
 
-    $files |
-        Select-Object -First 8 |
-        ForEach-Object {
-            $relative = $_.FullName.Substring($OutputRootPath.Length).TrimStart("\")
-            if ($relative.Length -gt 95) {
-                $relative = "..." + $relative.Substring($relative.Length - 92)
-            }
+    # Directorios de checkpoints
+    $ckptDirs = Get-ChildItem $OutputRootPath -Recurse -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match "\\checkpoints\\" -or $_.Name -eq "checkpoints" } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 6
 
-            [pscustomobject]@{
-                Artifact = $relative
-                KB = [Math]::Round($_.Length / 1KB, 1)
-                Modified = $_.LastWriteTime.ToString("HH:mm:ss")
-            }
-        } |
-        Format-Table -AutoSize
-
-    Write-Host "Resumen de checkpoints por corrida:" -ForegroundColor DarkCyan
-    $files |
-        Where-Object { $_.FullName -match "\\checkpoints\\" -or $_.Extension -in @(".pkl", ".pt", ".pth", ".ckpt") } |
-        ForEach-Object {
-            $relative = $_.FullName.Substring($OutputRootPath.Length).TrimStart("\")
-            $parts = $relative -split "\\"
-            if ($parts.Count -ge 2) {
-                "{0}\{1}" -f $parts[0], $parts[1]
-            }
-        } |
-        Group-Object |
-        Sort-Object Count -Descending |
-        Select-Object -First 8 Name, Count |
-        Format-Table -AutoSize
+    if ($ckptDirs) {
+        Write-Host "  Checkpoints guardados:" -ForegroundColor DarkCyan
+        $ckptDirs | ForEach-Object {
+            $rel = $_.FullName.Substring($OutputRootPath.Length).TrimStart("\")
+            $nFiles = (Get-ChildItem $_.FullName -File -ErrorAction SilentlyContinue).Count
+            Write-Host ("    {0}  ({1} archivos, mod {2})" -f $rel, $nFiles, $_.LastWriteTime.ToString("HH:mm:ss"))
+        }
+    } else {
+        Write-Host "  Checkpoints: aun no disponibles (se crean al finalizar episodio 1)"
+    }
 }
 
 while ($true) {
     Clear-Host
-    Write-Host "CityLearn v3 MADRL Monitor - $(Get-Date -Format o)" -ForegroundColor White
-    Write-Host "OutputRoot: $OutputRoot" -ForegroundColor DarkGray
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "  CITYLEARN v3 MADRL - MONITOR EN TIEMPO REAL" -ForegroundColor Cyan
+    Write-Host "  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')   Intervalo: ${IntervalSeconds}s" -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "  OutputRoot: $OutputRoot" -ForegroundColor DarkGray
+
+    # Resumen rapido del job activo
+    $statusNow = Read-JsonFile -Path $StatusPath
+    if ($statusNow) {
+        $activeJob = $statusNow.jobs | Where-Object { $null -eq $_.completed_at } | Select-Object -First 1
+        if ($activeJob) {
+            $lpPath = Join-Path $ProjectRoot (Join-Path $activeJob.output_dir "live_progress.json")
+            $lp = Read-JsonFile -Path $lpPath
+            if ($lp) {
+                $totalSteps = [int]$statusNow.num_env_steps
+                $pct = if ($totalSteps -gt 0) { [math]::Round($lp.global_step / $totalSteps * 100, 1) } else { 0 }
+                $w = $lp.reward_axis_weights
+                Write-Host ""
+                Write-Host ("  ACTIVO : {0,-8} {1}   Paso {2}/{3} ({4}%)" -f $activeJob.name.ToUpper(), $activeJob.scenario, $lp.global_step, $totalSteps, $pct) -ForegroundColor Green
+                Write-Host ("  Ep {0}/{1}  PasoEp {2}/{3}   R_mean={4:F5}   Retorno={5:F1}" -f ($lp.episode+1), $statusNow.episodes, $lp.episode_step, $statusNow.episode_time_steps, $lp.episode_reward_mean_cumulative, $lp.episode_return_cumulative) -ForegroundColor Green
+                Write-Host ("  Pesos  : OE1_flex={0:F3}  OE2_co2={1:F3}  OE3_cost={2:F3}" -f $w.flex, $w.carbon, $w.cost) -ForegroundColor Yellow
+                Write-Host ("  CO2={0:F4} kg/kWh   Precio={1:F4} $/kWh   Carga_neta={2:F1} kWh" -f $lp.carbon_intensity_mean, $lp.electricity_price_mean, $lp.district_net_electricity_consumption) -ForegroundColor Yellow
+            }
+        }
+    }
+
+    Write-Host ""
     Show-Status
-    Show-Processes
     Show-Gpu
     Show-TrainingProgress
     Show-Artifacts
     Show-Logs
     Write-Host ""
-    Write-Host "Actualiza cada $IntervalSeconds segundos. Presiona Ctrl+C para salir." -ForegroundColor DarkGray
+    Write-Host "  Actualiza cada $IntervalSeconds s. Presiona Ctrl+C para salir." -ForegroundColor DarkGray
     Start-Sleep -Seconds $IntervalSeconds
 }

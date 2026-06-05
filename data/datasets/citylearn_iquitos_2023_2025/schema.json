@@ -905,17 +905,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 17110.0,
+          "capacity": 4020.0,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 878.0,
+          "nominal_power": 1005.0,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -938,7 +941,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -952,7 +955,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         }
@@ -976,17 +979,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 5607.0,
+          "capacity": 2382.0,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 677.0,
+          "nominal_power": 595.5,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -1068,17 +1074,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 2612.0,
+          "capacity": 2905.6,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 361.0,
+          "nominal_power": 726.4,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -1101,7 +1110,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1115,7 +1124,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1160,17 +1169,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 1155.0,
+          "capacity": 2495.0,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 156.0,
+          "nominal_power": 623.8,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -1238,17 +1250,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 3965.0,
+          "capacity": 1205.3,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 570.0,
+          "nominal_power": 301.3,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -1271,7 +1286,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1323,17 +1338,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 25149.0,
+          "capacity": 15075.3,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 1592.0,
+          "nominal_power": 3768.8,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -1356,7 +1374,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1370,7 +1388,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1384,7 +1402,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1471,17 +1489,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 5149.0,
+          "capacity": 2550.3,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 640.0,
+          "nominal_power": 637.6,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -1504,7 +1525,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1549,17 +1570,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 13710.0,
+          "capacity": 6836.0,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 1669.0,
+          "nominal_power": 1709.0,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -1582,7 +1606,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1596,7 +1620,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         }
@@ -1613,17 +1637,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 2405.0,
+          "capacity": 851.5,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 293.0,
+          "nominal_power": 212.9,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -1677,17 +1704,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 3076.0,
+          "capacity": 3964.5,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 309.0,
+          "nominal_power": 991.1,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -1710,7 +1740,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1724,7 +1754,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1738,7 +1768,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         }
@@ -1755,17 +1785,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 7602.0,
+          "capacity": 6661.9,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 588.0,
+          "nominal_power": 1665.5,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -1788,7 +1821,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1802,7 +1835,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1854,17 +1887,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 5503.0,
+          "capacity": 3158.7,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 272.0,
+          "nominal_power": 789.7,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -1887,7 +1923,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1901,7 +1937,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -1939,17 +1975,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 1878.0,
+          "capacity": 798.2,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 234.0,
+          "nominal_power": 199.5,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -2003,17 +2042,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 3074.0,
+          "capacity": 5767.3,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 391.0,
+          "nominal_power": 1441.8,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -2036,7 +2078,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         },
@@ -2050,7 +2092,7 @@
             "charger_type": 1,
             "max_charging_power": 7.4,
             "min_charging_power": 0.96,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0
           }
         }
@@ -2067,17 +2109,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 1489.0,
+          "capacity": 3220.7,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 188.0,
+          "nominal_power": 805.2,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -2131,17 +2176,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 3988.0,
+          "capacity": 2496.7,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 496.0,
+          "nominal_power": 624.2,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }
@@ -2181,17 +2229,20 @@
       "cooling_device": {
         "type": "citylearn.energy_model.HeatPump",
         "autosize": true,
+        "autosize_attributes": {
+          "safety_factor": 1.000001
+        },
         "attributes": {}
       },
       "electrical_storage": {
         "type": "citylearn.energy_model.Battery",
         "autosize": false,
         "attributes": {
-          "capacity": 3142.0,
+          "capacity": 1640.7,
           "efficiency": 0.9025,
           "capacity_loss_coefficient": 1e-05,
           "loss_coefficient": 0.0,
-          "nominal_power": 396.0,
+          "nominal_power": 410.2,
           "initial_soc": 0.5,
           "depth_of_discharge": 0.8
         }

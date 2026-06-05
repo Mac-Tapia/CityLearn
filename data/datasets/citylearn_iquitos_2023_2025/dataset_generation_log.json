@@ -1,0 +1,115 @@
+{
+  "fecha_generacion": "2026-06-04T20:05:58.557945",
+  "anios": [
+    2023,
+    2024,
+    2025
+  ],
+  "total_horas": 26304,
+  "edificios_generados": 17,
+  "fuentes_meteorologicas": {
+    "2023": "PVGIS-ERA5 (primario) / NASA POWER (fallback)",
+    "2024": "NASA POWER",
+    "2025": "NASA POWER"
+  },
+  "bess_por_edificio": {
+    "1": {
+      "capacidad_kwh": 4020.0,
+      "potencia_kw": 1005.0
+    },
+    "2": {
+      "capacidad_kwh": 2382.0,
+      "potencia_kw": 595.5
+    },
+    "3": {
+      "capacidad_kwh": 2905.6,
+      "potencia_kw": 726.4
+    },
+    "4": {
+      "capacidad_kwh": 2495.0,
+      "potencia_kw": 623.8
+    },
+    "5": {
+      "capacidad_kwh": 1205.3,
+      "potencia_kw": 301.3
+    },
+    "6": {
+      "capacidad_kwh": 15075.3,
+      "potencia_kw": 3768.8
+    },
+    "7": {
+      "capacidad_kwh": 2550.3,
+      "potencia_kw": 637.6
+    },
+    "8": {
+      "capacidad_kwh": 6836.0,
+      "potencia_kw": 1709.0
+    },
+    "9": {
+      "capacidad_kwh": 851.5,
+      "potencia_kw": 212.9
+    },
+    "10": {
+      "capacidad_kwh": 3964.5,
+      "potencia_kw": 991.1
+    },
+    "11": {
+      "capacidad_kwh": 6661.9,
+      "potencia_kw": 1665.5
+    },
+    "12": {
+      "capacidad_kwh": 3158.7,
+      "potencia_kw": 789.7
+    },
+    "13": {
+      "capacidad_kwh": 798.2,
+      "potencia_kw": 199.5
+    },
+    "14": {
+      "capacidad_kwh": 5767.3,
+      "potencia_kw": 1441.8
+    },
+    "15": {
+      "capacidad_kwh": 3220.7,
+      "potencia_kw": 805.2
+    },
+    "16": {
+      "capacidad_kwh": 2496.7,
+      "potencia_kw": 624.2
+    },
+    "17": {
+      "capacidad_kwh": 1640.7,
+      "potencia_kw": 410.2
+    }
+  },
+  "solar_pv_kwp_dc": {
+    "1": 1703.6,
+    "2": 973.6,
+    "3": 730.0,
+    "4": 304.0,
+    "5": 138.9,
+    "6": 2511.4,
+    "7": 986.2,
+    "8": 2555.5,
+    "9": 545.1,
+    "10": 1739.5,
+    "11": 5190.2,
+    "12": 2214.6,
+    "13": 331.1,
+    "14": 2161.4,
+    "15": 1203.6,
+    "16": 1252.7,
+    "17": 196.0
+  },
+  "carbon_intensity_range_kg_kwh": [
+    0.671,
+    0.79
+  ],
+  "pricing": {
+    "source": "TotalFacturado mensual buildingcsv calibrado por energia punta/fuera punta",
+    "currency": "moneda_factura/kWh",
+    "min": 0.383221,
+    "max": 1.066919,
+    "mean": 0.532889935
+  }
+}
