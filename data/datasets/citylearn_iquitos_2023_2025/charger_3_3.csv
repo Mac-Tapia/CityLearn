@@ -18046,7 +18046,7 @@ electric_vehicle_charger_state,electric_vehicle_id,electric_vehicle_departure_ti
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
-3,NONE,-1.0,-0.1,-1.0,-0.1
+2,EV_B03_C003_Mototaxi_Electrica,-1.0,-0.1,0.0,34.13050161998925
 1,EV_B03_C003_Mototaxi_Electrica,2.0,80.30093368544955,-1.0,34.13050161998925
 1,EV_B03_C003_Mototaxi_Electrica,1.0,80.30093368544955,-1.0,34.13050161998925
 1,EV_B03_C003_Mototaxi_Electrica,0.0,80.30093368544955,-1.0,34.13050161998925
@@ -21406,7 +21406,7 @@ electric_vehicle_charger_state,electric_vehicle_id,electric_vehicle_departure_ti
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
-3,NONE,-1.0,-0.1,-1.0,-0.1
+2,EV_B03_C003_Mototaxi_Electrica,-1.0,-0.1,0.0,30.841380333697945
 1,EV_B03_C003_Mototaxi_Electrica,3.0,82.07410450179458,-1.0,30.841380333697945
 1,EV_B03_C003_Mototaxi_Electrica,2.0,82.07410450179458,-1.0,30.841380333697945
 1,EV_B03_C003_Mototaxi_Electrica,1.0,82.07410450179458,-1.0,30.841380333697945
@@ -24214,7 +24214,7 @@ electric_vehicle_charger_state,electric_vehicle_id,electric_vehicle_departure_ti
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
-3,NONE,-1.0,-0.1,-1.0,-0.1
+2,EV_B03_C003_Mototaxi_Electrica,-1.0,-0.1,0.0,23.843206897407445
 1,EV_B03_C003_Mototaxi_Electrica,2.0,88.5917516709551,-1.0,23.843206897407445
 1,EV_B03_C003_Mototaxi_Electrica,1.0,88.5917516709551,-1.0,23.843206897407445
 1,EV_B03_C003_Mototaxi_Electrica,0.0,88.5917516709551,-1.0,23.843206897407445
@@ -25678,7 +25678,7 @@ electric_vehicle_charger_state,electric_vehicle_id,electric_vehicle_departure_ti
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
-3,NONE,-1.0,-0.1,-1.0,-0.1
+2,EV_B03_C003_Mototaxi_Electrica,-1.0,-0.1,0.0,49.44768475765366
 1,EV_B03_C003_Mototaxi_Electrica,3.0,64.72381695253122,-1.0,49.44768475765366
 1,EV_B03_C003_Mototaxi_Electrica,2.0,64.72381695253122,-1.0,49.44768475765366
 1,EV_B03_C003_Mototaxi_Electrica,1.0,64.72381695253122,-1.0,49.44768475765366

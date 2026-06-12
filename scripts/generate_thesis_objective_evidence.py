@@ -43,6 +43,7 @@ TABLE_NAMES = (
     "exploration_summary",
     "agent_reward_summary",
     "checkpoint_inventory",
+    "building_kpis",
 )
 FIGURE_NAMES = (
     "reward_timeseries.png",
@@ -1740,6 +1741,173 @@ def co2_cost_rows(manifest_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, 
     return rows
 
 
+def district_agent_comparison_rows(objective_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Build a wide district-level comparison: one row per (kpi, axis, scenario), columns per algorithm.
+
+    Source: objective_kpis.csv (district-level KPIs from evaluate_v2, one file per run).
+    Produces the same shape as ``per_building_agent_comparison_rows`` so both tables
+    can be read together, with ``building="District"`` as the entity identifier.
+    """
+    cell: Dict[tuple, Dict[str, Any]] = {}
+
+    for row in objective_rows:
+        algorithm = str(row.get("algorithm", "")).upper()
+        if algorithm not in ALGORITHM_NAMES:
+            continue
+        kpi = str(row.get("kpi", ""))
+        axis = str(row.get("axis", ""))
+        value = as_float(row.get("value"))
+        if not kpi or not axis or value is None:
+            continue
+        scenario = str(row.get("scenario", ""))
+        lower_is_better = as_bool(row.get("lower_is_better"))
+        baseline = as_float(row.get("baseline"))
+        delta = as_float(row.get("delta_vs_baseline"))
+        improved = as_bool(row.get("improved_vs_baseline"))
+        key = (kpi, axis, scenario)
+        record = cell.setdefault(key, {
+            "building": "District",
+            "kpi": kpi,
+            "axis": axis,
+            "scenario": scenario,
+            "lower_is_better": lower_is_better,
+            "baseline": baseline,
+            "HAPPO": None,
+            "HAPPO_delta": None,
+            "HAPPO_improved": None,
+            "MASAC": None,
+            "MASAC_delta": None,
+            "MASAC_improved": None,
+            "MATD3": None,
+            "MATD3_delta": None,
+            "MATD3_improved": None,
+            "MAAC": None,
+            "MAAC_delta": None,
+            "MAAC_improved": None,
+        })
+        record[algorithm] = value
+        record[f"{algorithm}_delta"] = delta
+        record[f"{algorithm}_improved"] = improved
+        if record["baseline"] is None and baseline is not None:
+            record["baseline"] = baseline
+        if record["lower_is_better"] is None and lower_is_better is not None:
+            record["lower_is_better"] = lower_is_better
+
+    rows: List[Dict[str, Any]] = []
+    for (kpi, axis, scenario), record in sorted(cell.items()):
+        available_algorithms = [algo for algo in ALGORITHM_NAMES if record.get(algo) is not None]
+        best_algorithm = ""
+        if available_algorithms:
+            lib = record.get("lower_is_better")
+            if lib is True:
+                best_algorithm = min(available_algorithms, key=lambda a: record.get(a) or float("inf"))
+            elif lib is False:
+                best_algorithm = max(available_algorithms, key=lambda a: record.get(a) or float("-inf"))
+        row = dict(record)
+        row["available_algorithms"] = ", ".join(available_algorithms)
+        row["best_algorithm"] = best_algorithm
+        rows.append(row)
+
+    return rows
+
+
+def _building_kpi_to_axis(cost_function: str) -> str:
+    """Map a building-level evaluate_v2 KPI name to an objective axis code."""
+    cf = cost_function.lower()
+    if "emissions" in cf:
+        return "OE2"
+    if "cost" in cf:
+        return "OE3"
+    return "OE1"
+
+
+def per_building_kpi_flat_rows(building_kpi_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten building-level KPI rows from all runs, one row per (algorithm, scenario, building, kpi).
+
+    Input rows come from ``collect_table_rows(run_inventory, "building_kpis")`` and
+    have the evaluate_v2 frame columns (cost_function, value, name, level) enriched
+    with algorithm, scenario, output_profile, seed, run_path by the collector.
+    """
+    rows: List[Dict[str, Any]] = []
+    for row in building_kpi_rows:
+        algorithm = str(row.get("algorithm", "")).upper()
+        if algorithm not in ALGORITHM_NAMES:
+            continue
+        building = str(row.get("name", ""))
+        cost_function = str(row.get("cost_function", ""))
+        value = as_float(row.get("value"))
+        if not building or not cost_function or value is None:
+            continue
+        scenario = str(row.get("scenario", ""))
+        axis = _building_kpi_to_axis(cost_function)
+        rows.append({
+            "algorithm": algorithm,
+            "scenario": scenario,
+            "output_profile": row.get("output_profile", ""),
+            "building": building,
+            "cost_function": cost_function,
+            "axis": axis,
+            "value": value,
+        })
+    return rows
+
+
+def per_building_agent_comparison_rows(building_kpi_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Build a wide comparison table: one row per (building, cost_function, axis, scenario) with a value column per algorithm.
+
+    This lets the thesis compare how each MADRL agent controls each specific building
+    across all KPI dimensions (OE1 flexibilidad, OE2 CO2, OE3 costos).
+    """
+    cell: Dict[tuple, Dict[str, Any]] = {}
+
+    for row in building_kpi_rows:
+        algorithm = str(row.get("algorithm", "")).upper()
+        if algorithm not in ALGORITHM_NAMES:
+            continue
+        building = str(row.get("name", ""))
+        cost_function = str(row.get("cost_function", ""))
+        value = as_float(row.get("value"))
+        if not building or not cost_function or value is None:
+            continue
+        scenario = str(row.get("scenario", ""))
+        axis = _building_kpi_to_axis(cost_function)
+        key = (building, cost_function, axis, scenario)
+        record = cell.setdefault(key, {
+            "building": building,
+            "cost_function": cost_function,
+            "axis": axis,
+            "scenario": scenario,
+            "HAPPO": None,
+            "MASAC": None,
+            "MATD3": None,
+            "MAAC": None,
+        })
+        record[algorithm] = value
+
+    rows: List[Dict[str, Any]] = []
+    for (building, cost_function, axis, scenario), record in sorted(cell.items()):
+        values = [v for algo in ALGORITHM_NAMES for v in [record.get(algo)] if v is not None]
+        available_algorithms = [algo for algo in ALGORITHM_NAMES if record.get(algo) is not None]
+        best_algorithm = ""
+        if available_algorithms:
+            lower_is_better = not any(
+                kw in cost_function.lower()
+                for kw in ("generation", "self_consumption", "charge", "discharge",
+                           "throughput", "departure_met", "departure_within", "success",
+                           "v2g", "ev_charge", "traded", "import_share")
+            )
+            if lower_is_better:
+                best_algorithm = min(available_algorithms, key=lambda a: record.get(a) or float("inf"))
+            else:
+                best_algorithm = max(available_algorithms, key=lambda a: record.get(a) or float("-inf"))
+        row = dict(record)
+        row["available_algorithms"] = ", ".join(available_algorithms)
+        row["best_algorithm"] = best_algorithm
+        rows.append(row)
+
+    return rows
+
+
 def dataset_code_rows(output_roots: Mapping[str, Path]) -> List[Dict[str, Any]]:
     rows = [
         {
@@ -1894,6 +2062,10 @@ def main() -> int:
     run_inventory = scan_runs(output_roots, args.seed)
     objective_rows = collect_table_rows(run_inventory, "objective_kpis")
     axis_rows = collect_table_rows(run_inventory, "axis_baseline_comparison")
+    raw_building_kpi_rows = collect_table_rows(run_inventory, "building_kpis")
+    per_building_flat = per_building_kpi_flat_rows(raw_building_kpi_rows)
+    per_building_comparison = per_building_agent_comparison_rows(raw_building_kpi_rows)
+    district_comparison = district_agent_comparison_rows(objective_rows)
     manifest_rows = kpi_manifest_rows(manifest)
     objective_compliance = compute_objective_compliance(
         manifest=manifest,
@@ -1950,6 +2122,9 @@ def main() -> int:
         "Datasets_y_codigo": dataset_code,
         "Arquitectura_Propuesta": architecture,
         "Aplicabilidad_SEAI_Iquitos": seai,
+        "kpis_por_edificio_y_agente": per_building_flat,
+        "comparativa_edificios_por_agente": per_building_comparison,
+        "comparativa_distrito_por_agente": district_comparison,
     }
 
     for name, rows in tables.items():
@@ -1989,6 +2164,9 @@ def main() -> int:
         "statistical_omnibus_rows": len(statistical_omnibus),
         "statistical_mwu_rows": len(statistical_mwu),
         "statistical_wilcoxon_rows": len(statistical_wilcoxon),
+        "per_building_flat_rows": len(per_building_flat),
+        "per_building_comparison_rows": len(per_building_comparison),
+        "district_comparison_rows": len(district_comparison),
         "objective_compliance": objective_compliance,
     }, indent=2, ensure_ascii=False))
     return 0

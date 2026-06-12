@@ -7,13 +7,19 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from citylearn_v3_training_common import write_training_artifacts
+import numpy as np
+
+from citylearn_v3_training_common import CityLearnV3BackendAdapter, write_training_artifacts
 
 
 class _Args:
     scenario = "E3"
     seed = 7
     episode_time_steps = 2
+
+
+class _EfficientArgs(_Args):
+    artifact_profile = "efficient"
 
 
 class _Space:
@@ -80,6 +86,10 @@ class _Adapter:
     agents = ["Building_1", "Building_2"]
     action_dims = {"Building_1": 1, "Building_2": 1}
     observation_dims = {"Building_1": 2, "Building_2": 2}
+    normalization_metadata = {
+        "normalize_observations": True,
+        "observation_method": "test normalization",
+    }
     timeseries_records = [
         {
             "global_step": 0,
@@ -125,6 +135,15 @@ class _Adapter:
 
 class _Candidate:
     adapter = _Adapter()
+
+
+class _EfficientAdapter(_Adapter):
+    trace_record_interval = 10
+    trace_detail = "compact"
+
+
+class _EfficientCandidate:
+    adapter = _EfficientAdapter()
 
 
 def _report():
@@ -200,6 +219,28 @@ def _report():
     }
 
 
+def test_citylearn_v3_backend_adapter_normalizes_observations_before_training():
+    adapter = CityLearnV3BackendAdapter(
+        schema_path="CityLearn/data/datasets/baeda_3dem/schema.json",
+        scenario="E1",
+        seed=0,
+        episode_time_steps=4,
+        normalize_observations=True,
+    )
+
+    try:
+        observations = adapter.reset()
+        values = np.concatenate([observation.reshape(-1) for observation in observations])
+
+        assert adapter.normalization_metadata["normalize_observations"] is True
+        assert np.nanmin(values) >= 0.0
+        assert np.nanmax(values) <= 1.0
+        assert all(float(space.low.min()) == 0.0 for space in adapter.continuous_observation_space)
+        assert all(float(space.high.max()) == 1.0 for space in adapter.ctde_share_observation_space)
+    finally:
+        adapter.close()
+
+
 def test_training_artifacts_use_data_checkpoints_and_figures_layout(tmp_path):
     output_dir = tmp_path / "happo" / "E3_seed_7"
     checkpoint_dir = output_dir / "checkpoints" / "backend"
@@ -260,3 +301,39 @@ def test_training_artifacts_use_data_checkpoints_and_figures_layout(tmp_path):
     assert results["figures"]["figure_count"] >= 12
     assert results["building_count"] == 2
     assert results["building_detail"]["building_behavior_summary"]["rows"] == 2
+    assert results["normalization"]["normalize_observations"] is True
+
+    checkpoint_manifest = json.loads((data_dir / "checkpoint_manifest.json").read_text(encoding="utf-8"))
+    assert checkpoint_manifest["normalization"]["observation_method"] == "test normalization"
+
+
+def test_efficient_artifact_profile_avoids_duplicate_heavy_trace_csv(tmp_path):
+    output_dir = tmp_path / "happo" / "E3_seed_7"
+
+    artifacts = write_training_artifacts(
+        output_dir=output_dir,
+        algorithm="HAPPO",
+        backend="external/HARL",
+        args=_EfficientArgs(),
+        report=_report(),
+        candidate=_EfficientCandidate(),
+        hyperparameters={"episodes": 1},
+    )
+
+    data_dir = output_dir / "data"
+    comparison_dir = Path(artifacts["statistical_comparison_dir"])
+
+    assert (data_dir / "timeseries.csv").is_file()
+    assert (data_dir / "trace.csv").is_file()
+    assert (output_dir / "timeseries.csv").is_file()
+    assert not (output_dir / "trace.csv").exists()
+    assert not (output_dir / "building_behavior_summary.csv").exists()
+    assert not (comparison_dir / "trace_happo_E3.csv").exists()
+
+    results = json.loads((data_dir / "results.json").read_text(encoding="utf-8"))
+    policy = results["artifact_write_policy"]
+    assert policy["root_timeseries_csv"] is True
+    assert policy["root_trace_csv"] is False
+    assert policy["statistical_comparison_trace_csv"] is False
+    assert policy["trace_is_sampled"] is True
+    assert policy["trace_record_interval"] == 10

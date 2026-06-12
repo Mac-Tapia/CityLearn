@@ -15814,7 +15814,7 @@ electric_vehicle_charger_state,electric_vehicle_id,electric_vehicle_departure_ti
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
-3,NONE,-1.0,-0.1,-1.0,-0.1
+2,EV_B03_C005_Mototaxi_Electrica,-1.0,-0.1,0.0,36.05562380001399
 1,EV_B03_C005_Mototaxi_Electrica,2.0,77.17018860993029,-1.0,36.05562380001399
 1,EV_B03_C005_Mototaxi_Electrica,1.0,77.17018860993029,-1.0,36.05562380001399
 1,EV_B03_C005_Mototaxi_Electrica,0.0,77.17018860993029,-1.0,36.05562380001399
@@ -22462,7 +22462,7 @@ electric_vehicle_charger_state,electric_vehicle_id,electric_vehicle_departure_ti
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
-3,NONE,-1.0,-0.1,-1.0,-0.1
+2,EV_B03_C005_Mototaxi_Electrica,-1.0,-0.1,0.0,36.64674901710082
 1,EV_B03_C005_Mototaxi_Electrica,3.0,79.38632013942662,-1.0,36.64674901710082
 1,EV_B03_C005_Mototaxi_Electrica,2.0,79.38632013942662,-1.0,36.64674901710082
 1,EV_B03_C005_Mototaxi_Electrica,1.0,79.38632013942662,-1.0,36.64674901710082

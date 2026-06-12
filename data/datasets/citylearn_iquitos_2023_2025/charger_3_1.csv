@@ -3022,7 +3022,7 @@ electric_vehicle_charger_state,electric_vehicle_id,electric_vehicle_departure_ti
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
-3,NONE,-1.0,-0.1,-1.0,-0.1
+2,EV_B03_C001_Moto_Lineal_Electrica,-1.0,-0.1,0.0,28.027626664402323
 1,EV_B03_C001_Moto_Lineal_Electrica,2.0,91.84117987686699,-1.0,28.027626664402323
 1,EV_B03_C001_Moto_Lineal_Electrica,1.0,91.84117987686699,-1.0,28.027626664402323
 1,EV_B03_C001_Moto_Lineal_Electrica,0.0,91.84117987686699,-1.0,28.027626664402323
@@ -9718,7 +9718,7 @@ electric_vehicle_charger_state,electric_vehicle_id,electric_vehicle_departure_ti
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
 3,NONE,-1.0,-0.1,-1.0,-0.1
-3,NONE,-1.0,-0.1,-1.0,-0.1
+2,EV_B03_C001_Moto_Lineal_Electrica,-1.0,-0.1,0.0,28.68164747670159
 1,EV_B03_C001_Moto_Lineal_Electrica,2.0,98.02718708883349,-1.0,28.68164747670159
 1,EV_B03_C001_Moto_Lineal_Electrica,1.0,98.02718708883349,-1.0,28.68164747670159
 1,EV_B03_C001_Moto_Lineal_Electrica,0.0,98.02718708883349,-1.0,28.68164747670159

@@ -11,13 +11,18 @@ import torch
 
 from citylearn_v3_training_common import (
     CityLearnOffPolicyVecEnv,
+    FiniteTensorBoardWriter,
     add_common_citylearn_args,
     add_external_path,
     citylearn_v3_training_report,
+    configure_torch_runtime,
     ensure_project_paths,
     ensure_artifact_layout,
+    install_finite_optimizer_step_guard,
     install_noop_wandb,
     resolve_output_dir,
+    start_live_progress_heartbeat,
+    stop_live_progress_heartbeat,
     write_training_artifacts,
     write_training_summary,
 )
@@ -28,11 +33,17 @@ def parse_args():
     add_common_citylearn_args(parser)
     parser.add_argument("--episodes", default=None, type=int, help="Number of MATD3 rollout episodes.")
     parser.add_argument("--num-env-steps", default=8, type=int)
-    parser.add_argument("--batch-size", default=4, type=int)
-    parser.add_argument("--buffer-size", default=128, type=int)
-    parser.add_argument("--hidden-size", default=64, type=int)
+    parser.add_argument("--batch-size", default=256, type=int)
+    parser.add_argument("--buffer-size", default=500, type=int)
+    parser.add_argument("--hidden-size", default=256, type=int)
+    parser.add_argument("--lr", default=3.0e-4, type=float)
+    parser.add_argument("--max-grad-norm", default=1.0, type=float)
+    parser.add_argument("--gamma", default=0.9999, type=float,
+                        help="Discount factor. Use 0.9999 for year-long (8760-step) episodes.")
     parser.add_argument("--train-interval", default=1, type=int)
     parser.add_argument("--num-random-episodes", default=1, type=int)
+    parser.add_argument("--torch-threads", default=1, type=int)
+    parser.add_argument("--live-heartbeat-seconds", default=30, type=int)
     parser.add_argument("--cuda", action="store_true")
     parser.add_argument("--experiment-name", default="citylearn_v3_matd3")
     return parser.parse_args()
@@ -64,6 +75,9 @@ def main() -> int:
         algorithm="MATD3",
         live_progress_path=str(output_dir / "live_progress.json"),
         live_progress_interval=args.live_progress_interval,
+        trace_record_interval=args.trace_record_interval,
+        trace_detail=args.trace_detail,
+        normalize_observations=args.normalize_observations,
     )
     eval_env = CityLearnOffPolicyVecEnv(
         schema_path=args.schema_path,
@@ -71,6 +85,16 @@ def main() -> int:
         seed=args.seed + 10000,
         episode_time_steps=args.episode_time_steps,
         algorithm="MATD3",
+        trace_record_interval=args.trace_record_interval,
+        trace_detail=args.trace_detail,
+        normalize_observations=args.normalize_observations,
+    )
+    gpu_runtime = configure_torch_runtime(
+        torch,
+        use_cuda=args.cuda,
+        torch_threads=args.torch_threads,
+        gpu_profile=args.gpu_profile,
+        cuda_memory_fraction=args.cuda_memory_fraction,
     )
 
     parser = get_config()
@@ -80,7 +104,7 @@ def main() -> int:
     all_args.scenario_name = args.scenario
     all_args.experiment_name = args.experiment_name
     all_args.seed = args.seed
-    all_args.cuda = bool(args.cuda and torch.cuda.is_available())
+    all_args.cuda = bool(gpu_runtime["cuda_enabled"])
     all_args.use_wandb = False
     all_args.use_eval = False
     all_args.num_env_steps = configured_num_env_steps
@@ -88,8 +112,12 @@ def main() -> int:
     all_args.batch_size = args.batch_size
     all_args.buffer_size = args.buffer_size
     all_args.hidden_size = args.hidden_size
+    all_args.lr = float(args.lr)
+    all_args.max_grad_norm = float(args.max_grad_norm)
+    all_args.use_max_grad_norm = True
     all_args.train_interval = args.train_interval
     all_args.num_random_episodes = args.num_random_episodes
+    all_args.gamma = float(args.gamma)
     all_args.log_interval = max(args.episode_time_steps, 1)
     all_args.save_interval = max(args.episode_time_steps, 1)
     all_args.n_rollout_threads = 1
@@ -131,6 +159,31 @@ def main() -> int:
     }
 
     runner = MPERunner(config=config)
+    if hasattr(runner, "writter"):
+        finite_writer = FiniteTensorBoardWriter(
+            runner.writter,
+            output_dir / "data" / "tensorboard_finite_filter.jsonl",
+        )
+        runner.writter = finite_writer
+    finite_optimizer_guard = install_finite_optimizer_step_guard(
+        [
+            {
+                "owner": f"{policy_id}/actor",
+                "module": getattr(policy, "actor", None),
+                "optimizer": getattr(policy, "actor_optimizer", None),
+            }
+            for policy_id, policy in getattr(runner, "policies", {}).items()
+        ]
+        + [
+            {
+                "owner": f"{policy_id}/critic",
+                "module": getattr(policy, "critic", None),
+                "optimizer": getattr(policy, "critic_optimizer", None),
+            }
+            for policy_id, policy in getattr(runner, "policies", {}).items()
+        ],
+        output_dir / "data" / "matd3_finite_gradient_guard.jsonl",
+    )
     env.adapter.clear_records()
     total_num_steps = 0
     report = citylearn_v3_training_report(None)
@@ -142,22 +195,46 @@ def main() -> int:
         "batch_size": args.batch_size,
         "buffer_size": args.buffer_size,
         "hidden_size": args.hidden_size,
+        "gamma": all_args.gamma,
+        "lr": all_args.lr,
+        "max_grad_norm": all_args.max_grad_norm,
         "train_interval": args.train_interval,
         "num_random_episodes": args.num_random_episodes,
+        "torch_threads": args.torch_threads,
         "live_progress_interval": args.live_progress_interval,
         "share_policy": all_args.share_policy,
         "use_same_share_obs": all_args.use_same_share_obs,
         "checkpoint_interval_steps": all_args.save_interval,
+        "live_heartbeat_seconds": args.live_heartbeat_seconds,
         "cuda": all_args.cuda,
+        "gpu_runtime": gpu_runtime,
+        "algorithm_family": "MADRL",
         "ctde_share_observation": "padded_joint_observation",
         "reward_function": "CityLearnV3MADRLRewardFunction",
         "reward_profile": "MATD3",
         "reward_metadata": env.adapter.reward_metadata,
+        "finite_optimizer_step_guard": finite_optimizer_guard,
     }
 
+    heartbeat_stop = None
+    heartbeat_thread = None
     try:
+        heartbeat_stop, heartbeat_thread = start_live_progress_heartbeat(
+            env.adapter,
+            args.live_heartbeat_seconds,
+            active_stage="matd3_backend_training",
+            initial_stage="matd3_backend_starting",
+            note="MATD3 backend is stepping the vector environment or updating actor/critic networks.",
+        )
         while total_num_steps < all_args.num_env_steps:
             total_num_steps = runner.run()
+        try:
+            env.adapter.write_live_heartbeat(
+                stage="matd3_backend_finished",
+                note="MATD3 backend runner finished; writing final artifacts.",
+            )
+        except Exception:
+            pass
         runner.saver()
         report = citylearn_v3_training_report(env)
         artifacts = write_training_artifacts(
@@ -175,6 +252,7 @@ def main() -> int:
             },
         )
     finally:
+        stop_live_progress_heartbeat(heartbeat_stop, heartbeat_thread)
         env.close()
         eval_env.close()
         if hasattr(runner, "writter"):
@@ -185,6 +263,7 @@ def main() -> int:
         output_dir,
         {
             "algorithm": "MATD3",
+            "algorithm_family": "MADRL",
             "backend": "external/off-policy",
             "scenario": args.scenario,
             "seed": args.seed,
@@ -194,6 +273,7 @@ def main() -> int:
             "output_dir": str(output_dir),
             "artifact_layout": artifacts.get("artifact_layout", {}),
             "hyperparameters": hyperparameters,
+            "gpu_runtime": gpu_runtime,
             "reward_metadata": env.adapter.reward_metadata,
             "artifacts": artifacts,
             "project_axis_metrics": report["project_axis_metrics"],

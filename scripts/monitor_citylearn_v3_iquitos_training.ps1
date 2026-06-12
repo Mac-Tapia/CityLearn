@@ -6,6 +6,15 @@ param(
 
 $ErrorActionPreference = "Continue"
 
+function Clear-MonitorHost {
+    try {
+        Clear-Host
+    }
+    catch {
+        Write-Host ""
+    }
+}
+
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Resolve-Path (Join-Path $ScriptPath "..\..")
 $OutputRootPath = Join-Path $ProjectRoot $OutputRoot
@@ -47,6 +56,9 @@ function Show-Status {
     Write-Host ""
     Write-Host "Dataset: $($status.dataset)  |  Escenarios: $($status.scenarios -join ', ')  |  Seed: $($status.seed)" -ForegroundColor White
     Write-Host "Estado: $($status.status)  |  Inicio: $($status.started_at)" -ForegroundColor White
+    if ($status.artifact_optimization) {
+        Write-Host ("Artefactos: profile={0} trace_interval={1} trace_detail={2}" -f $status.artifact_optimization.profile, $status.artifact_optimization.trace_record_interval, $status.artifact_optimization.trace_detail) -ForegroundColor DarkCyan
+    }
     Write-Host ""
 
     if ($status.jobs) {
@@ -70,10 +82,11 @@ function Show-Status {
             if (Test-Path $progressPath) {
                 try {
                     $prog = Get-Content $progressPath -Raw | ConvertFrom-Json
-                    $step = $prog.env_step
-                    $total = $prog.num_env_steps
+                    $step = if ($null -ne $prog.global_step) { $prog.global_step } else { $prog.env_step }
+                    $total = if ($null -ne $prog.num_env_steps) { $prog.num_env_steps } else { $status.num_env_steps }
                     $pct = if ($total -gt 0) { [math]::Round(100 * $step / $total, 1) } else { "?" }
-                    Write-Host "  [$sc] $($algo.ToUpper().PadRight(6))  paso $step / $total  ($pct%)" -ForegroundColor Gray
+                    $rewardImport = if ($null -ne $prog.reward_district_import_kwh) { "{0:N1}" -f [double]$prog.reward_district_import_kwh } else { "n/d" }
+                    Write-Host "  [$sc] $($algo.ToUpper().PadRight(6))  paso $step / $total  ($pct%)  import_reward=$rewardImport kWh" -ForegroundColor Gray
                 }
                 catch {}
             }
@@ -98,7 +111,7 @@ Write-Host "Monitor CityLearn v3 Iquitos — $OutputRoot" -ForegroundColor Cyan
 Write-Host "Intervalo: ${IntervalSeconds}s  |  Ctrl+C para detener" -ForegroundColor DarkGray
 
 while ($true) {
-    Clear-Host
+    Clear-MonitorHost
     Write-Host "================================================================" -ForegroundColor Cyan
     Write-Host "  CityLearn v3 MADRL Iquitos — $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Cyan
     Write-Host "================================================================" -ForegroundColor Cyan

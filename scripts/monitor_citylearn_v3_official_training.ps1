@@ -6,6 +6,15 @@ param(
 
 $ErrorActionPreference = "Continue"
 
+function Clear-MonitorHost {
+    try {
+        Clear-Host
+    }
+    catch {
+        Write-Host ""
+    }
+}
+
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Resolve-Path (Join-Path $ScriptPath "..\..")
 $OutputRootPath = Join-Path $ProjectRoot $OutputRoot
@@ -25,6 +34,76 @@ function Read-JsonFile {
     catch {
         Write-Host "No se pudo leer JSON: $Path" -ForegroundColor Yellow
         return $null
+    }
+}
+
+function Get-FileAgeSeconds {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    try {
+        return [math]::Round(((Get-Date) - (Get-Item -LiteralPath $Path).LastWriteTime).TotalSeconds, 1)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-ActivePythonProcessSnapshot {
+    param($StartedAt)
+
+    try {
+        $started = [datetime]$StartedAt
+    }
+    catch {
+        return $null
+    }
+
+    $windowStart = $started.AddSeconds(-5)
+    $windowEnd = (Get-Date).AddSeconds(5)
+    $candidates = @()
+
+    try {
+        $candidates = @(
+            Get-Process -Name python -ErrorAction SilentlyContinue |
+                Where-Object {
+                    try {
+                        $_.StartTime -ge $windowStart -and $_.StartTime -le $windowEnd
+                    }
+                    catch {
+                        $false
+                    }
+                }
+        )
+    }
+    catch {
+        $candidates = @()
+    }
+
+    $activeCandidate = $candidates |
+        Sort-Object -Property @{ Expression = { if ($null -ne $_.CPU) { $_.CPU } else { 0 } }; Descending = $true } |
+        Select-Object -First 1
+
+    if ($null -eq $activeCandidate) {
+        return $null
+    }
+
+    $activePath = ""
+    try {
+        $activePath = [string]$activeCandidate.Path
+    }
+    catch {
+        $activePath = ""
+    }
+
+    [pscustomobject]@{
+        ActivePid = [int]$activeCandidate.Id
+        ActiveCpu = if ($null -ne $activeCandidate.CPU) { [double]$activeCandidate.CPU } else { 0.0 }
+        ActivePath = $activePath
+        CandidateCount = [int]$candidates.Count
     }
 }
 
@@ -184,6 +263,22 @@ function Show-TrainingProgress {
     $checkpointManifestPath = Join-Path $runDir "checkpoint_manifest.json"
     $status = Read-JsonFile -Path $StatusPath
 
+    if (-not (Test-Path -LiteralPath $resultsPath)) {
+        $resultsPath = Join-Path $runDir "data\results.json"
+    }
+    if (-not (Test-Path -LiteralPath $summaryPath)) {
+        $summaryPath = Join-Path $runDir "data\training_summary.json"
+    }
+    if (-not (Test-Path -LiteralPath $tracePath)) {
+        $tracePath = Join-Path $runDir "data\trace.csv"
+    }
+    if (-not (Test-Path -LiteralPath $timeseriesPath)) {
+        $timeseriesPath = Join-Path $runDir "data\timeseries.csv"
+    }
+    if (-not (Test-Path -LiteralPath $checkpointManifestPath)) {
+        $checkpointManifestPath = Join-Path $runDir "data\checkpoint_manifest.json"
+    }
+
     $summary = Read-JsonFile -Path $summaryPath
     if ($null -eq $summary) {
         $summary = Read-JsonFile -Path $resultsPath
@@ -207,6 +302,21 @@ function Show-TrainingProgress {
                         Select-Object -First 8 |
                         ForEach-Object { Write-Host ("    {0}: {1}" -f $_.Name, $_.Value) }
                 }
+        }
+
+        $artifactProfile = $null
+        if ($summary.artifact_profile) {
+            $artifactProfile = $summary.artifact_profile
+        }
+        elseif ($summary.artifacts -and $summary.artifacts.artifact_profile) {
+            $artifactProfile = $summary.artifacts.artifact_profile
+        }
+        if ($artifactProfile) {
+            Write-Host ("Artefactos: profile={0}" -f $artifactProfile) -ForegroundColor DarkCyan
+            if ($summary.artifacts -and $summary.artifacts.artifact_write_policy) {
+                $policy = $summary.artifacts.artifact_write_policy
+                Write-Host ("  trace_interval={0} trace_detail={1} root_trace_csv={2}" -f $policy.trace_record_interval, $policy.trace_detail, $policy.root_trace_csv)
+            }
         }
     }
     else {
@@ -250,7 +360,10 @@ function Show-TrainingProgress {
         else {
             Write-Host "  retornos acumulados: aun no disponibles para este proceso; apareceran al cargar el codigo nuevo en el siguiente MADRL/job." -ForegroundColor Yellow
         }
-        Write-Host ("  cost={0} co2={1} net_load={2}" -f $liveProgress.district_net_electricity_consumption_cost, $liveProgress.district_net_electricity_consumption_emission, $liveProgress.district_net_electricity_consumption)
+        Write-Host ("  energia_inst: cost={0} co2={1} net_load={2}" -f $liveProgress.district_net_electricity_consumption_cost, $liveProgress.district_net_electricity_consumption_emission, $liveProgress.district_net_electricity_consumption)
+        if ($null -ne $liveProgress.reward_district_import_kwh) {
+            Write-Host ("  reward_signal: district_import_kwh={0} team_reward={1}" -f $liveProgress.reward_district_import_kwh, $liveProgress.reward_team_reward)
+        }
         Write-Host ("  price_mean={0} carbon_intensity_mean={1}" -f $liveProgress.electricity_price_mean, $liveProgress.carbon_intensity_mean)
     }
     else {
@@ -381,7 +494,7 @@ function Show-Artifacts {
 }
 
 while ($true) {
-    Clear-Host
+    Clear-MonitorHost
     Write-Host "================================================================" -ForegroundColor Cyan
     Write-Host "  CITYLEARN v3 MADRL - MONITOR EN TIEMPO REAL" -ForegroundColor Cyan
     Write-Host "  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')   Intervalo: ${IntervalSeconds}s" -ForegroundColor Cyan
@@ -399,11 +512,27 @@ while ($true) {
                 $totalSteps = [int]$statusNow.num_env_steps
                 $pct = if ($totalSteps -gt 0) { [math]::Round($lp.global_step / $totalSteps * 100, 1) } else { 0 }
                 $w = $lp.reward_axis_weights
+                $progressAgeSeconds = Get-FileAgeSeconds -Path $lpPath
+                $processSnapshot = Get-ActivePythonProcessSnapshot -StartedAt $activeJob.started_at
                 Write-Host ""
                 Write-Host ("  ACTIVO : {0,-8} {1}   Paso {2}/{3} ({4}%)" -f $activeJob.name.ToUpper(), $activeJob.scenario, $lp.global_step, $totalSteps, $pct) -ForegroundColor Green
+                if ($processSnapshot) {
+                    Write-Host ("  Proceso: PID activo={0}  CPU={1:N1}s  candidatos={2}" -f $processSnapshot.ActivePid, $processSnapshot.ActiveCpu, $processSnapshot.CandidateCount) -ForegroundColor Green
+                }
                 Write-Host ("  Ep {0}/{1}  PasoEp {2}/{3}   R_mean={4:F5}   Retorno={5:F1}" -f ($lp.episode+1), $statusNow.episodes, $lp.episode_step, $statusNow.episode_time_steps, $lp.episode_reward_mean_cumulative, $lp.episode_return_cumulative) -ForegroundColor Green
                 Write-Host ("  Pesos  : OE1_flex={0:F3}  OE2_co2={1:F3}  OE3_cost={2:F3}" -f $w.flex, $w.carbon, $w.cost) -ForegroundColor Yellow
-                Write-Host ("  CO2={0:F4} kg/kWh   Precio={1:F4} $/kWh   Carga_neta={2:F1} kWh" -f $lp.carbon_intensity_mean, $lp.electricity_price_mean, $lp.district_net_electricity_consumption) -ForegroundColor Yellow
+                $rewardImportText = "n/d"
+                if ($null -ne $lp.reward_district_import_kwh) {
+                    $rewardImportText = "{0:F1}" -f [double]$lp.reward_district_import_kwh
+                }
+                Write-Host ("  CO2={0:F4} kg/kWh   Precio={1:F4} $/kWh   Carga_neta_inst={2:F1} kWh   Import_reward={3} kWh" -f $lp.carbon_intensity_mean, $lp.electricity_price_mean, $lp.district_net_electricity_consumption, $rewardImportText) -ForegroundColor Yellow
+                if ($null -ne $progressAgeSeconds) {
+                    $ageColor = if ($progressAgeSeconds -gt [math]::Max(120, [int]$statusNow.live_progress_interval * 2)) { "Yellow" } else { "DarkGray" }
+                    Write-Host ("  live_progress: hace {0:N1} s" -f $progressAgeSeconds) -ForegroundColor $ageColor
+                    if ($progressAgeSeconds -gt [math]::Max(120, [int]$statusNow.live_progress_interval * 2)) {
+                        Write-Host "  Aviso: hay proceso activo, pero no hay pasos nuevos escritos; MASAC puede estar actualizando redes entre episodios." -ForegroundColor Yellow
+                    }
+                }
             }
         }
     }

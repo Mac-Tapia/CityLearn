@@ -7,54 +7,173 @@ param(
     [string]$SchemaPath = "CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json",
     [int]$TorchThreads = 12,
     [int]$LiveProgressInterval = 250,
-    [ValidateSet("local4060", "balanced", "conservative", "aws")]
-    [string]$GpuProfile = "local4060",
+    [ValidateSet("full", "efficient", "minimal")]
+    [string]$ArtifactProfile = "efficient",
+    [int]$TraceRecordInterval = 10,
+    [ValidateSet("full", "compact")]
+    [string]$TraceDetail = "compact",
+    [bool]$ParallelScenarios = $true,
+    [ValidateRange(1, 16)]
+    [int]$MaxConcurrentScenarioJobs = 2,
+    [ValidateRange(1, 16)]
+    [int]$MaxConcurrentHeavyJobs = 1,
+    [ValidateSet("local4060_fast", "local4060", "balanced", "conservative", "aws")]
+    [string]$GpuProfile = "local4060_fast",
+    [double]$MaxGpuVramGib = 0,
+    [double]$GpuVramReserveGib = 1.5,
+    [ValidateRange(0.0, 1.0)]
+    [double]$CudaMemoryFraction = 0,
+    [switch]$AllowGpuOversubscription,
     [int]$HappoHiddenSize = 384,
     [int]$HappoLiveHeartbeatSeconds = 30,
     [double]$MasacMaxReplayBufferGib = 8,
-    [int]$MasacBufferSize = 2,
-    [int]$MasacCriticBatchSize = 1,
+    [int]$MasacBufferSize = 20,
+    [int]$MasacCriticBatchSize = 64,
     [int]$MasacCriticTrainSteps = 1,
     [int]$MasacActorSampleTimes = 5,
-    [int]$MasacRnnHiddenDim = 64,
-    [int]$MasacQmixHiddenDim = 32,
-    [int]$MasacHyperHiddenDim = 64,
+    [int]$MasacRnnHiddenDim = 256,
+    [int]$MasacQmixHiddenDim = 128,
+    [int]$MasacHyperHiddenDim = 256,
     [int]$MasacLiveHeartbeatSeconds = 30,
     [int]$Matd3BatchSize = 256,
     [int]$Matd3BufferSize = 4096,
     [int]$Matd3HiddenSize = 256,
     [int]$Matd3TrainInterval = 100,
     [int]$Matd3LiveHeartbeatSeconds = 30,
-    [int]$MaacBatchSize = 64,
-    [int]$MaacBufferLength = 256,
-    [int]$MaacHiddenSize = 128,
+    [int]$MaacBatchSize = 256,
+    [int]$MaacBufferLength = 50000,
+    [int]$MaacHiddenSize = 256,
+    [int]$MaacStepsPerUpdate = 250,
+    [int]$MaacNumUpdates = 8,
     [int]$MaacLiveHeartbeatSeconds = 30,
     [switch]$Cuda = $true,
     [switch]$LiveOutput,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$SkipCompleted
 )
 
 $ErrorActionPreference = "Stop"
 
-if ($GpuProfile -eq "local4060") {
+function Clear-TrainingHost {
+    try {
+        Clear-Host
+    }
+    catch {
+        Write-Host ""
+    }
+}
+
+function Get-DedicatedCudaGpuInfo {
+    try {
+        $line = & nvidia-smi --query-gpu=name,memory.total,memory.free,driver_version --format=csv,noheader,nounits 2>$null |
+            Select-Object -First 1
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            return $null
+        }
+
+        $parts = @($line -split "," | ForEach-Object { $_.Trim() })
+        if ($parts.Count -lt 4) {
+            return $null
+        }
+
+        $totalMiB = [double]$parts[1]
+        $freeMiB = [double]$parts[2]
+        return [pscustomobject]@{
+            name = $parts[0]
+            memory_total_mib = $totalMiB
+            memory_free_mib = $freeMiB
+            dedicated_vram_gib = [math]::Round($totalMiB / 1024.0, 2)
+            free_vram_gib = [math]::Round($freeMiB / 1024.0, 2)
+            driver_version = $parts[3]
+            source = "nvidia-smi dedicated memory, not Windows shared GPU memory"
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+$DedicatedGpuInfo = if ($Cuda) { Get-DedicatedCudaGpuInfo } else { $null }
+$DetectedDedicatedVramGib = if ($null -ne $DedicatedGpuInfo) { [double]$DedicatedGpuInfo.dedicated_vram_gib } else { $null }
+$EffectiveMaxGpuVramGib = $null
+if ($Cuda) {
+    if ($MaxGpuVramGib -gt 0) {
+        $EffectiveMaxGpuVramGib = [double]$MaxGpuVramGib
+        if ($null -ne $DetectedDedicatedVramGib) {
+            $EffectiveMaxGpuVramGib = [Math]::Min($EffectiveMaxGpuVramGib, $DetectedDedicatedVramGib)
+        }
+    }
+    elseif ($null -ne $DetectedDedicatedVramGib) {
+        $EffectiveMaxGpuVramGib = $DetectedDedicatedVramGib
+    }
+}
+
+$EffectiveCudaMemoryFraction = $null
+if ($Cuda) {
+    if ($CudaMemoryFraction -gt 0) {
+        $EffectiveCudaMemoryFraction = [Math]::Min(1.0, [Math]::Max(0.1, [double]$CudaMemoryFraction))
+    }
+    elseif ($null -ne $DetectedDedicatedVramGib -and $DetectedDedicatedVramGib -gt 0) {
+        $usableGpuVramGib = [Math]::Max(1.0, ([double]$EffectiveMaxGpuVramGib - [double]$GpuVramReserveGib))
+        $EffectiveCudaMemoryFraction = [Math]::Round([Math]::Min(0.92, [Math]::Max(0.25, $usableGpuVramGib / $DetectedDedicatedVramGib)), 3)
+    }
+}
+
+$IsLocal8GbGpu = [bool]($Cuda -and $null -ne $DetectedDedicatedVramGib -and $DetectedDedicatedVramGib -le 8.5)
+if ($IsLocal8GbGpu -and -not $AllowGpuOversubscription) {
+    $MaxConcurrentScenarioJobs = 1
+    $MaxConcurrentHeavyJobs = 1
+}
+
+if ($GpuProfile -eq "local4060_fast") {
+    if (-not $PSBoundParameters.ContainsKey("TorchThreads")) { $TorchThreads = 8 }
+    if (-not $PSBoundParameters.ContainsKey("LiveProgressInterval")) { $LiveProgressInterval = 1000 }
+    if (-not $PSBoundParameters.ContainsKey("HappoHiddenSize")) { $HappoHiddenSize = 256 }
+    if (-not $PSBoundParameters.ContainsKey("MasacMaxReplayBufferGib")) { $MasacMaxReplayBufferGib = if ($IsLocal8GbGpu) { 3.5 } else { 8 } }
+    if (-not $PSBoundParameters.ContainsKey("MasacBufferSize")) { $MasacBufferSize = 20 }
+    if (-not $PSBoundParameters.ContainsKey("MasacCriticBatchSize")) { $MasacCriticBatchSize = 64 }
+    if (-not $PSBoundParameters.ContainsKey("MasacCriticTrainSteps")) { $MasacCriticTrainSteps = 1 }
+    if (-not $PSBoundParameters.ContainsKey("MasacActorSampleTimes")) { $MasacActorSampleTimes = 4 }
+    if (-not $PSBoundParameters.ContainsKey("MasacRnnHiddenDim")) { $MasacRnnHiddenDim = 256 }
+    if (-not $PSBoundParameters.ContainsKey("MasacQmixHiddenDim")) { $MasacQmixHiddenDim = 128 }
+    if (-not $PSBoundParameters.ContainsKey("MasacHyperHiddenDim")) { $MasacHyperHiddenDim = 256 }
+    if (-not $PSBoundParameters.ContainsKey("Matd3BatchSize")) { $Matd3BatchSize = 256 }
+    if (-not $PSBoundParameters.ContainsKey("Matd3BufferSize")) { $Matd3BufferSize = 4096 }
+    if (-not $PSBoundParameters.ContainsKey("Matd3HiddenSize")) { $Matd3HiddenSize = 256 }
+    if (-not $PSBoundParameters.ContainsKey("Matd3TrainInterval")) { $Matd3TrainInterval = 100 }
+    if (-not $PSBoundParameters.ContainsKey("MaacBatchSize")) { $MaacBatchSize = 256 }
+    if (-not $PSBoundParameters.ContainsKey("MaacBufferLength")) { $MaacBufferLength = 50000 }
+    if (-not $PSBoundParameters.ContainsKey("MaacHiddenSize")) { $MaacHiddenSize = 256 }
+    if (-not $PSBoundParameters.ContainsKey("MaacNumUpdates")) { $MaacNumUpdates = 4 }
+}
+elseif ($GpuProfile -eq "local4060") {
     if (-not $PSBoundParameters.ContainsKey("TorchThreads")) { $TorchThreads = 12 }
     if (-not $PSBoundParameters.ContainsKey("LiveProgressInterval")) { $LiveProgressInterval = 500 }
     if (-not $PSBoundParameters.ContainsKey("HappoHiddenSize")) { $HappoHiddenSize = 512 }
-    if (-not $PSBoundParameters.ContainsKey("MasacMaxReplayBufferGib")) { $MasacMaxReplayBufferGib = 7 }
-    if (-not $PSBoundParameters.ContainsKey("MasacBufferSize")) { $MasacBufferSize = 4 }
-    if (-not $PSBoundParameters.ContainsKey("MasacCriticBatchSize")) { $MasacCriticBatchSize = 2 }
+    if (-not $PSBoundParameters.ContainsKey("MasacMaxReplayBufferGib")) { $MasacMaxReplayBufferGib = if ($IsLocal8GbGpu) { 4 } else { 7 } }
+    if (-not $PSBoundParameters.ContainsKey("MasacBufferSize")) { $MasacBufferSize = 20 }
+    if (-not $PSBoundParameters.ContainsKey("MasacCriticBatchSize")) { $MasacCriticBatchSize = 64 }
     if (-not $PSBoundParameters.ContainsKey("MasacCriticTrainSteps")) { $MasacCriticTrainSteps = 2 }
     if (-not $PSBoundParameters.ContainsKey("MasacActorSampleTimes")) { $MasacActorSampleTimes = 8 }
-    if (-not $PSBoundParameters.ContainsKey("MasacRnnHiddenDim")) { $MasacRnnHiddenDim = 96 }
-    if (-not $PSBoundParameters.ContainsKey("MasacQmixHiddenDim")) { $MasacQmixHiddenDim = 64 }
-    if (-not $PSBoundParameters.ContainsKey("MasacHyperHiddenDim")) { $MasacHyperHiddenDim = 96 }
-    if (-not $PSBoundParameters.ContainsKey("Matd3BatchSize")) { $Matd3BatchSize = 512 }
+    if (-not $PSBoundParameters.ContainsKey("MasacRnnHiddenDim")) { $MasacRnnHiddenDim = 256 }
+    if (-not $PSBoundParameters.ContainsKey("MasacQmixHiddenDim")) { $MasacQmixHiddenDim = 128 }
+    if (-not $PSBoundParameters.ContainsKey("MasacHyperHiddenDim")) { $MasacHyperHiddenDim = 256 }
+    if (-not $PSBoundParameters.ContainsKey("Matd3BatchSize")) { $Matd3BatchSize = 1024 }
     if (-not $PSBoundParameters.ContainsKey("Matd3BufferSize")) { $Matd3BufferSize = 8192 }
     if (-not $PSBoundParameters.ContainsKey("Matd3HiddenSize")) { $Matd3HiddenSize = 384 }
     if (-not $PSBoundParameters.ContainsKey("Matd3TrainInterval")) { $Matd3TrainInterval = 50 }
-    if (-not $PSBoundParameters.ContainsKey("MaacBatchSize")) { $MaacBatchSize = 128 }
-    if (-not $PSBoundParameters.ContainsKey("MaacBufferLength")) { $MaacBufferLength = 512 }
+    if (-not $PSBoundParameters.ContainsKey("MaacBatchSize")) { $MaacBatchSize = 256 }
+    if (-not $PSBoundParameters.ContainsKey("MaacBufferLength")) { $MaacBufferLength = 50000 }
     if (-not $PSBoundParameters.ContainsKey("MaacHiddenSize")) { $MaacHiddenSize = 256 }
+}
+
+if ($ArtifactProfile -eq "full") {
+    if (-not $PSBoundParameters.ContainsKey("TraceRecordInterval")) { $TraceRecordInterval = 1 }
+    if (-not $PSBoundParameters.ContainsKey("TraceDetail")) { $TraceDetail = "full" }
+}
+else {
+    if (-not $PSBoundParameters.ContainsKey("TraceRecordInterval")) { $TraceRecordInterval = 10 }
+    if (-not $PSBoundParameters.ContainsKey("TraceDetail")) { $TraceDetail = "compact" }
 }
 
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -70,6 +189,17 @@ $TrainingConfigYaml = "CityLearn\configs\citylearn_v3_madrl_training.yaml"
 $TrainingConfigJson = "CityLearn\configs\citylearn_v3_madrl_training.json"
 $NumEnvSteps = $EpisodeTimeSteps * $Episodes
 $CudaArgs = if ($Cuda) { @("--cuda") } else { @() }
+$ArtifactArgs = @(
+    "--artifact-profile", "$ArtifactProfile",
+    "--trace-record-interval", "$TraceRecordInterval",
+    "--trace-detail", "$TraceDetail"
+)
+$CudaMemoryArgs = if ($null -ne $EffectiveCudaMemoryFraction) {
+    @("--cuda-memory-fraction", "$EffectiveCudaMemoryFraction")
+}
+else {
+    @()
+}
 $SchemaPathInput = $SchemaPath.Trim()
 
 if (-not (Test-Path -LiteralPath $Python)) {
@@ -109,12 +239,11 @@ if ($Cuda) {
     }
 }
 
-$GpuInfo = $null
-try {
-    $GpuInfo = (& nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>$null | Select-Object -First 1)
+$GpuInfo = if ($null -ne $DedicatedGpuInfo) {
+    "$($DedicatedGpuInfo.name), $($DedicatedGpuInfo.memory_total_mib) MiB dedicated, driver $($DedicatedGpuInfo.driver_version)"
 }
-catch {
-    $GpuInfo = $null
+else {
+    $null
 }
 
 if ([string]::IsNullOrWhiteSpace($SchemaPathInput)) {
@@ -148,15 +277,40 @@ if (-not (Test-Path -LiteralPath $ReadinessScript)) {
 
 $ReadinessManifest = Join-Path $ProjectRoot "outputs\dataset_audit\training_dataset_ready_manifest.json"
 $DatasetDirResolved = Split-Path -Parent $SchemaPathResolved
-Write-Host "Validating raw CityLearn dataset before MADRL normalization..." -ForegroundColor Cyan
-& $Python -B "tools\check_training_dataset_ready.py" `
-    --dataset-dir $DatasetDirResolved `
-    --buildingcsv-dir "CityLearn\data\buildingcsv" `
-    --audit-dir "outputs\dataset_audit" `
-    --manifest-out "outputs\dataset_audit\training_dataset_ready_manifest.json"
-$readinessExit = $LASTEXITCODE
-if ($readinessExit -ne 0) {
-    throw "Dataset is not ready for training normalization. See: $ReadinessManifest"
+
+# Check if a fresh manifest already exists (written in the last 6 hours with status=ready).
+# If so, skip the full gate check (which loads all 17-building CSVs via CityLearnEnv).
+# The CSV integrity was validated by the audit pipeline; the env will be tested when the
+# first training run starts.
+$skipGate = $false
+if (Test-Path -LiteralPath $ReadinessManifest) {
+    try {
+        $manifestData = Get-Content -LiteralPath $ReadinessManifest -Raw | ConvertFrom-Json
+        $generatedAt = [datetime]::Parse($manifestData.generated_at).ToUniversalTime()
+        $ageHours = ([datetime]::UtcNow - $generatedAt).TotalHours
+        if ($ageHours -le 6 -and $manifestData.status -eq "ready") {
+            $skipGate = $true
+            Write-Host "Gate check: manifest fresco ($([math]::Round($ageHours,1))h) con status=ready. Saltando recarga de CityLearnEnv." -ForegroundColor Green
+        }
+    } catch {
+        $skipGate = $false
+    }
+}
+
+if (-not $skipGate) {
+    Write-Host "Validating raw CityLearn dataset before MADRL normalization..." -ForegroundColor Cyan
+    # --skip-citylearn-load evita instanciar CityLearnEnv 3 veces desde CSV.
+    # El env se valida cuando arranque el primer run de entrenamiento.
+    & $Python -B "tools\check_training_dataset_ready.py" `
+        --dataset-dir $DatasetDirResolved `
+        --buildingcsv-dir "CityLearn\data\buildingcsv" `
+        --audit-dir "outputs\dataset_audit" `
+        --manifest-out "outputs\dataset_audit\training_dataset_ready_manifest.json" `
+        --skip-citylearn-load
+    $readinessExit = $LASTEXITCODE
+    if ($readinessExit -ne 0) {
+        throw "Dataset is not ready for training normalization. See: $ReadinessManifest"
+    }
 }
 
 $ScenarioList = if ($Scenario.ToUpperInvariant() -in @("ALL", "TODOS", "3EJES")) {
@@ -170,6 +324,13 @@ foreach ($scenarioName in $ScenarioList) {
     if ($scenarioName -notin @("E1", "E2", "E3")) {
         throw "Unknown scenario: $scenarioName. Use E1, E2, E3 or ALL."
     }
+}
+
+$MaxConcurrentScenarioJobs = [Math]::Max(1, [int]$MaxConcurrentScenarioJobs)
+$MaxConcurrentHeavyJobs = [Math]::Max(1, [int]$MaxConcurrentHeavyJobs)
+$EffectiveParallelScenarios = [bool]$ParallelScenarios -and (-not [bool]$LiveOutput) -and ($ScenarioList.Count -gt 1)
+if ([bool]$ParallelScenarios -and [bool]$LiveOutput -and $ScenarioList.Count -gt 1) {
+    Write-Host "ParallelScenarios requested, but LiveOutput requires sequential rich display. Running sequential live mode." -ForegroundColor Yellow
 }
 
 New-Item -ItemType Directory -Force -Path $OutputRootPath | Out-Null
@@ -190,6 +351,7 @@ foreach ($scenarioName in $ScenarioList) {
             "--episodes", "$Episodes",
             "--num-env-steps", "$NumEnvSteps",
             "--hidden-size", "$HappoHiddenSize",
+            "--gamma", "0.9999",
             "--torch-threads", "$TorchThreads",
             "--n-rollout-threads", "1",
             "--log-interval", "1",
@@ -197,7 +359,7 @@ foreach ($scenarioName in $ScenarioList) {
             "--live-progress-interval", "$LiveProgressInterval",
             "--live-heartbeat-seconds", "$HappoLiveHeartbeatSeconds",
             "--gpu-profile", "$GpuProfile"
-        ) + $CudaArgs + @(
+        ) + $CudaArgs + $CudaMemoryArgs + $ArtifactArgs + @(
             "--output-dir", (Join-Path $OutputRoot "happo")
         )
     }
@@ -218,14 +380,16 @@ foreach ($scenarioName in $ScenarioList) {
             "--critic-batch-size", "$MasacCriticBatchSize",
             "--critic-train-steps", "$MasacCriticTrainSteps",
             "--actor-sample-times", "$MasacActorSampleTimes",
+            "--grad-norm-clip", "1.0",
             "--rnn-hidden-dim", "$MasacRnnHiddenDim",
             "--qmix-hidden-dim", "$MasacQmixHiddenDim",
             "--hyper-hidden-dim", "$MasacHyperHiddenDim",
+            "--gamma", "0.9999",
             "--torch-threads", "$TorchThreads",
             "--live-heartbeat-seconds", "$MasacLiveHeartbeatSeconds",
             "--live-progress-interval", "$LiveProgressInterval",
             "--gpu-profile", "$GpuProfile"
-        ) + $CudaArgs + @(
+        ) + $CudaArgs + $CudaMemoryArgs + $ArtifactArgs + @(
             "--output-dir", (Join-Path $OutputRoot "masac")
         )
     }
@@ -243,13 +407,15 @@ foreach ($scenarioName in $ScenarioList) {
             "--batch-size", "$Matd3BatchSize",
             "--buffer-size", "$Matd3BufferSize",
             "--hidden-size", "$Matd3HiddenSize",
+            "--gamma", "0.9999",
+            "--max-grad-norm", "1.0",
             "--train-interval", "$Matd3TrainInterval",
             "--num-random-episodes", "1",
             "--torch-threads", "$TorchThreads",
             "--live-progress-interval", "$LiveProgressInterval",
             "--live-heartbeat-seconds", "$Matd3LiveHeartbeatSeconds",
             "--gpu-profile", "$GpuProfile"
-        ) + $CudaArgs + @(
+        ) + $CudaArgs + $CudaMemoryArgs + $ArtifactArgs + @(
             "--output-dir", (Join-Path $OutputRoot "matd3")
         )
     }
@@ -268,19 +434,19 @@ foreach ($scenarioName in $ScenarioList) {
             "--max-discrete-actions", "512",
             "--batch-size", "$MaacBatchSize",
             "--buffer-length", "$MaacBufferLength",
-            "--steps-per-update", "250",
-            "--num-updates", "8",
+            "--steps-per-update", "$MaacStepsPerUpdate",
+            "--num-updates", "$MaacNumUpdates",
             "--hidden-size", "$MaacHiddenSize",
             "--attend-heads", "4",
             "--pi-lr", "0.0003",
             "--q-lr", "0.001",
             "--tau", "0.005",
-            "--gamma", "0.99",
+            "--gamma", "0.9999",
             "--torch-threads", "$TorchThreads",
             "--live-progress-interval", "$LiveProgressInterval",
             "--live-heartbeat-seconds", "$MaacLiveHeartbeatSeconds",
             "--gpu-profile", "$GpuProfile"
-        ) + $CudaArgs + @(
+        ) + $CudaArgs + $CudaMemoryArgs + $ArtifactArgs + @(
             "--output-dir", (Join-Path $OutputRoot "maac")
         )
     }
@@ -302,7 +468,16 @@ $manifest = [ordered]@{
     torch = "torch 2.8.0+cu126"
     cuda = [bool]$Cuda
     algorithm_family = "MADRL"
-    execution = "sequential"
+    execution = if ($EffectiveParallelScenarios) { "parallel_scenarios_by_algorithm" } else { "sequential" }
+    parallelization = [ordered]@{
+        requested = [bool]$ParallelScenarios
+        effective = [bool]$EffectiveParallelScenarios
+        max_concurrent_scenario_jobs = $MaxConcurrentScenarioJobs
+        max_concurrent_heavy_jobs = $MaxConcurrentHeavyJobs
+        heavy_algorithms = @("masac", "maac")
+        strategy = "Run the same MADRL algorithm across scenarios concurrently, while keeping MASAC/MAAC limited for memory stability."
+        disabled_reason = if (-not [bool]$ParallelScenarios) { "not_requested" } elseif ([bool]$LiveOutput) { "live_output_requires_sequential_display" } elseif ($ScenarioList.Count -le 1) { "single_scenario" } else { $null }
+    }
     active_project_environment = [ordered]@{
         python = $Python
         virtual_env = $env:VIRTUAL_ENV
@@ -312,10 +487,18 @@ $manifest = [ordered]@{
         enabled = $true
         profile = $GpuProfile
         detected_gpu = $GpuInfo
+        dedicated_gpu = $DedicatedGpuInfo
+        max_gpu_vram_gib_requested = $MaxGpuVramGib
+        max_gpu_vram_gib_effective = $EffectiveMaxGpuVramGib
+        gpu_vram_reserve_gib = $GpuVramReserveGib
+        cuda_memory_fraction_requested = $CudaMemoryFraction
+        cuda_memory_fraction_effective = $EffectiveCudaMemoryFraction
+        local_8gb_safety_mode = $IsLocal8GbGpu
+        allow_gpu_oversubscription = [bool]$AllowGpuOversubscription
         cuda_device_order = $env:CUDA_DEVICE_ORDER
         pytorch_cuda_alloc_conf = $env:PYTORCH_CUDA_ALLOC_CONF
         live_progress_interval = $LiveProgressInterval
-        strategy = "RTX 4060 local profile: TF32-enabled Torch runtime, larger MADRL network/update sizes, grouped updates, reduced live-progress IO"
+        strategy = if ($GpuProfile -eq "local4060_fast") { "RTX 4060 fast local profile: TF32-enabled Torch runtime, lighter network/update sizes, lower logging IO" } else { "RTX 4060 local profile: TF32-enabled Torch runtime, larger MADRL network/update sizes, grouped updates, reduced live-progress IO" }
         note = "CityLearn environment stepping remains sequential to preserve episode accounting. GPU is used by the four MADRL neural backends."
     }
     algorithm_resource_limits = [ordered]@{
@@ -338,12 +521,22 @@ $manifest = [ordered]@{
         maac_batch_size = $MaacBatchSize
         maac_buffer_length = $MaacBufferLength
         maac_hidden_size = $MaacHiddenSize
+        maac_steps_per_update = $MaacStepsPerUpdate
+        maac_num_updates = $MaacNumUpdates
         maac_live_heartbeat_seconds = $MaacLiveHeartbeatSeconds
     }
     training_config = [ordered]@{
         yaml = $TrainingConfigYaml
         json = $TrainingConfigJson
         schema_version = 2
+    }
+    artifact_optimization = [ordered]@{
+        profile = $ArtifactProfile
+        trace_record_interval = $TraceRecordInterval
+        trace_detail = $TraceDetail
+        root_trace_csv = ($ArtifactProfile -eq "full")
+        statistical_trace_copy = ($ArtifactProfile -eq "full")
+        note = "efficient/minimal reduce per-agent trace generation and avoid duplicate heavy trace CSV mirrors."
     }
     reward = [ordered]@{
         function = "citylearn.reward_function.CityLearnV3MADRLRewardFunction"
@@ -464,7 +657,243 @@ function Get-TrainingProcessSnapshot {
     }
 }
 
+function Wait-TrainingRam {
+    param(
+        [string]$Label,
+        [double]$MinFreeGB = 1.5
+    )
+
+    $ramCheckInterval = 30
+    $ramChecks = 0
+    do {
+        $freeGB = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)
+        if ($freeGB -lt $MinFreeGB) {
+            if ($ramChecks -eq 0) {
+                Write-Host ""
+                Write-Host "  RAM libre insuficiente para ${Label}: ${freeGB} GB < ${MinFreeGB} GB requeridos." -ForegroundColor Yellow
+                Write-Host "  Reintentando cada ${ramCheckInterval}s..." -ForegroundColor DarkGray
+            }
+            $ramChecks++
+            Start-Sleep -Seconds $ramCheckInterval
+        }
+    } while ($freeGB -lt $MinFreeGB)
+
+    if ($ramChecks -gt 0) {
+        Write-Host "  RAM libre OK: ${freeGB} GB - continuando con ${Label}." -ForegroundColor Green
+    }
+}
+
+function Add-SkippedTrainingJobRecord {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Job
+    )
+
+    $jobOutputDir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
+    $skippedRecord = [ordered]@{
+        name         = $Job.name
+        scenario     = $Job.scenario
+        script       = $Job.script
+        started_at   = "skipped"
+        completed_at = (Get-Date).ToString("o")
+        exit_code    = 0
+        log          = $null
+        stderr_log   = $null
+        output_dir   = $jobOutputDir
+        skipped      = $true
+    }
+    $script:manifest.jobs += $skippedRecord
+    $script:manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $StatusPath -Encoding UTF8
+}
+
+function Test-TrainingJobCompleted {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Job
+    )
+
+    $jobOutputDir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
+    $jobResultsPath = Join-Path $ProjectRoot (Join-Path $jobOutputDir "data\results.json")
+    return (Test-Path -LiteralPath $jobResultsPath)
+}
+
+function Start-ParallelTrainingJob {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Job
+    )
+
+    $label = "$($Job.name.ToUpper())/$($Job.scenario)"
+    Wait-TrainingRam -Label $label
+
+    $logPath = Join-Path $LogDir "$($Job.scenario)_$($Job.name).log"
+    $errPath = Join-Path $LogDir "$($Job.scenario)_$($Job.name).stderr.log"
+    $commandArgs = @("-B", $Job.script) + $Job.args
+    $startedAt = Get-Date
+    $jobRecord = [ordered]@{
+        name = $Job.name
+        scenario = $Job.scenario
+        script = $Job.script
+        started_at = $startedAt.ToString("o")
+        completed_at = $null
+        exit_code = $null
+        log = $logPath
+        stderr_log = $errPath
+        output_dir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
+        command = "$Python " + ($commandArgs -join " ")
+        parallel_stage = $Job.name
+    }
+
+    $script:manifest.jobs += $jobRecord
+    $script:manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $StatusPath -Encoding UTF8
+
+    $env:FOR_DISABLE_CONSOLE_CTRL_HANDLER = "1"
+    $env:PYTHONUNBUFFERED = "1"
+    $process = Start-Process `
+        -FilePath $Python `
+        -ArgumentList $commandArgs `
+        -WorkingDirectory $ProjectRoot `
+        -RedirectStandardOutput $logPath `
+        -RedirectStandardError $errPath `
+        -WindowStyle Hidden `
+        -PassThru
+
+    Write-Host ("  START {0,-9} PID={1} log={2}" -f $label, $process.Id, $logPath) -ForegroundColor Cyan
+
+    return [pscustomobject]@{
+        Job = $Job
+        Record = $jobRecord
+        Process = $process
+        StartedAt = $startedAt
+        LogPath = $logPath
+        ErrPath = $errPath
+    }
+}
+
+function Complete-ParallelTrainingJob {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Run
+    )
+
+    $exitCode = Resolve-TrainingExitCode -Process $Run.Process -JobOutputDir $Run.Record.output_dir
+    $completedAt = Get-Date
+    $duration = ($completedAt - $Run.StartedAt).TotalMinutes
+    $Run.Record.completed_at = $completedAt.ToString("o")
+    $Run.Record.exit_code = $exitCode
+    $Run.Record.duration_minutes = [math]::Round($duration, 2)
+    $script:manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $StatusPath -Encoding UTF8
+
+    if ($exitCode -eq 0) {
+        Write-Host ("  DONE  {0,-9} exit=0 duration={1:N1} min" -f "$($Run.Job.name.ToUpper())/$($Run.Job.scenario)", $duration) -ForegroundColor Green
+    }
+    else {
+        Write-Host ("  FAIL  {0,-9} exit={1} stderr={2}" -f "$($Run.Job.name.ToUpper())/$($Run.Job.scenario)", $exitCode, $Run.ErrPath) -ForegroundColor Red
+    }
+
+    return [int]$exitCode
+}
+
+function Invoke-ParallelScenarioStage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Algorithm,
+
+        [Parameter(Mandatory = $true)]
+        [array]$StageJobs,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaxConcurrent
+    )
+
+    if ($StageJobs.Count -eq 0) {
+        return
+    }
+
+    Write-Host ""
+    Write-Host ("=== Parallel stage: {0} | jobs={1} | max_concurrent={2} ===" -f $Algorithm.ToUpper(), $StageJobs.Count, $MaxConcurrent) -ForegroundColor Magenta
+    $pending = [System.Collections.Queue]::new()
+    foreach ($stageJob in $StageJobs) {
+        $pending.Enqueue($stageJob)
+    }
+    $running = @()
+
+    while ($pending.Count -gt 0 -or $running.Count -gt 0) {
+        while ($pending.Count -gt 0 -and $running.Count -lt $MaxConcurrent) {
+            $nextJob = $pending.Dequeue()
+            if ($SkipCompleted -and (Test-TrainingJobCompleted -Job $nextJob)) {
+                Write-Host ("  SKIP  {0}/{1} already has data/results.json" -f $nextJob.name.ToUpper(), $nextJob.scenario) -ForegroundColor Yellow
+                Add-SkippedTrainingJobRecord -Job $nextJob
+                continue
+            }
+
+            $running += Start-ParallelTrainingJob -Job $nextJob
+        }
+
+        if ($running.Count -eq 0) {
+            continue
+        }
+
+        Start-Sleep -Seconds 5
+        $stillRunning = @()
+        foreach ($run in $running) {
+            try { $run.Process.Refresh() } catch {}
+            if ($run.Process.HasExited) {
+                $exitCode = Complete-ParallelTrainingJob -Run $run
+                if ($exitCode -ne 0) {
+                    $script:manifest.status = "failed"
+                    $script:manifest.completed_at = (Get-Date).ToString("o")
+                    $script:manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $ManifestPath -Encoding UTF8
+                    $script:manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $StatusPath -Encoding UTF8
+                    exit $exitCode
+                }
+            }
+            else {
+                $stillRunning += $run
+            }
+        }
+        $running = $stillRunning
+    }
+}
+
+if ($EffectiveParallelScenarios) {
+    Write-Host ""
+    Write-Host "Running optimized parallel-scenario schedule. Use -LiveOutput for sequential rich display." -ForegroundColor Green
+    foreach ($algorithmName in @("happo", "masac", "matd3", "maac")) {
+        $stageJobs = @($jobs | Where-Object { $_.name -eq $algorithmName })
+        $stageMaxConcurrent = if ($algorithmName -in @("masac", "maac")) {
+            [Math]::Min($MaxConcurrentScenarioJobs, $MaxConcurrentHeavyJobs)
+        }
+        else {
+            $MaxConcurrentScenarioJobs
+        }
+        Invoke-ParallelScenarioStage -Algorithm $algorithmName -StageJobs $stageJobs -MaxConcurrent $stageMaxConcurrent
+    }
+
+    $manifest.status = "completed"
+    $manifest.completed_at = (Get-Date).ToString("o")
+    $manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $ManifestPath -Encoding UTF8
+    $manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $StatusPath -Encoding UTF8
+    exit 0
+}
+
 foreach ($job in $jobs) {
+    # ── Skip if already completed ─────────────────────────────────────────────
+    if ($SkipCompleted) {
+        $jobOutputDir = Join-Path $OutputRoot "$($job.name)\$($job.scenario)_seed_$Seed"
+        $jobResultsPath = Join-Path $ProjectRoot (Join-Path $jobOutputDir "data\results.json")
+        if (Test-Path -LiteralPath $jobResultsPath) {
+            Write-Host ""
+            Write-Host "=== SKIP (ya completado): $($job.name.ToUpper()) | $($job.scenario) ===" -ForegroundColor Yellow
+            Write-Host "    results.json encontrado: $jobResultsPath" -ForegroundColor DarkGray
+            Add-SkippedTrainingJobRecord -Job $job
+            continue
+        }
+    }
+
+    # ── RAM guard: esperar hasta tener al menos 1.5 GB libres ────────────────
+    Wait-TrainingRam -Label "$($job.name.ToUpper())/$($job.scenario)"
+
     $logPath = Join-Path $LogDir "$($job.scenario)_$($job.name).log"
     $errPath = Join-Path $LogDir "$($job.scenario)_$($job.name).stderr.log"
     $commandArgs = @("-B", $job.script) + $job.args
@@ -490,7 +919,7 @@ foreach ($job in $jobs) {
         Push-Location $ProjectRoot
         try {
             Write-Host ""
-            Write-Host "=== CityLearn v3 MADRL: $($job.name.ToUpper()) | $($job.scenario) ===" -ForegroundColor Cyan
+            Write-Host ("=== CityLearn v3 MADRL: {0} / {1} ===" -f $job.name.ToUpper(), $job.scenario) -ForegroundColor Cyan
             Write-Host "$Python $($commandArgs -join ' ')" -ForegroundColor DarkGray
 
             # Previene forrtl: error (200) al cerrar la ventana de consola
@@ -524,7 +953,7 @@ foreach ($job in $jobs) {
                 $process.Refresh()
                 $processSnapshot = Get-TrainingProcessSnapshot -LauncherProcess $process -StartedAt $startedAt
 
-                Clear-Host
+                Clear-TrainingHost
 
                 # ── Encabezado ───────────────────────────────────────────────────────
                 $hora = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
@@ -710,7 +1139,7 @@ foreach ($job in $jobs) {
 
             $exitCode = Resolve-TrainingExitCode -Process $process -JobOutputDir $jobRecord.output_dir
 
-            Clear-Host
+            Clear-TrainingHost
             Write-Host "CITYLEARN V3 MADRL - JOB FINALIZADO" -ForegroundColor Cyan
             Write-Host ("Job: {0}/{1} | exit_code: {2}" -f $job.scenario, $job.name.ToUpper(), $exitCode)
             Write-Host ("Log completo: {0}" -f $logPath)
