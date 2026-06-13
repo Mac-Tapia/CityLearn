@@ -65,49 +65,49 @@ reward:
       cost: 0.60
   profiles:
     HAPPO:
-      profile_name: "happo_on_policy_cooperative_ctde"
+      profile_name: "happo_unified_comparable_v2"
       axis_weight_multipliers:
         flex: 1.00
         carbon: 1.00
         cost: 1.00
-      team_reward_ratio: 0.75
-      ev_weight: 0.15
+      team_reward_ratio: 0.70
+      ev_weight: 0.12
       reward_scale: 1.00
       ramp_weight: 0.35
       peak_weight: 0.45
     MASAC:
-      profile_name: "masac_entropy_regularized_dense_local_signal"
+      profile_name: "masac_unified_comparable_v2"
       axis_weight_multipliers:
-        flex: 0.95
+        flex: 1.00
         carbon: 1.00
-        cost: 1.05
-      team_reward_ratio: 0.55
-      ev_weight: 0.12
-      reward_scale: 0.80
-      ramp_weight: 0.30
-      peak_weight: 0.40
-    MATD3:
-      profile_name: "matd3_deterministic_peak_ramp_control"
-      axis_weight_multipliers:
-        flex: 1.15
-        carbon: 0.95
-        cost: 1.10
-      team_reward_ratio: 0.65
-      ev_weight: 0.10
-      reward_scale: 1.10
-      ramp_weight: 0.45
-      peak_weight: 0.50
-    MAAC:
-      profile_name: "maac_attention_coordinated_multiagent"
-      axis_weight_multipliers:
-        flex: 1.05
-        carbon: 1.05
         cost: 1.00
-      team_reward_ratio: 0.80
-      ev_weight: 0.16
+      team_reward_ratio: 0.70
+      ev_weight: 0.12
       reward_scale: 1.00
-      ramp_weight: 0.38
-      peak_weight: 0.42
+      ramp_weight: 0.35
+      peak_weight: 0.45
+    MATD3:
+      profile_name: "matd3_unified_comparable_v2"
+      axis_weight_multipliers:
+        flex: 1.00
+        carbon: 1.00
+        cost: 1.00
+      team_reward_ratio: 0.70
+      ev_weight: 0.12
+      reward_scale: 1.00
+      ramp_weight: 0.35
+      peak_weight: 0.45
+    MAAC:
+      profile_name: "maac_unified_comparable_v2"
+      axis_weight_multipliers:
+        flex: 1.00
+        carbon: 1.00
+        cost: 1.00
+      team_reward_ratio: 0.70
+      ev_weight: 0.12
+      reward_scale: 1.00
+      ramp_weight: 0.35
+      peak_weight: 0.45
 
 objectives:
   E1:
@@ -204,11 +204,11 @@ algorithms:
     cli:
       action_bins: 3
       discrete_action_mode: "axis"
-      max_replay_buffer_gib: 8
+      max_replay_buffer_gib: 2.0
       buffer_size: 2
       critic_batch_size: 1
       critic_train_steps: 1
-      actor_sample_times: 5
+      actor_sample_times: 2
       rnn_hidden_dim: 64
       qmix_hidden_dim: 32
       hyper_hidden_dim: 64
@@ -223,7 +223,7 @@ algorithms:
       discrete_action_mode: "axis"
       critic_batch_size: 1
       critic_train_steps: 1
-      actor_sample_times: 5
+      actor_sample_times: 2
       buffer_size: 2
       rnn_hidden_dim: 64
       qmix_hidden_dim: 32

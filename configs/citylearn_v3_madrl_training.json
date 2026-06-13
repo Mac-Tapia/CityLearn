@@ -19,7 +19,11 @@
     "schema_path": "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json",
     "buildings": 17,
     "total_hours": 26304,
-    "years": [2023, 2024, 2025],
+    "years": [
+      2023,
+      2024,
+      2025
+    ],
     "location": "Iquitos, Loreto, Peru",
     "lat": -3.7491,
     "lon": -73.2538,
@@ -91,56 +95,56 @@
     },
     "profiles": {
       "HAPPO": {
-        "profile_name": "happo_on_policy_cooperative_ctde",
+        "profile_name": "happo_unified_comparable_v2",
         "axis_weight_multipliers": {
           "flex": 1.0,
           "carbon": 1.0,
           "cost": 1.0
         },
-        "team_reward_ratio": 0.75,
-        "ev_weight": 0.15,
+        "team_reward_ratio": 0.7,
+        "ev_weight": 0.12,
         "reward_scale": 1.0,
         "ramp_weight": 0.35,
         "peak_weight": 0.45
       },
       "MASAC": {
-        "profile_name": "masac_entropy_regularized_dense_local_signal",
+        "profile_name": "masac_unified_comparable_v2",
         "axis_weight_multipliers": {
-          "flex": 0.95,
+          "flex": 1.0,
           "carbon": 1.0,
-          "cost": 1.05
-        },
-        "team_reward_ratio": 0.55,
-        "ev_weight": 0.12,
-        "reward_scale": 0.8,
-        "ramp_weight": 0.3,
-        "peak_weight": 0.4
-      },
-      "MATD3": {
-        "profile_name": "matd3_deterministic_peak_ramp_control",
-        "axis_weight_multipliers": {
-          "flex": 1.15,
-          "carbon": 0.95,
-          "cost": 1.1
-        },
-        "team_reward_ratio": 0.65,
-        "ev_weight": 0.1,
-        "reward_scale": 1.1,
-        "ramp_weight": 0.45,
-        "peak_weight": 0.5
-      },
-      "MAAC": {
-        "profile_name": "maac_attention_coordinated_multiagent",
-        "axis_weight_multipliers": {
-          "flex": 1.05,
-          "carbon": 1.05,
           "cost": 1.0
         },
-        "team_reward_ratio": 0.8,
-        "ev_weight": 0.16,
+        "team_reward_ratio": 0.7,
+        "ev_weight": 0.12,
         "reward_scale": 1.0,
-        "ramp_weight": 0.38,
-        "peak_weight": 0.42
+        "ramp_weight": 0.35,
+        "peak_weight": 0.45
+      },
+      "MATD3": {
+        "profile_name": "matd3_unified_comparable_v2",
+        "axis_weight_multipliers": {
+          "flex": 1.0,
+          "carbon": 1.0,
+          "cost": 1.0
+        },
+        "team_reward_ratio": 0.7,
+        "ev_weight": 0.12,
+        "reward_scale": 1.0,
+        "ramp_weight": 0.35,
+        "peak_weight": 0.45
+      },
+      "MAAC": {
+        "profile_name": "maac_unified_comparable_v2",
+        "axis_weight_multipliers": {
+          "flex": 1.0,
+          "carbon": 1.0,
+          "cost": 1.0
+        },
+        "team_reward_ratio": 0.7,
+        "ev_weight": 0.12,
+        "reward_scale": 1.0,
+        "ramp_weight": 0.35,
+        "peak_weight": 0.45
       }
     }
   },
@@ -248,11 +252,11 @@
       "cli": {
         "action_bins": 3,
         "discrete_action_mode": "axis",
-        "max_replay_buffer_gib": 8,
+        "max_replay_buffer_gib": 2.0,
         "buffer_size": 2,
         "critic_batch_size": 1,
         "critic_train_steps": 1,
-        "actor_sample_times": 5,
+        "actor_sample_times": 2,
         "rnn_hidden_dim": 64,
         "qmix_hidden_dim": 32,
         "hyper_hidden_dim": 64,
@@ -268,7 +272,7 @@
         "discrete_action_mode": "axis",
         "critic_batch_size": 1,
         "critic_train_steps": 1,
-        "actor_sample_times": 5,
+        "actor_sample_times": 2,
         "buffer_size": 2,
         "rnn_hidden_dim": 64,
         "qmix_hidden_dim": 32,

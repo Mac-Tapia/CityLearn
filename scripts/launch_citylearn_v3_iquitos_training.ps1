@@ -186,7 +186,7 @@ if ([bool]$ParallelScenarios -and [bool]$LiveOutput -and $ScenarioList.Count -gt
     Write-Host "ParallelScenarios requested, but LiveOutput requires sequential display. Running sequential live mode." -ForegroundColor Yellow
 }
 
-$MasacMaxReplayBufferGib = if ($IsLocal8GbGpu) { 3.5 } else { 8 }
+$MasacMaxReplayBufferGib = if ($IsLocal8GbGpu) { 2.0 } else { 8 }
 $HappoHiddenSize = if ($IsLocal8GbGpu) { 256 } else { 384 }
 $Matd3BatchSize = if ($IsLocal8GbGpu) { 256 } else { 512 }
 $Matd3BufferSize = if ($IsLocal8GbGpu) { 4096 } else { 50000 }
@@ -246,7 +246,7 @@ foreach ($scenarioName in $ScenarioList) {
             "--buffer-size", "2",
             "--critic-batch-size", "1",
             "--critic-train-steps", "1",
-            "--actor-sample-times", "5",
+            "--actor-sample-times", "2",
             "--rnn-hidden-dim", "64",
             "--qmix-hidden-dim", "32",
             "--hyper-hidden-dim", "64",
