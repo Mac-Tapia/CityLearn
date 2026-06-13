@@ -168,6 +168,77 @@ function Show-Processes {
     }
 }
 
+function Get-TrainingRunDir {
+    param(
+        [string]$Algorithm,
+        [string]$Scenario,
+        [int]$Seed
+    )
+
+    return (Join-Path $OutputRootPath ("{0}\{1}_seed_{2}" -f $Algorithm.ToLowerInvariant(), $Scenario, $Seed))
+}
+
+function Test-TrainingResultsArtifact {
+    param(
+        [string]$Algorithm,
+        [string]$Scenario,
+        [int]$Seed
+    )
+
+    $runDir = Get-TrainingRunDir -Algorithm $Algorithm -Scenario $Scenario -Seed $Seed
+    $candidates = @(
+        (Join-Path $runDir "results.json"),
+        (Join-Path $runDir "data\results.json")
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-AlgorithmPlanState {
+    param(
+        $Status,
+        [string]$Algorithm,
+        [string]$Scenario
+    )
+
+    $jobMatches = @($Status.jobs | Where-Object { $_.scenario -eq $Scenario -and $_.name -eq $Algorithm })
+    if ($jobMatches.Count -gt 0) {
+        $job = $jobMatches[-1]
+        if ($null -eq $job.completed_at) {
+            return "running"
+        }
+        if ($job.exit_code -eq 0) {
+            if ($job.skipped) {
+                return "skipped/done"
+            }
+            return "done"
+        }
+        return "failed"
+    }
+
+    if (Test-TrainingResultsArtifact -Algorithm $Algorithm -Scenario $Scenario -Seed ([int]$Status.seed)) {
+        return "done/artifact"
+    }
+
+    $startFrom = [string]$Status.start_from_algorithm
+    if (-not [string]::IsNullOrWhiteSpace($startFrom)) {
+        $order = @("happo", "masac", "matd3", "maac")
+        $algorithmIdx = $order.IndexOf($Algorithm.ToLowerInvariant())
+        $startIdx = $order.IndexOf($startFrom.ToLowerInvariant())
+        if ($algorithmIdx -ge 0 -and $startIdx -ge 0 -and $algorithmIdx -lt $startIdx) {
+            return "skipped/no-record"
+        }
+    }
+
+    return "queued"
+}
+
 function Show-Status {
     $status = Read-JsonFile -Path $StatusPath
     if ($null -eq $status) {
@@ -197,14 +268,7 @@ function Show-Status {
     foreach ($scenarioName in $scenarios) {
         $labels = @()
         foreach ($algorithmName in $algorithms) {
-            $jobMatches = @($status.jobs | Where-Object { $_.scenario -eq $scenarioName -and $_.name -eq $algorithmName })
-            if ($jobMatches.Count -eq 0) {
-                $labels += ("{0}:queued" -f $algorithmName)
-                continue
-            }
-
-            $job = $jobMatches[-1]
-            $state = if ($null -eq $job.completed_at) { "running" } elseif ($job.exit_code -eq 0) { "done" } else { "failed" }
+            $state = Get-AlgorithmPlanState -Status $status -Algorithm $algorithmName -Scenario $scenarioName
             $labels += ("{0}:{1}" -f $algorithmName, $state)
         }
 
@@ -214,7 +278,18 @@ function Show-Status {
     Write-Host ""
     Write-Host "Jobs iniciados" -ForegroundColor Cyan
     foreach ($job in $status.jobs) {
-        $state = if ($null -eq $job.completed_at) { "running" } elseif ($job.exit_code -eq 0) { "completed" } else { "failed" }
+        $state = if ($null -eq $job.completed_at) {
+            "running"
+        }
+        elseif ($job.exit_code -eq 0 -and $job.skipped) {
+            "skipped/done"
+        }
+        elseif ($job.exit_code -eq 0) {
+            "completed"
+        }
+        else {
+            "failed"
+        }
         $scenarioName = if ($job.scenario) { $job.scenario } else { $status.scenario }
         Write-Host ("{0,-3} {1,-8} {2,-10} start={3} end={4} exit={5}" -f $scenarioName, $job.name, $state, $job.started_at, $job.completed_at, $job.exit_code)
     }

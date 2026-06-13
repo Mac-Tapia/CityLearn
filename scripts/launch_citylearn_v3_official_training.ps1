@@ -564,6 +564,8 @@ $manifest = [ordered]@{
         not_using_marl_base_weights = $true
     }
     output_root = $OutputRoot
+    start_from_algorithm = $StartFromAlgorithm
+    algorithm_order = @("happo", "masac", "matd3", "maac")
     jobs = @()
 }
 
@@ -706,10 +708,13 @@ function Wait-TrainingRam {
 function Add-SkippedTrainingJobRecord {
     param(
         [Parameter(Mandatory = $true)]
-        $Job
+        $Job,
+
+        [string]$Reason = "already_completed"
     )
 
     $jobOutputDir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
+    $artifactCompleted = Test-TrainingJobCompleted -Job $Job
     $skippedRecord = [ordered]@{
         name         = $Job.name
         scenario     = $Job.scenario
@@ -721,6 +726,8 @@ function Add-SkippedTrainingJobRecord {
         stderr_log   = $null
         output_dir   = $jobOutputDir
         skipped      = $true
+        skip_reason  = $Reason
+        artifact_completed = $artifactCompleted
     }
     $script:manifest.jobs += $skippedRecord
     $script:manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $StatusPath -Encoding UTF8
@@ -733,8 +740,17 @@ function Test-TrainingJobCompleted {
     )
 
     $jobOutputDir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
-    $jobResultsPath = Join-Path $ProjectRoot (Join-Path $jobOutputDir "data\results.json")
-    return (Test-Path -LiteralPath $jobResultsPath)
+    $jobResultsPaths = @(
+        (Join-Path $ProjectRoot (Join-Path $jobOutputDir "data\results.json")),
+        (Join-Path $ProjectRoot (Join-Path $jobOutputDir "results.json"))
+    )
+    foreach ($jobResultsPath in $jobResultsPaths) {
+        if (Test-Path -LiteralPath $jobResultsPath) {
+            return $true
+        }
+    }
+
+    return $false
 }
 
 function Start-ParallelTrainingJob {
@@ -885,6 +901,9 @@ if ($EffectiveParallelScenarios) {
         $thisIdx = $algorithmOrder.IndexOf($algorithmName)
         if ($thisIdx -lt $startIdx) {
             Write-Host "  SKIP  $($algorithmName.ToUpper()) (StartFromAlgorithm=$StartFromAlgorithm)" -ForegroundColor DarkGray
+            foreach ($skippedJob in @($jobs | Where-Object { $_.name -eq $algorithmName })) {
+                Add-SkippedTrainingJobRecord -Job $skippedJob -Reason "start_from_algorithm"
+            }
             continue
         }
         $stageJobs = @($jobs | Where-Object { $_.name -eq $algorithmName })
