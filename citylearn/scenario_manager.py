@@ -270,11 +270,18 @@ class ScenarioManager:
             if pricing is None:
                 continue
 
-            ep = getattr(pricing, "electricity_pricing", None)
-            if ep is None:
+            # Access the FULL underlying array directly from __dict__ to avoid the
+            # episode-window slice that TimeSeriesData.__getattribute__ applies.
+            # Using the sliced property reads only the current episode window (e.g.,
+            # rows 0–8759 for episode 0), and writing that slice back truncates the
+            # full multi-year array — causing an IndexError on episode 2+ when
+            # reset_data_sets() sets start_time_step=8760 and the pricing array
+            # only has 8760 rows instead of the full simulation length.
+            ep_full = getattr(pricing, "__dict__", {}).get("_electricity_pricing", None)
+            if ep_full is None:
                 continue
 
-            prices = np.asarray(ep, dtype=float)
+            prices = np.asarray(ep_full, dtype=float)
             n = len(prices)
             if n == 0:
                 continue
@@ -291,11 +298,15 @@ class ScenarioManager:
                 daily_shape = 1.0 + 0.35 * np.sin(2.0 * np.pi * (hours_of_day - 3) / 24.0)
                 modified = prices * daily_shape * config.tariff_multiplier
 
-            # Replace the pricing array in-place on the object.
+            # Write the full modified array directly into __dict__ so the entire
+            # simulation range is preserved (not just the current episode window).
+            # np.clip matches the [0, 1] bounds applied in Pricing.__init__.
             try:
-                pricing.electricity_pricing = modified
+                pricing.__dict__["_electricity_pricing"] = np.clip(
+                    modified, 0.0, 1.0
+                ).astype("float32")
                 modified_count += 1
-            except AttributeError:
+            except (AttributeError, TypeError):
                 # Fall back to writing into the underlying DataFrame if the
                 # property has no setter (older CityLearn v2 variants).
                 data = getattr(pricing, "_data", None) or getattr(pricing, "data", None)
