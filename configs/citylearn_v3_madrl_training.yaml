@@ -39,7 +39,7 @@ official_training:
   live_progress_interval: 1000
   gpu_optimization:
     enabled: true
-    strategy: "local4060_fast: VRAM-safe sequential live run, grouped updates, reduced IO"
+    strategy: "local4060_fast: visible monitor with LiveOutput=false; 8GB VRAM allows up to 2 scenario jobs; MASAC/MAAC capped at 1; LiveOutput=true is sequential debug mode"
     parallel_envs: false
     parallel_envs_note: "Kept disabled for official comparisons because CityLearn v3 artifacts and v2/v3 baselines use one reproducible district rollout per MADRL/scenario."
   output_root: "outputs/latest_visible_training_output_root.txt"

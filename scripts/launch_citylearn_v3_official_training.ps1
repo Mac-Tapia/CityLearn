@@ -120,9 +120,18 @@ if ($Cuda) {
 }
 
 $IsLocal8GbGpu = [bool]($Cuda -and $null -ne $DetectedDedicatedVramGib -and $DetectedDedicatedVramGib -le 8.5)
+$Local8GbConcurrencyAdjusted = $false
+$Local8GbConcurrencyNote = $null
 if ($IsLocal8GbGpu -and -not $AllowGpuOversubscription) {
-    $MaxConcurrentScenarioJobs = 1
-    $MaxConcurrentHeavyJobs = 1
+    if ($MaxConcurrentScenarioJobs -gt 2) {
+        $MaxConcurrentScenarioJobs = 2
+        $Local8GbConcurrencyAdjusted = $true
+    }
+    if ($MaxConcurrentHeavyJobs -gt 1) {
+        $MaxConcurrentHeavyJobs = 1
+        $Local8GbConcurrencyAdjusted = $true
+    }
+    $Local8GbConcurrencyNote = "8GB VRAM profile allows up to 2 concurrent scenario jobs and keeps MASAC/MAAC heavy stages at 1; visible monitoring is parallel-safe, while LiveOutput=true is sequential debug display."
 }
 
 if ($GpuProfile -eq "local4060_fast") {
@@ -476,6 +485,8 @@ $manifest = [ordered]@{
         max_concurrent_heavy_jobs = $MaxConcurrentHeavyJobs
         heavy_algorithms = @("masac", "maac")
         strategy = "Run the same MADRL algorithm across scenarios concurrently, while keeping MASAC/MAAC limited for memory stability."
+        local_8gb_concurrency_adjusted = [bool]$Local8GbConcurrencyAdjusted
+        local_8gb_concurrency_note = $Local8GbConcurrencyNote
         disabled_reason = if (-not [bool]$ParallelScenarios) { "not_requested" } elseif ([bool]$LiveOutput) { "live_output_requires_sequential_display" } elseif ($ScenarioList.Count -le 1) { "single_scenario" } else { $null }
     }
     active_project_environment = [ordered]@{

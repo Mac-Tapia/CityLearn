@@ -88,9 +88,18 @@ if ($Cuda) {
 }
 
 $IsLocal8GbGpu = [bool]($Cuda -and $null -ne $DetectedDedicatedVramGib -and $DetectedDedicatedVramGib -le 8.5)
+$Local8GbConcurrencyAdjusted = $false
+$Local8GbConcurrencyNote = $null
 if ($IsLocal8GbGpu -and -not $AllowGpuOversubscription) {
-    $MaxConcurrentScenarioJobs = 1
-    $MaxConcurrentHeavyJobs = 1
+    if ($MaxConcurrentScenarioJobs -gt 2) {
+        $MaxConcurrentScenarioJobs = 2
+        $Local8GbConcurrencyAdjusted = $true
+    }
+    if ($MaxConcurrentHeavyJobs -gt 1) {
+        $MaxConcurrentHeavyJobs = 1
+        $Local8GbConcurrencyAdjusted = $true
+    }
+    $Local8GbConcurrencyNote = "8GB VRAM profile allows up to 2 concurrent scenario jobs and keeps MASAC/MAAC heavy stages at 1; visible monitoring is parallel-safe, while LiveOutput=true is sequential debug display."
 }
 
 if ($ArtifactProfile -eq "full") {
@@ -322,6 +331,8 @@ $manifest = [ordered]@{
         max_concurrent_heavy_jobs = $MaxConcurrentHeavyJobs
         heavy_algorithms = @("masac", "maac")
         strategy = "Run the same algorithm across scenarios in parallel; cap MASAC/MAAC lower because replay buffers and attention updates are heavier."
+        local_8gb_concurrency_adjusted = [bool]$Local8GbConcurrencyAdjusted
+        local_8gb_concurrency_note = $Local8GbConcurrencyNote
         disabled_reason = if (-not [bool]$ParallelScenarios) { "not_requested" } elseif ([bool]$LiveOutput) { "live_output_requires_sequential_display" } elseif ($ScenarioList.Count -le 1) { "single_scenario" } else { $null }
     }
     active_project_environment = [ordered]@{
@@ -338,7 +349,7 @@ $manifest = [ordered]@{
         lat = -3.7491
         lon = -73.2538
         grid_type = "sistema_aislado_diesel_electro_oriente"
-        ev_chargers = 50
+        ev_chargers = 185
     }
     gpu_optimization = [ordered]@{
         enabled = $true
@@ -355,7 +366,7 @@ $manifest = [ordered]@{
         cuda_device_order = $env:CUDA_DEVICE_ORDER
         pytorch_cuda_alloc_conf = $env:PYTORCH_CUDA_ALLOC_CONF
         live_progress_interval = $LiveProgressInterval
-        strategy = if ($IsLocal8GbGpu) { "8GB dedicated VRAM safety profile: one CUDA job at a time, capped per-process memory, smaller buffers." } else { "larger batches, grouped updates, reduced live-progress IO" }
+        strategy = if ($IsLocal8GbGpu) { "8GB dedicated VRAM profile: up to 2 scenario jobs, MASAC/MAAC heavy stages capped at 1, capped per-process memory, smaller buffers." } else { "larger batches, grouped updates, reduced live-progress IO" }
         note = "Environment execution sequential for reproducible Dec-POMDP rollouts."
     }
     algorithm_resource_limits = [ordered]@{
