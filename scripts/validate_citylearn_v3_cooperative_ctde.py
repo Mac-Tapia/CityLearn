@@ -103,10 +103,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path(
-            "outputs/citylearn_v3_madrl_official_full_cuda_v2/"
-            "cooperative_ctde_validation.json"
-        ),
+        default=Path("outputs/validation/cooperative_ctde_validation.json"),
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--episode-time-steps", type=int, default=2)

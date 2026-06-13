@@ -1,14 +1,15 @@
 {
   "schema_version": 2,
   "name": "citylearn_v3_madrl_training",
-  "updated_date": "2026-05-15",
+  "updated_date": "2026-06-12",
   "purpose": "Canonical CityLearn v3 MADRL training overlay for the thesis project.",
   "version_layer": "citylearn-v3-madrl",
   "simulator": "citylearn-v2",
   "dataset": {
-    "name": "citylearn_challenge_2022_phase_all_plus_evs",
-    "schema_path": "CityLearn/data/datasets/citylearn_challenge_2022_phase_all_plus_evs/schema.json",
+    "name": "citylearn_iquitos_2023_2025",
+    "schema_path": "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json",
     "buildings": 17,
+    "total_hours": 26304,
     "includes_evs": true,
     "includes_washing_machine_flexible_load": true,
     "seconds_per_time_step": 3600
@@ -24,12 +25,14 @@
     "lon": -73.2538,
     "grid_type": "sistema_aislado_diesel_electro_oriente",
     "includes_evs": true,
-    "ev_chargers": 50,
+    "ev_chargers": 185,
+    "ev_mode3_physical_units": 96,
+    "ev_pool_total": 1850,
     "includes_washing_machine_flexible_load": true,
     "seconds_per_time_step": 3600,
     "launcher": "CityLearn/scripts/launch_citylearn_v3_iquitos_training.ps1",
     "monitor": "CityLearn/scripts/monitor_citylearn_v3_iquitos_training.ps1",
-    "output_root": "outputs/citylearn_v3_madrl_iquitos"
+    "output_root": "outputs/latest_visible_training_output_root.txt"
   },
   "dec_pomdp": {
     "formulation": "decentralized_partially_observable_markov_decision_process",
@@ -53,15 +56,15 @@
     "execution": "sequential",
     "cuda": true,
     "torch_build": "torch 2.8.0+cu126",
-    "torch_threads": 12,
-    "live_progress_interval": 250,
+    "torch_threads": 8,
+    "live_progress_interval": 1000,
     "gpu_optimization": {
       "enabled": true,
-      "strategy": "larger batches, grouped updates, reduced live-progress IO",
+      "strategy": "local4060_fast: VRAM-safe sequential live run, grouped updates, reduced IO",
       "parallel_envs": false,
       "parallel_envs_note": "Kept disabled for official comparisons because CityLearn v3 artifacts and v2/v3 baselines use one reproducible district rollout per MADRL/scenario."
     },
-    "output_root": "outputs/citylearn_v3_madrl_official_full_cuda_v2",
+    "output_root": "outputs/latest_visible_training_output_root.txt",
     "launcher": "CityLearn/scripts/launch_citylearn_v3_official_training.ps1",
     "monitor": "CityLearn/scripts/monitor_citylearn_v3_official_training.ps1"
   },

@@ -16,14 +16,18 @@ import pandas as pd
 
 
 DEFAULT_V2_ROOT = Path("outputs/citylearn_v2_original_benchmark")
-DEFAULT_V3_ROOT = Path("outputs/citylearn_v3_madrl_official_full_cuda_v2")
 DEFAULT_OUTPUT = Path("outputs/comparison_citylearn_v2_vs_v3_madrl")
+LATEST_OUTPUT_POINTER = Path("outputs/latest_visible_training_output_root.txt")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--v2-root", default=str(DEFAULT_V2_ROOT))
-    parser.add_argument("--v3-root", default=str(DEFAULT_V3_ROOT))
+    parser.add_argument(
+        "--v3-root",
+        default=None,
+        help="Completed CityLearn v3 MADRL output root. Defaults to outputs/latest_visible_training_output_root.txt.",
+    )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--scenario", default="E3")
     parser.add_argument("--seed", default=0, type=int)
@@ -33,6 +37,29 @@ def parse_args() -> argparse.Namespace:
         help="Axis weights used for global ranking.",
     )
     return parser.parse_args()
+
+
+def resolve_v3_root(value: Optional[str]) -> Path:
+    if value:
+        return Path(value)
+
+    if LATEST_OUTPUT_POINTER.is_file():
+        pointer_value = LATEST_OUTPUT_POINTER.read_text(encoding="utf-8-sig").strip()
+        if pointer_value:
+            return Path(pointer_value)
+
+    candidates = [
+        path
+        for path in Path("outputs").glob("*")
+        if path.is_dir() and (path / "official_full_status.json").is_file()
+    ]
+    if candidates:
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+
+    raise SystemExit(
+        "No CityLearn v3 output root was found. Pass --v3-root or create "
+        "outputs/latest_visible_training_output_root.txt by launching training."
+    )
 
 
 def _read_csv(path: Path) -> pd.DataFrame:
@@ -285,7 +312,7 @@ def _summary_json(df: pd.DataFrame, axis_rank: pd.DataFrame, global_rank: pd.Dat
 def main() -> int:
     args = parse_args()
     v2_root = Path(args.v2_root)
-    v3_root = Path(args.v3_root)
+    v3_root = resolve_v3_root(args.v3_root)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     weights = parse_weights(args.weights)

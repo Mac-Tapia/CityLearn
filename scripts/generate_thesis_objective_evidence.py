@@ -129,10 +129,32 @@ def parse_args() -> argparse.Namespace:
 
 def parse_output_roots(items: Sequence[str]) -> Dict[str, Path]:
     if not items:
-        items = [
-            "official_local_5ep=outputs/citylearn_v3_madrl_official_full_cuda_v2",
-            "colab_pro_50ep=outputs/citylearn_v3_madrl_colab_pro_50ep",
-        ]
+        items = []
+        latest_pointer = PROJECT_ROOT / "outputs" / "latest_visible_training_output_root.txt"
+        if latest_pointer.is_file():
+            latest_value = latest_pointer.read_text(encoding="utf-8-sig").strip()
+            if latest_value:
+                items.append(f"official_active={latest_value}")
+
+        colab_root = PROJECT_ROOT / "outputs" / "citylearn_v3_madrl_colab_pro_50ep"
+        if colab_root.exists():
+            items.append("colab_pro_50ep=outputs/citylearn_v3_madrl_colab_pro_50ep")
+
+        if not items:
+            candidates = [
+                path
+                for path in (PROJECT_ROOT / "outputs").glob("*")
+                if path.is_dir() and (path / "official_full_status.json").is_file()
+            ]
+            if candidates:
+                latest = max(candidates, key=lambda path: path.stat().st_mtime)
+                items.append(f"official_latest=outputs/{latest.name}")
+
+        if not items:
+            raise ValueError(
+                "No training output root found. Pass --output-root LABEL=PATH "
+                "or launch training to create outputs/latest_visible_training_output_root.txt."
+            )
 
     output_roots: Dict[str, Path] = {}
     for item in items:

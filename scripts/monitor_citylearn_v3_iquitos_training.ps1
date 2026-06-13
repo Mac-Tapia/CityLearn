@@ -1,5 +1,5 @@
 param(
-    [string]$OutputRoot = "outputs\citylearn_v3_madrl_iquitos",
+    [string]$OutputRoot = "",
     [int]$IntervalSeconds = 30,
     [int]$LogTail = 20
 )
@@ -17,8 +17,48 @@ function Clear-MonitorHost {
 
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Resolve-Path (Join-Path $ScriptPath "..\..")
-$OutputRootPath = Join-Path $ProjectRoot $OutputRoot
-$StatusPath = Join-Path $OutputRootPath "iquitos_status.json"
+
+function Resolve-OutputRoot {
+    param([string]$Requested)
+
+    if (-not [string]::IsNullOrWhiteSpace($Requested)) {
+        return $Requested.Trim()
+    }
+
+    $latestPath = Join-Path $ProjectRoot "outputs\latest_visible_training_output_root.txt"
+    if (Test-Path -LiteralPath $latestPath) {
+        $value = (Get-Content -LiteralPath $latestPath -Raw).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value
+        }
+    }
+
+    $candidate = Get-ChildItem -LiteralPath (Join-Path $ProjectRoot "outputs") -Directory -ErrorAction SilentlyContinue |
+        Where-Object {
+            (Test-Path -LiteralPath (Join-Path $_.FullName "official_full_status.json")) -or
+            (Test-Path -LiteralPath (Join-Path $_.FullName "iquitos_status.json"))
+        } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+
+    if ($candidate) {
+        return ("outputs\" + $candidate.Name)
+    }
+
+    return $null
+}
+
+$OutputRoot = Resolve-OutputRoot -Requested $OutputRoot
+if (-not $OutputRoot) {
+    Write-Host "No se encontro OutputRoot. Lanza entrenamiento o pasa -OutputRoot." -ForegroundColor Red
+    exit 1
+}
+
+$OutputRootPath = if ([System.IO.Path]::IsPathRooted($OutputRoot)) { $OutputRoot } else { Join-Path $ProjectRoot $OutputRoot }
+$StatusPath = Join-Path $OutputRootPath "official_full_status.json"
+if (-not (Test-Path -LiteralPath $StatusPath)) {
+    $StatusPath = Join-Path $OutputRootPath "iquitos_status.json"
+}
 $LogDir = Join-Path $OutputRootPath "logs"
 
 function Read-JsonFile {
