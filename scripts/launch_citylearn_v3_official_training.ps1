@@ -143,7 +143,7 @@ if ($GpuProfile -eq "local4060_fast") {
     if (-not $PSBoundParameters.ContainsKey("TorchThreads")) { $TorchThreads = 8 }
     if (-not $PSBoundParameters.ContainsKey("LiveProgressInterval")) { $LiveProgressInterval = 1000 }
     if (-not $PSBoundParameters.ContainsKey("HappoHiddenSize")) { $HappoHiddenSize = 256 }
-    if (-not $PSBoundParameters.ContainsKey("MasacMaxReplayBufferGib")) { $MasacMaxReplayBufferGib = if ($IsLocal8GbGpu) { 2.0 } else { 8 } }
+    if (-not $PSBoundParameters.ContainsKey("MasacMaxReplayBufferGib")) { $MasacMaxReplayBufferGib = if ($IsLocal8GbGpu) { 3.0 } else { 8 } }
     if (-not $PSBoundParameters.ContainsKey("MasacBufferSize")) { $MasacBufferSize = if ($IsLocal8GbGpu) { 2 } else { 20 } }
     if (-not $PSBoundParameters.ContainsKey("MasacCriticBatchSize")) { $MasacCriticBatchSize = if ($IsLocal8GbGpu) { 1 } else { 64 } }
     if (-not $PSBoundParameters.ContainsKey("MasacCriticTrainSteps")) { $MasacCriticTrainSteps = 1 }

@@ -204,7 +204,7 @@ algorithms:
     cli:
       action_bins: 3
       discrete_action_mode: "axis"
-      max_replay_buffer_gib: 2.0
+      max_replay_buffer_gib: 3.0
       buffer_size: 2
       critic_batch_size: 1
       critic_train_steps: 1
