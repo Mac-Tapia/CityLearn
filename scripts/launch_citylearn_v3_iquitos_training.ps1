@@ -195,6 +195,7 @@ $MaacBatchSize = if ($IsLocal8GbGpu) { 256 } else { 512 }
 $MaacBufferLength = if ($IsLocal8GbGpu) { 50000 } else { 200000 }
 $MaacHiddenSize = if ($IsLocal8GbGpu) { 256 } else { 384 }
 $MaacNumUpdates = if ($IsLocal8GbGpu) { 4 } else { 8 }
+$MasacPreloadBatchDevice = "auto"
 $CudaMemoryArgs = if ($null -ne $EffectiveCudaMemoryFraction) {
     @("--cuda-memory-fraction", "$EffectiveCudaMemoryFraction")
 }
@@ -247,6 +248,7 @@ foreach ($scenarioName in $ScenarioList) {
             "--critic-batch-size", "1",
             "--critic-train-steps", "1",
             "--actor-sample-times", "2",
+            "--masac-preload-batch-device", "$MasacPreloadBatchDevice",
             "--rnn-hidden-dim", "64",
             "--qmix-hidden-dim", "32",
             "--hyper-hidden-dim", "64",
@@ -372,6 +374,7 @@ $manifest = [ordered]@{
     algorithm_resource_limits = [ordered]@{
         happo_hidden_size = $HappoHiddenSize
         masac_max_replay_buffer_gib = $MasacMaxReplayBufferGib
+        masac_preload_batch_device = $MasacPreloadBatchDevice
         matd3_batch_size = $Matd3BatchSize
         matd3_buffer_size = $Matd3BufferSize
         matd3_hidden_size = $Matd3HiddenSize

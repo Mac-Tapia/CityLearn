@@ -39,6 +39,8 @@ param(
     [int]$MasacRnnHiddenDim = 256,
     [int]$MasacQmixHiddenDim = 128,
     [int]$MasacHyperHiddenDim = 256,
+    [ValidateSet("auto", "cuda", "cpu")]
+    [string]$MasacPreloadBatchDevice = "auto",
     [int]$MasacLiveHeartbeatSeconds = 30,
     [int]$Matd3BatchSize = 256,
     [int]$Matd3BufferSize = 4096,
@@ -394,6 +396,7 @@ foreach ($scenarioName in $ScenarioList) {
             "--critic-batch-size", "$MasacCriticBatchSize",
             "--critic-train-steps", "$MasacCriticTrainSteps",
             "--actor-sample-times", "$MasacActorSampleTimes",
+            "--masac-preload-batch-device", "$MasacPreloadBatchDevice",
             "--grad-norm-clip", "1.0",
             "--rnn-hidden-dim", "$MasacRnnHiddenDim",
             "--qmix-hidden-dim", "$MasacQmixHiddenDim",
@@ -525,6 +528,7 @@ $manifest = [ordered]@{
         masac_critic_batch_size = $MasacCriticBatchSize
         masac_critic_train_steps = $MasacCriticTrainSteps
         masac_actor_sample_times = $MasacActorSampleTimes
+        masac_preload_batch_device = $MasacPreloadBatchDevice
         masac_rnn_hidden_dim = $MasacRnnHiddenDim
         masac_qmix_hidden_dim = $MasacQmixHiddenDim
         masac_hyper_hidden_dim = $MasacHyperHiddenDim

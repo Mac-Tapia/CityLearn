@@ -8,6 +8,8 @@ import sys
 import numpy as np
 import torch
 
+from masac_runtime_optimizations import install_masac_runtime_optimizations
+
 from citylearn_v3_training_common import (
     CityLearnSMACDiscreteEnv,
     add_common_citylearn_args,
@@ -47,6 +49,15 @@ def parse_args():
     parser.add_argument("--critic-batch-size", default=64, type=int)
     parser.add_argument("--critic-train-steps", default=1, type=int)
     parser.add_argument("--actor-sample-times", default=5, type=int)
+    parser.add_argument(
+        "--masac-preload-batch-device",
+        default="auto",
+        choices=("auto", "cuda", "cpu"),
+        help=(
+            "Where the optimized MASAC backend should preload replay batches. "
+            "auto tries CUDA and falls back to CPU on OOM."
+        ),
+    )
     parser.add_argument("--actor-lr", default=3.0e-4, type=float)
     parser.add_argument("--critic-lr", default=5.0e-4, type=float)
     parser.add_argument("--alpha-lr", default=3.0e-4, type=float)
@@ -103,6 +114,7 @@ def main() -> int:
     add_external_path("MARL", "src")
 
     from common.arguments import get_common_args, get_mixer_args
+    masac_backend_optimization = install_masac_runtime_optimizations()
     from runner_msac import Runner
 
     output_dir = resolve_output_dir(args.output_dir, "masac", args.scenario, args.seed)
@@ -157,6 +169,7 @@ def main() -> int:
     backend_args.critic_batch_size = max(1, int(args.critic_batch_size))
     backend_args.critic_train_steps = max(1, int(args.critic_train_steps))
     backend_args.actor_sample_times = max(1, int(args.actor_sample_times))
+    backend_args.citylearn_preload_batch_device = args.masac_preload_batch_device
     backend_args.actor_lr = float(args.actor_lr)
     backend_args.critic_lr = float(args.critic_lr)
     backend_args.grad_norm_clip = float(args.grad_norm_clip)
@@ -201,6 +214,8 @@ def main() -> int:
         "critic_batch_size": backend_args.critic_batch_size,
         "critic_train_steps": backend_args.critic_train_steps,
         "actor_sample_times": backend_args.actor_sample_times,
+        "masac_preload_batch_device": backend_args.citylearn_preload_batch_device,
+        "masac_backend_optimization": masac_backend_optimization,
         "actor_lr": backend_args.actor_lr,
         "critic_lr": backend_args.critic_lr,
         "alpha_lr": args.alpha_lr,
