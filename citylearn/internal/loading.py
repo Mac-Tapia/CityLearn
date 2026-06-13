@@ -386,7 +386,18 @@ class CityLearnLoadingService:
                     os.path.join(schema['root_directory'], charger_config['charger_simulation'])
                 ).iloc[schema['simulation_start_time_step']:schema['simulation_end_time_step'] + 1].copy()
 
-                charger_simulation = ChargerSimulation(*charger_simulation_file.values.T, noise_std=noise_std)
+                _CHARGER_SIM_COLS = [
+                    'electric_vehicle_charger_state',
+                    'electric_vehicle_id',
+                    'electric_vehicle_departure_time',
+                    'electric_vehicle_required_soc_departure',
+                    'electric_vehicle_estimated_arrival_time',
+                    'electric_vehicle_estimated_soc_arrival',
+                ]
+                _charger_sim_subset = charger_simulation_file[
+                    [c for c in _CHARGER_SIM_COLS if c in charger_simulation_file.columns]
+                ]
+                charger_simulation = ChargerSimulation(*_charger_sim_subset.values.T, noise_std=noise_std)
                 if 'electric_vehicle_current_soc' in charger_simulation_file.columns:
                     current_soc_raw = pd.to_numeric(charger_simulation_file['electric_vehicle_current_soc'], errors='coerce').to_numpy(dtype='float32')
                     current_soc = np.full(current_soc_raw.shape[0], -0.1, dtype='float32')

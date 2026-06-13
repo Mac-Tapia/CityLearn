@@ -2442,6 +2442,84 @@ def _csv_read_cache(schema_path: Optional[str]):
                 pass
 
 
+def _build_ev_sim_index(core) -> Dict[str, Dict[int, Tuple[float, float]]]:
+    """Build {ev_id: {t: (state, soc_arrival)}} from all charger simulations.
+
+    Replaces the O(n_evs × n_buildings × n_chargers) nested scan in
+    CityLearn's ``simulate_unconnected_ev_soc`` with a one-time O(T × C)
+    build and O(1) per-step per-EV lookup.  Only call after env init.
+    """
+    ev_presence: Dict[str, Dict[int, Tuple[float, float]]] = {}
+    _nan = float("nan")
+    for building in getattr(core, "buildings", []):
+        for charger in getattr(building, "electric_vehicle_chargers", None) or []:
+            sim = charger.charger_simulation
+            ev_id_arr = sim.electric_vehicle_id
+            state_arr = sim.electric_vehicle_charger_state
+            soc_arr = sim.electric_vehicle_estimated_soc_arrival
+            n_ev = len(ev_id_arr)
+            n_st = len(state_arr)
+            n_soc = len(soc_arr)
+            for t_c in range(n_ev):
+                ev_id = ev_id_arr[t_c]
+                if not isinstance(ev_id, str) or not ev_id or ev_id == "NONE":
+                    continue
+                state_v = float(state_arr[t_c]) if t_c < n_st else _nan
+                soc_v = float(soc_arr[t_c]) if t_c < n_soc else _nan
+                if ev_id not in ev_presence:
+                    ev_presence[ev_id] = {}
+                ev_presence[ev_id][t_c] = (state_v, soc_v)
+    return ev_presence
+
+
+def _install_ev_sim_fast_patch(core) -> bool:
+    """Monkey-patch runtime_service.simulate_unconnected_ev_soc with O(1) version.
+
+    Returns True if patch was installed, False if env has no EV runtime to patch.
+    """
+    runtime = getattr(core, "_runtime_service", None)
+    if runtime is None or not hasattr(runtime, "simulate_unconnected_ev_soc"):
+        return False
+    ev_index = _build_ev_sim_index(core)
+    _nan = float("nan")
+
+    def _fast_simulate_unconnected_ev_soc(self):
+        env = self.env
+        rs = getattr(env, "_ev_drift_random_state", None)
+        if rs is None:
+            episode_idx = int(getattr(getattr(env, "episode_tracker", None), "episode", 0))
+            rs = np.random.RandomState(int(env.random_seed) + episode_idx)
+            env._ev_drift_random_state = rs
+        t = env.time_step
+        if t + 1 >= env.episode_tracker.episode_time_steps:
+            return
+        drift_std = self._ev_unconnected_drift_std(env.seconds_per_time_step)
+        for ev in env.electric_vehicles:
+            ev_id = ev.name
+            ev_idx = ev_index.get(ev_id)
+            found = False
+            if ev_idx is not None:
+                curr = ev_idx.get(t)
+                nxt = ev_idx.get(t + 1)
+                if curr is not None and curr[0] == 1:
+                    found = True
+                elif nxt is not None and nxt[0] == 1:
+                    curr_state = curr[0] if curr is not None else _nan
+                    if curr_state != 1:
+                        found = True
+                        is_incoming = curr is not None and curr[0] == 2
+                        soc = curr[1] if is_incoming else nxt[1]
+                        if np.isfinite(soc) and 0.0 <= soc <= 1.0:
+                            ev.battery.force_set_soc(soc)
+            if not found and t > 0:
+                last_soc = float(ev.battery.soc[t - 1])
+                variability = float(np.clip(rs.normal(1.0, drift_std), 0.6, 1.4))
+                ev.battery.force_set_soc(float(np.clip(last_soc * variability, 0.0, 1.0)))
+
+    runtime.simulate_unconnected_ev_soc = types.MethodType(_fast_simulate_unconnected_ev_soc, runtime)
+    return True
+
+
 class CityLearnV3BackendAdapter:
     """Common adapter around ``citylearn.v3`` for external backend launchers."""
 
@@ -2515,9 +2593,37 @@ class CityLearnV3BackendAdapter:
 
         self._obs_spaces = {agent: self.env.observation_space(agent) for agent in self.agents}
         self._act_spaces = {agent: self.env.action_space(agent) for agent in self.agents}
-        self.observation_dims = {
+
+        # Static EV-type code observations appended after CityLearn's own observations.
+        # Encoding (already normalized [0,1]): moto_lineal=1/3, mototaxi=2/3, v2g=1.0
+        # One value per charger socket in the building, read from schema hardware.ev_type.
+        self._ev_type_codes_per_agent: Dict[str, np.ndarray] = {}
+        try:
+            import json as _json_mod
+            _EV_TYPE_NORM: Dict[str, float] = {'moto_lineal': 1/3, 'mototaxi': 2/3, 'v2g': 1.0, 'camioneta': 1.0}
+            _schema_data = _json_mod.loads(Path(_resolved_schema).read_text(encoding="utf-8"))
+            for _agent in self.agents:
+                _bdata = _schema_data.get("buildings", {}).get(_agent, {})
+                _chargers = _bdata.get("chargers", {})
+                _codes = [
+                    _EV_TYPE_NORM.get(
+                        _chargers[_k].get("hardware", {}).get("ev_type", "moto_lineal"), 1/3
+                    )
+                    for _k in sorted(_chargers.keys())
+                ]
+                self._ev_type_codes_per_agent[_agent] = np.array(_codes, dtype=np.float32)
+        except Exception:
+            for _agent in self.agents:
+                self._ev_type_codes_per_agent[_agent] = np.zeros(0, dtype=np.float32)
+
+        # CityLearn's own dims (before appending type codes)
+        self._citylearn_observation_dims = {
             agent: int(space.shape[0])
             for agent, space in self._obs_spaces.items()
+        }
+        self.observation_dims = {
+            agent: self._citylearn_observation_dims[agent] + len(self._ev_type_codes_per_agent.get(agent, []))
+            for agent in self.agents
         }
         self.action_dims = {
             agent: int(space.shape[0])
@@ -2599,6 +2705,8 @@ class CityLearnV3BackendAdapter:
         self._reset_reward_accumulators()
         self.reward_metadata = self._reward_metadata()
         self.normalization_metadata = self._normalization_metadata()
+        # Install O(1) EV simulation lookup (replaces O(n_evs×n_buildings×n_chargers) scan)
+        _install_ev_sim_fast_patch(self._cached_core_env)
 
     def seed(self, seed: int) -> None:
         self.seed_value = int(seed)
@@ -2708,12 +2816,16 @@ class CityLearnV3BackendAdapter:
         return output
 
     def _observation_array_for_agent(self, agent: str, observation) -> np.ndarray:
-        dim = self.observation_dims[agent]
-        array = np.asarray(observation, dtype=np.float32).reshape(-1)[:dim]
+        cl_dim = self._citylearn_observation_dims[agent]
+        array = np.asarray(observation, dtype=np.float32).reshape(-1)[:cl_dim]
 
         if self.normalize_observations:
             array = np.nan_to_num(array, nan=0.0, posinf=1.0, neginf=0.0)
             array = np.clip(array, 0.0, 1.0)
+
+        type_codes = self._ev_type_codes_per_agent.get(agent)
+        if type_codes is not None and len(type_codes) > 0:
+            array = np.concatenate([array, type_codes])
 
         return array.astype(np.float32)
 
