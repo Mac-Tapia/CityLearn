@@ -7,6 +7,11 @@ param(
     [string]$SchemaPath = "CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json",
     [int]$TorchThreads = 12,
     [int]$LiveProgressInterval = 250,
+    # -StartFromAlgorithm: skip all algorithm stages before this one.
+    # Valid values: happo (default, run all), masac, matd3, maac.
+    # Use to resume after a partial failure without re-running completed algorithms.
+    [ValidateSet("happo", "masac", "matd3", "maac")]
+    [string]$StartFromAlgorithm = "happo",
     [ValidateSet("full", "efficient", "minimal")]
     [string]$ArtifactProfile = "efficient",
     [int]$TraceRecordInterval = 10,
@@ -870,7 +875,14 @@ function Invoke-ParallelScenarioStage {
 if ($EffectiveParallelScenarios) {
     Write-Host ""
     Write-Host "Running optimized parallel-scenario schedule. Use -LiveOutput for sequential rich display." -ForegroundColor Green
-    foreach ($algorithmName in @("happo", "masac", "matd3", "maac")) {
+    $algorithmOrder = @("happo", "masac", "matd3", "maac")
+    $startIdx = $algorithmOrder.IndexOf($StartFromAlgorithm.ToLower())
+    foreach ($algorithmName in $algorithmOrder) {
+        $thisIdx = $algorithmOrder.IndexOf($algorithmName)
+        if ($thisIdx -lt $startIdx) {
+            Write-Host "  SKIP  $($algorithmName.ToUpper()) (StartFromAlgorithm=$StartFromAlgorithm)" -ForegroundColor DarkGray
+            continue
+        }
         $stageJobs = @($jobs | Where-Object { $_.name -eq $algorithmName })
         $stageMaxConcurrent = if ($algorithmName -in @("masac", "maac")) {
             [Math]::Min($MaxConcurrentScenarioJobs, $MaxConcurrentHeavyJobs)
