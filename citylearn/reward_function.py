@@ -531,80 +531,99 @@ CITYLEARN_V3_AXIS_REWARD_WEIGHTS = {
 
 
 CITYLEARN_V3_MADRL_REWARD_PROFILES = {
+    # v4 — unified_comparable_v4:
+    # · bess_cycle_weight=0.10: penaliza ciclado excesivo de BESS por paso (Wan et al., 2022;
+    #   Perez et al., 2021). Previene oscilación carga/descarga que acumula degradación
+    #   sin beneficio estratégico, observada en MAAC (×79 throughput vs MATD3).
+    # · ev_urgency_hours 4→8 h: amplía ventana de urgencia EV para dar señal de gradiente
+    #   más temprana a políticas con entropía (MASAC, MAAC) antes de la salida del vehículo
+    #   (Pinto et al., 2022; Montoya-Martínez et al., 2023).
+    # · ev_departure_deficit_weight 0.55→0.70: refuerza penalización en paso de salida.
+    # · ev_idle_deficit_weight 0.15→0.25: penaliza inactividad dentro de ventana urgente.
     "HAPPO": {
-        "profile_name": "happo_unified_comparable_v3",
+        "profile_name": "happo_unified_comparable_v4",
         "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
         "team_reward_ratio": 0.70,
         "ev_weight": 0.25,
         "reward_scale": 1.00,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "bess_cycle_weight": 0.10,
+        "bess_cycle_scale": 0.05,
         "ev_soc_tolerance": 0.05,
         "ev_soc_critical_deficit": 0.25,
-        "ev_urgency_hours": 4.0,
-        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.70,
         "ev_urgency_deficit_weight": 0.30,
-        "ev_idle_deficit_weight": 0.15,
+        "ev_idle_deficit_weight": 0.25,
     },
     "MASAC": {
-        "profile_name": "masac_unified_comparable_v3",
+        "profile_name": "masac_unified_comparable_v4",
         "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
         "team_reward_ratio": 0.70,
         "ev_weight": 0.25,
         "reward_scale": 1.00,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "bess_cycle_weight": 0.10,
+        "bess_cycle_scale": 0.05,
         "ev_soc_tolerance": 0.05,
         "ev_soc_critical_deficit": 0.25,
-        "ev_urgency_hours": 4.0,
-        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.70,
         "ev_urgency_deficit_weight": 0.30,
-        "ev_idle_deficit_weight": 0.15,
+        "ev_idle_deficit_weight": 0.25,
     },
     "MATD3": {
-        "profile_name": "matd3_unified_comparable_v3",
+        "profile_name": "matd3_unified_comparable_v4",
         "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
         "team_reward_ratio": 0.70,
         "ev_weight": 0.25,
         "reward_scale": 1.00,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "bess_cycle_weight": 0.10,
+        "bess_cycle_scale": 0.05,
         "ev_soc_tolerance": 0.05,
         "ev_soc_critical_deficit": 0.25,
-        "ev_urgency_hours": 4.0,
-        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.70,
         "ev_urgency_deficit_weight": 0.30,
-        "ev_idle_deficit_weight": 0.15,
+        "ev_idle_deficit_weight": 0.25,
     },
     "MAAC": {
-        "profile_name": "maac_unified_comparable_v3",
+        "profile_name": "maac_unified_comparable_v4",
         "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
         "team_reward_ratio": 0.70,
         "ev_weight": 0.25,
         "reward_scale": 1.00,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "bess_cycle_weight": 0.10,
+        "bess_cycle_scale": 0.05,
         "ev_soc_tolerance": 0.05,
         "ev_soc_critical_deficit": 0.25,
-        "ev_urgency_hours": 4.0,
-        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.70,
         "ev_urgency_deficit_weight": 0.30,
-        "ev_idle_deficit_weight": 0.15,
+        "ev_idle_deficit_weight": 0.25,
     },
     "MADRL": {
-        "profile_name": "generic_citylearn_v3_madrl_v3",
+        "profile_name": "generic_citylearn_v3_madrl_v4",
         "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
         "team_reward_ratio": 0.70,
         "ev_weight": 0.25,
         "reward_scale": 1.00,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "bess_cycle_weight": 0.10,
+        "bess_cycle_scale": 0.05,
         "ev_soc_tolerance": 0.05,
         "ev_soc_critical_deficit": 0.25,
-        "ev_urgency_hours": 4.0,
-        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.70,
         "ev_urgency_deficit_weight": 0.30,
-        "ev_idle_deficit_weight": 0.15,
+        "ev_idle_deficit_weight": 0.25,
     },
 }
 
@@ -638,10 +657,12 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
         self.axis_weights = self._build_axis_weights(axis_weights)
         self._last_district_import = None
         self._last_component_breakdown = {}
+        self._last_bess_socs: dict = {}
 
     def reset(self):
         self._last_district_import = None
         self._last_component_breakdown = {}
+        self._last_bess_socs = {}
 
     @property
     def metadata(self) -> Mapping[str, Any]:
@@ -811,10 +832,14 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
         reward_scale = float(self.profile.get("reward_scale", 1.0))
         team_reward_ratio = float(np.clip(self.profile.get("team_reward_ratio", 0.70), 0.0, 1.0))
         individual_ratio = 1.0 - team_reward_ratio
+        # BESS cycling penalty (v4): penaliza |ΔSOC| por paso para inhibir oscilación
+        # carga/descarga sin beneficio estratégico (Wan et al., 2022; Perez et al., 2021).
+        bess_cycle_weight = float(self.profile.get("bess_cycle_weight", 0.0))
+        bess_cycle_scale = max(float(self.profile.get("bess_cycle_scale", 0.05)), ZERO_DIVISION_PLACEHOLDER)
         rewards = []
         components = []
 
-        for observation, net_value, import_value, export_value in zip(observations, net_values, imports, exports):
+        for i, (observation, net_value, import_value, export_value) in enumerate(zip(observations, net_values, imports, exports)):
             price = max(self._safe_float(observation.get("electricity_pricing")), 0.0)
             carbon = max(self._safe_float(observation.get("carbon_intensity")), 0.0)
             price_norm = price / (price + self.price_reference) if price > 0.0 else 0.0
@@ -840,11 +865,23 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
             cost_component = -cost_penalty + cost_credit
             ev_component = ev_weight * self._ev_term(observation)
 
+            # Penalización BESS por ciclado excesivo: -w·tanh(|soc_t - soc_{t-1}| / scale)
+            bess_cycle_component = 0.0
+            if bess_cycle_weight > ZERO_DIVISION_PLACEHOLDER:
+                bess_soc_now = self._safe_float(observation.get("electrical_storage_soc"), default=np.nan)
+                bess_soc_prev = self._last_bess_socs.get(i, np.nan)
+                if np.isfinite(bess_soc_now) and np.isfinite(bess_soc_prev):
+                    bess_delta = abs(bess_soc_now - bess_soc_prev)
+                    bess_cycle_component = -bess_cycle_weight * self._soft(bess_delta, bess_cycle_scale)
+                if np.isfinite(bess_soc_now):
+                    self._last_bess_socs[i] = bess_soc_now
+
             scalar_reward = reward_scale * (
                 self.axis_weights["flex"] * flex_component
                 + self.axis_weights["carbon"] * carbon_component
                 + self.axis_weights["cost"] * cost_component
                 + ev_component
+                + bess_cycle_component
             )
             rewards.append(float(scalar_reward))
             components.append({
@@ -853,6 +890,7 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
                 "carbon": carbon_component,
                 "cost": cost_component,
                 "ev": ev_component,
+                "bess_cycle": bess_cycle_component,
             })
 
         team_reward = float(np.mean(rewards)) if rewards else 0.0
