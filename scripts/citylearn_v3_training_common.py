@@ -2609,7 +2609,7 @@ class CityLearnV3BackendAdapter:
                     _EV_TYPE_NORM.get(
                         _chargers[_k].get("hardware", {}).get("ev_type", "moto_lineal"), 1/3
                     )
-                    for _k in sorted(_chargers.keys())
+                    for _k in _chargers.keys()
                 ]
                 self._ev_type_codes_per_agent[_agent] = np.array(_codes, dtype=np.float32)
         except Exception:
