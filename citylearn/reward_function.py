@@ -497,7 +497,7 @@ class Electric_Vehicles_Reward_Function(MARL):
                     if -0.25 < soc_diff <= -0.10:
                         contributions["soc_under"] += 2 * self.weights["soc_under"] * penalty_multiplier
                     elif soc_diff <= -0.25:
-                        contributions["soc_under"] += (self.weights["soc_under"] ** 2) * penalty_multiplier
+                        contributions["soc_under"] += -abs(self.weights["soc_under"] ** 2) * penalty_multiplier
                     elif -0.10 < soc_diff <= 0.10:
                         contributions["close_soc"] += self.weights["close_soc"] * penalty_multiplier
 
@@ -532,49 +532,79 @@ CITYLEARN_V3_AXIS_REWARD_WEIGHTS = {
 
 CITYLEARN_V3_MADRL_REWARD_PROFILES = {
     "HAPPO": {
-        "profile_name": "happo_unified_comparable_v2",
+        "profile_name": "happo_unified_comparable_v3",
         "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
         "team_reward_ratio": 0.70,
-        "ev_weight": 0.12,
+        "ev_weight": 0.25,
         "reward_scale": 1.00,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 4.0,
+        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_deficit_weight": 0.30,
+        "ev_idle_deficit_weight": 0.15,
     },
     "MASAC": {
-        "profile_name": "masac_unified_comparable_v2",
+        "profile_name": "masac_unified_comparable_v3",
         "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
         "team_reward_ratio": 0.70,
-        "ev_weight": 0.12,
+        "ev_weight": 0.25,
         "reward_scale": 1.00,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 4.0,
+        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_deficit_weight": 0.30,
+        "ev_idle_deficit_weight": 0.15,
     },
     "MATD3": {
-        "profile_name": "matd3_unified_comparable_v2",
+        "profile_name": "matd3_unified_comparable_v3",
         "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
         "team_reward_ratio": 0.70,
-        "ev_weight": 0.12,
+        "ev_weight": 0.25,
         "reward_scale": 1.00,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 4.0,
+        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_deficit_weight": 0.30,
+        "ev_idle_deficit_weight": 0.15,
     },
     "MAAC": {
-        "profile_name": "maac_unified_comparable_v2",
+        "profile_name": "maac_unified_comparable_v3",
         "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
         "team_reward_ratio": 0.70,
-        "ev_weight": 0.12,
+        "ev_weight": 0.25,
         "reward_scale": 1.00,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 4.0,
+        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_deficit_weight": 0.30,
+        "ev_idle_deficit_weight": 0.15,
     },
     "MADRL": {
-        "profile_name": "generic_citylearn_v3_madrl",
+        "profile_name": "generic_citylearn_v3_madrl_v3",
         "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
         "team_reward_ratio": 0.70,
-        "ev_weight": 0.12,
+        "ev_weight": 0.25,
         "reward_scale": 1.00,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 4.0,
+        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_deficit_weight": 0.30,
+        "ev_idle_deficit_weight": 0.15,
     },
 }
 
@@ -701,7 +731,68 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
         # Acotar a [-1, 1] para equiparar escala con flex/carbon/cost (que ya usan
         # _soft()/tanh). El divisor 10.0 corresponde al peso close_soc del framework
         # base: con 1 cargador activo ev_raw ∈ [-10, +10] → tanh(ev_raw/10) ∈ (-1, 1).
-        return float(np.tanh(ev_raw / 10.0))
+        base_term = float(np.tanh(ev_raw / 10.0))
+        service_constraint = self._ev_service_constraint_term(observation)
+        return float(np.clip(base_term + service_constraint, -1.0, 1.0))
+
+    def _ev_service_constraint_term(self, observation: Mapping[str, Union[int, float, dict]]) -> float:
+        """Penalize unmet EV service obligations independently of energy KPIs."""
+
+        ev_chargers: Mapping[str, Mapping[str, Any]] = observation.get("electric_vehicles_chargers_dict", {})
+        if not ev_chargers:
+            return 0.0
+
+        tolerance = max(self._safe_float(self.profile.get("ev_soc_tolerance"), 0.05), ZERO_DIVISION_PLACEHOLDER)
+        critical_deficit = max(
+            self._safe_float(self.profile.get("ev_soc_critical_deficit"), 0.25),
+            tolerance,
+        )
+        urgency_hours = max(self._safe_float(self.profile.get("ev_urgency_hours"), 4.0), 0.0)
+        departure_weight = max(self._safe_float(self.profile.get("ev_departure_deficit_weight"), 0.55), 0.0)
+        urgency_weight = max(self._safe_float(self.profile.get("ev_urgency_deficit_weight"), 0.30), 0.0)
+        idle_weight = max(self._safe_float(self.profile.get("ev_idle_deficit_weight"), 0.15), 0.0)
+
+        departure_terms = []
+        urgency_terms = []
+        idle_terms = []
+
+        for data in ev_chargers.values():
+            if not data.get("connected", False):
+                continue
+
+            soc_now = self._safe_float(data.get("battery_soc"), default=np.nan)
+            required_soc = self._safe_float(data.get("required_soc"), default=np.nan)
+            if not np.isfinite(soc_now) or not np.isfinite(required_soc):
+                continue
+
+            deficit = max(0.0, required_soc - soc_now)
+            if deficit <= tolerance:
+                continue
+
+            hours_until_departure = max(self._safe_float(data.get("hours_until_departure"), 0.0), 0.0)
+            last_charged_kwh = self._safe_float(data.get("last_charged_kwh"), 0.0)
+            deficit_ratio = float(np.clip((deficit - tolerance) / critical_deficit, 0.0, 1.0))
+            urgency_factor = 0.0
+
+            if hours_until_departure <= urgency_hours:
+                urgency_factor = float((urgency_hours - hours_until_departure + 1.0) / (urgency_hours + 1.0))
+                urgency_terms.append(deficit_ratio * urgency_factor)
+
+            if hours_until_departure <= ZERO_DIVISION_PLACEHOLDER:
+                departure_terms.append(deficit_ratio)
+
+            if urgency_factor > 0.0 and last_charged_kwh <= ZERO_DIVISION_PLACEHOLDER:
+                idle_terms.append(deficit_ratio * urgency_factor)
+
+        def mean_or_zero(values: List[float]) -> float:
+            return 0.0 if not values else float(np.mean(values))
+
+        penalty = (
+            departure_weight * mean_or_zero(departure_terms)
+            + urgency_weight * mean_or_zero(urgency_terms)
+            + idle_weight * mean_or_zero(idle_terms)
+        )
+        return -float(np.clip(penalty, 0.0, 1.0))
 
     def calculate(self, observations: List[Mapping[str, Union[int, float, dict]]]) -> List[float]:
         net_values = [self._safe_float(o.get("net_electricity_consumption")) for o in observations]
@@ -716,7 +807,7 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
 
         peak_weight = float(self.profile.get("peak_weight", 0.45))
         ramp_weight = float(self.profile.get("ramp_weight", 0.35))
-        ev_weight = float(self.profile.get("ev_weight", 0.12))
+        ev_weight = float(self.profile.get("ev_weight", 0.25))
         reward_scale = float(self.profile.get("reward_scale", 1.0))
         team_reward_ratio = float(np.clip(self.profile.get("team_reward_ratio", 0.70), 0.0, 1.0))
         individual_ratio = 1.0 - team_reward_ratio

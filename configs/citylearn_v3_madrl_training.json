@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "name": "citylearn_v3_madrl_training",
-  "updated_date": "2026-06-12",
+  "updated_date": "2026-06-14",
   "purpose": "Canonical CityLearn v3 MADRL training overlay for the thesis project.",
   "version_layer": "citylearn-v3-madrl",
   "simulator": "citylearn-v2",
@@ -95,56 +95,80 @@
     },
     "profiles": {
       "HAPPO": {
-        "profile_name": "happo_unified_comparable_v2",
+        "profile_name": "happo_unified_comparable_v3",
         "axis_weight_multipliers": {
           "flex": 1.0,
           "carbon": 1.0,
           "cost": 1.0
         },
         "team_reward_ratio": 0.7,
-        "ev_weight": 0.12,
+        "ev_weight": 0.25,
         "reward_scale": 1.0,
         "ramp_weight": 0.35,
-        "peak_weight": 0.45
+        "peak_weight": 0.45,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 4.0,
+        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_deficit_weight": 0.3,
+        "ev_idle_deficit_weight": 0.15
       },
       "MASAC": {
-        "profile_name": "masac_unified_comparable_v2",
+        "profile_name": "masac_unified_comparable_v3",
         "axis_weight_multipliers": {
           "flex": 1.0,
           "carbon": 1.0,
           "cost": 1.0
         },
         "team_reward_ratio": 0.7,
-        "ev_weight": 0.12,
+        "ev_weight": 0.25,
         "reward_scale": 1.0,
         "ramp_weight": 0.35,
-        "peak_weight": 0.45
+        "peak_weight": 0.45,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 4.0,
+        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_deficit_weight": 0.3,
+        "ev_idle_deficit_weight": 0.15
       },
       "MATD3": {
-        "profile_name": "matd3_unified_comparable_v2",
+        "profile_name": "matd3_unified_comparable_v3",
         "axis_weight_multipliers": {
           "flex": 1.0,
           "carbon": 1.0,
           "cost": 1.0
         },
         "team_reward_ratio": 0.7,
-        "ev_weight": 0.12,
+        "ev_weight": 0.25,
         "reward_scale": 1.0,
         "ramp_weight": 0.35,
-        "peak_weight": 0.45
+        "peak_weight": 0.45,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 4.0,
+        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_deficit_weight": 0.3,
+        "ev_idle_deficit_weight": 0.15
       },
       "MAAC": {
-        "profile_name": "maac_unified_comparable_v2",
+        "profile_name": "maac_unified_comparable_v3",
         "axis_weight_multipliers": {
           "flex": 1.0,
           "carbon": 1.0,
           "cost": 1.0
         },
         "team_reward_ratio": 0.7,
-        "ev_weight": 0.12,
+        "ev_weight": 0.25,
         "reward_scale": 1.0,
         "ramp_weight": 0.35,
-        "peak_weight": 0.45
+        "peak_weight": 0.45,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 4.0,
+        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_deficit_weight": 0.3,
+        "ev_idle_deficit_weight": 0.15
       }
     }
   },
