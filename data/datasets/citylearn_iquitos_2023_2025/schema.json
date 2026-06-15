@@ -28049,7 +28049,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -28080,7 +28083,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -28111,7 +28117,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -28119,7 +28128,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L3"
           }
@@ -28142,7 +28151,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -28150,7 +28162,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L1"
           }
@@ -28234,7 +28246,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -28265,7 +28280,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -28296,7 +28314,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -28327,7 +28348,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -28358,7 +28382,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -28389,7 +28416,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -28397,7 +28427,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L3"
           }
@@ -28481,7 +28511,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -28512,7 +28545,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -28543,7 +28579,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -28574,7 +28613,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -28605,7 +28647,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -28636,7 +28681,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -28667,7 +28715,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -28675,7 +28726,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L1"
           }
@@ -28698,7 +28749,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -28706,7 +28760,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L2"
           }
@@ -28790,7 +28844,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -28821,7 +28878,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -28852,7 +28912,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -28883,7 +28946,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -28914,7 +28980,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -28945,7 +29014,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -28953,7 +29025,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L3"
           }
@@ -29044,7 +29116,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29075,7 +29150,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -29106,7 +29184,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -29114,7 +29195,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L3"
           }
@@ -29198,7 +29279,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29229,7 +29313,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29260,7 +29347,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29291,7 +29381,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29322,7 +29415,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29353,7 +29449,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29384,7 +29483,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29415,7 +29517,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29446,7 +29551,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29477,7 +29585,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29508,7 +29619,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29539,7 +29653,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29570,7 +29687,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29601,7 +29721,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29632,7 +29755,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29663,7 +29789,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29694,7 +29823,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29725,7 +29857,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29756,7 +29891,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29787,7 +29925,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29818,7 +29959,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29849,7 +29993,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -29880,7 +30027,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -29911,7 +30061,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -29942,7 +30095,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -29973,7 +30129,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -30004,7 +30163,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -30035,7 +30197,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -30066,7 +30231,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -30074,7 +30242,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L2"
           }
@@ -30097,7 +30265,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -30105,7 +30276,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L3"
           }
@@ -30128,7 +30299,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -30136,7 +30310,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L1"
           }
@@ -30159,7 +30333,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -30167,7 +30344,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L2"
           }
@@ -30251,7 +30428,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30282,7 +30462,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30313,7 +30496,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30344,7 +30530,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30375,7 +30564,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30406,7 +30598,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30437,7 +30632,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30468,7 +30666,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30499,7 +30700,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30530,7 +30734,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30561,7 +30768,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30592,7 +30802,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30623,7 +30836,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30654,7 +30870,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30685,7 +30904,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30716,7 +30938,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30747,7 +30972,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30778,7 +31006,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30809,7 +31040,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30840,7 +31074,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30871,7 +31108,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30902,7 +31142,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30933,7 +31176,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30964,7 +31210,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -30995,7 +31244,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -31026,7 +31278,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31057,7 +31312,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31088,7 +31346,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31119,7 +31380,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31150,7 +31414,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31181,7 +31448,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31212,7 +31482,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31243,7 +31516,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31274,7 +31550,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31305,7 +31584,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31336,7 +31618,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31367,7 +31652,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31398,7 +31686,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31429,7 +31720,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31460,7 +31754,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -31468,7 +31765,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L1"
           }
@@ -31491,7 +31788,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -31499,7 +31799,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L2"
           }
@@ -31522,7 +31822,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -31530,7 +31833,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L3"
           }
@@ -31614,7 +31917,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -31645,7 +31951,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -31676,7 +31985,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -31707,7 +32019,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -31738,7 +32053,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -31769,7 +32087,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -31800,7 +32121,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -31831,7 +32155,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -31862,7 +32189,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31893,7 +32223,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31924,7 +32257,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31955,7 +32291,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -31986,7 +32325,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -32017,7 +32359,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -32025,7 +32370,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L2"
           }
@@ -32048,7 +32393,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -32056,7 +32404,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L3"
           }
@@ -32079,7 +32427,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -32087,7 +32438,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L1"
           }
@@ -32110,7 +32461,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -32118,7 +32472,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L2"
           }
@@ -32202,7 +32556,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -32233,7 +32590,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -32264,7 +32624,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -32295,7 +32658,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -32326,7 +32692,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -32357,7 +32726,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -32388,7 +32760,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -32419,7 +32794,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -32450,7 +32828,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -32481,7 +32862,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -32489,7 +32873,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L1"
           }
@@ -32573,7 +32957,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -32604,7 +32991,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -32635,7 +33025,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -32643,7 +33036,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L3"
           }
@@ -32666,7 +33059,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -32674,7 +33070,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L1"
           }
@@ -32697,7 +33093,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -32705,7 +33104,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L2"
           }
@@ -32728,7 +33127,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -32736,7 +33138,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L3"
           }
@@ -32827,7 +33229,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -32858,7 +33263,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -32889,7 +33297,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -32897,7 +33308,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L3"
           }
@@ -32988,7 +33399,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -33019,7 +33433,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -33050,7 +33467,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -33058,7 +33478,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L3"
           }
@@ -33142,7 +33562,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -33173,7 +33596,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -33204,7 +33630,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -33235,7 +33664,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -33266,7 +33698,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -33297,7 +33732,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -33328,7 +33766,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -33359,7 +33800,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -33390,7 +33834,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -33421,7 +33868,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -33452,7 +33902,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -33460,7 +33913,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L2"
           }
@@ -33544,7 +33997,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -33575,7 +34031,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -33606,7 +34065,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -33614,7 +34076,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L3"
           }
@@ -33637,7 +34099,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -33645,7 +34110,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L1"
           }
@@ -33729,7 +34194,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -33760,7 +34228,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -33791,7 +34262,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -33822,7 +34296,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -33853,7 +34330,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -33884,7 +34364,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -33915,7 +34398,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -33946,7 +34432,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -33954,7 +34443,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L2"
           }
@@ -34038,7 +34527,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -34069,7 +34561,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -34100,7 +34595,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -34131,7 +34629,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -34162,7 +34663,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -34193,7 +34697,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -34224,7 +34731,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -34255,7 +34765,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -34286,7 +34799,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -34317,7 +34833,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -34348,7 +34867,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -34356,7 +34878,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L2"
           }
@@ -34440,7 +34962,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -34471,7 +34996,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -34502,7 +35030,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -34533,7 +35064,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -34564,7 +35098,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -34595,7 +35132,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 13.04
+            "nominal_current_a": 13.04,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 3.0,
@@ -34626,7 +35166,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -34657,7 +35200,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -34688,7 +35234,10 @@
             "phase_connection": "L3",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -34719,7 +35268,10 @@
             "phase_connection": "L1",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 17.39
+            "nominal_current_a": 17.39,
+            "v2g_capable": false,
+            "power_flow_direction": "charge_only",
+            "v2g_max_export_power_kw": 0.0
           },
           "attributes": {
             "nominal_power": 4.0,
@@ -34750,7 +35302,10 @@
             "phase_connection": "L2",
             "voltage_v": 230,
             "min_current_a": 6,
-            "nominal_current_a": 32.17
+            "nominal_current_a": 32.17,
+            "v2g_capable": true,
+            "power_flow_direction": "bidirectional_v2g",
+            "v2g_max_export_power_kw": 7.4
           },
           "attributes": {
             "nominal_power": 7.4,
@@ -34758,7 +35313,7 @@
             "charger_type": 3,
             "max_charging_power": 7.4,
             "min_charging_power": 1.38,
-            "max_discharging_power": 0.0,
+            "max_discharging_power": 7.4,
             "min_discharging_power": 0.0,
             "phase_connection": "L2"
           }

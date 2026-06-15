@@ -101,6 +101,7 @@ def _citylearn_v3_smoke(schema_path: Optional[str] = None, scenario: Optional[st
 
     try:
         observations, infos = env.reset(seed=0)
+        ev_action_bounds = _ev_action_bounds_summary(env)
         actions = {
             agent: np.zeros(env.action_space(agent).shape, dtype=np.float32)
             for agent in env.possible_agents
@@ -112,6 +113,7 @@ def _citylearn_v3_smoke(schema_path: Optional[str] = None, scenario: Optional[st
             "schema_path": schema_path,
             "scenario": scenario,
             "environment": describe_environment(env),
+            "ev_action_bounds": ev_action_bounds,
             "initial_observation_agents": sorted(observations),
             "next_observation_agents": sorted(next_observations),
             "info_agents": sorted(infos),
@@ -123,6 +125,62 @@ def _citylearn_v3_smoke(schema_path: Optional[str] = None, scenario: Optional[st
         }
     finally:
         env.close()
+
+
+def _ev_action_bounds_summary(env: Any) -> Dict[str, Any]:
+    citylearn_env = getattr(env, "env", env)
+    buildings = getattr(citylearn_env, "buildings", [])
+    errors: list[str] = []
+    total_chargers = 0
+    bidirectional_action_count = 0
+    charge_only_action_count = 0
+
+    for building in buildings:
+        action_names = list(getattr(building, "active_actions", []) or [])
+        action_space = getattr(building, "action_space", None)
+        low_values = [] if action_space is None else getattr(action_space, "low", [])
+        low_limits = list(low_values)
+        chargers = list(getattr(building, "electric_vehicle_chargers", []) or [])
+
+        for charger in chargers:
+            total_chargers += 1
+            charger_id = getattr(charger, "charger_id", "")
+            action_name = f"electric_vehicle_storage_{charger_id}"
+            max_discharge = float(getattr(charger, "max_discharging_power", 0.0) or 0.0)
+
+            if action_name not in action_names:
+                errors.append(f"{getattr(building, 'name', 'building')}/{charger_id}: missing EV action")
+                continue
+
+            action_index = action_names.index(action_name)
+            low_limit = float(low_limits[action_index])
+
+            if max_discharge > 0.0:
+                bidirectional_action_count += 1
+                if low_limit != -1.0:
+                    errors.append(
+                        f"{getattr(building, 'name', 'building')}/{charger_id}: V2G action low={low_limit}, expected=-1.0"
+                    )
+            else:
+                charge_only_action_count += 1
+                if low_limit != 0.0:
+                    errors.append(
+                        f"{getattr(building, 'name', 'building')}/{charger_id}: charge-only action low={low_limit}, expected=0.0"
+                    )
+
+    if bidirectional_action_count != 31:
+        errors.append(f"environment: bidirectional EV actions={bidirectional_action_count}, expected=31")
+    if charge_only_action_count != 154:
+        errors.append(f"environment: charge-only EV actions={charge_only_action_count}, expected=154")
+
+    if errors:
+        raise RuntimeError("; ".join(errors[:20]))
+
+    return {
+        "total_chargers": total_chargers,
+        "bidirectional_ev_action_low_minus_1": bidirectional_action_count,
+        "charge_only_ev_action_low_0": charge_only_action_count,
+    }
 
 
 def _schema_dataset_integrity(schema_path: Optional[str] = None) -> Dict[str, Any]:
@@ -181,6 +239,9 @@ def _schema_dataset_integrity(schema_path: Optional[str] = None) -> Dict[str, An
     errors: list[str] = []
     charger_count = 0
     v2g_charger_count = 0
+    camioneta_charger_count = 0
+    camioneta_v2g_charger_count = 0
+    non_camioneta_v2g_charger_count = 0
     charger_active_session_count = 0
     pricing_files: set[str] = set()
 
@@ -212,9 +273,26 @@ def _schema_dataset_integrity(schema_path: Optional[str] = None) -> Dict[str, An
             charger_count += 1
             charger_file = dataset_dir / str(charger.get("charger_simulation", ""))
             attrs = charger.get("attributes", {})
+            hardware = charger.get("hardware", {})
+            ev_type = str(hardware.get("ev_type", "") or "").strip().lower()
             max_discharge = float(attrs.get("max_discharging_power", 0.0) or 0.0)
             if max_discharge > 0.0:
                 v2g_charger_count += 1
+            if ev_type == "camioneta":
+                camioneta_charger_count += 1
+                if max_discharge > 0.0:
+                    camioneta_v2g_charger_count += 1
+                else:
+                    errors.append(f"{building_name}/{charger_name}: camioneta charger is not V2G-enabled")
+                if hardware.get("v2g_capable") is not True:
+                    errors.append(f"{building_name}/{charger_name}: camioneta charger missing v2g_capable=true")
+                if hardware.get("power_flow_direction") != "bidirectional_v2g":
+                    errors.append(f"{building_name}/{charger_name}: camioneta charger is not bidirectional_v2g")
+                if float(hardware.get("v2g_max_export_power_kw", 0.0) or 0.0) != max_discharge:
+                    errors.append(f"{building_name}/{charger_name}: camioneta V2G export power does not match max_discharging_power")
+            elif max_discharge > 0.0:
+                non_camioneta_v2g_charger_count += 1
+                errors.append(f"{building_name}/{charger_name}: non-camioneta charger has V2G discharge enabled")
 
             if not charger_file.exists():
                 errors.append(f"{building_name}/{charger_name}: missing charger CSV {charger_file.name}")
@@ -313,6 +391,12 @@ def _schema_dataset_integrity(schema_path: Optional[str] = None) -> Dict[str, An
         errors.append("schema: no active EV actions")
     if charger_count == 0:
         errors.append("schema: no building chargers")
+    if camioneta_charger_count != 31:
+        errors.append(f"schema: camioneta chargers={camioneta_charger_count}, expected=31")
+    if camioneta_v2g_charger_count != 31:
+        errors.append(f"schema: camioneta V2G chargers={camioneta_v2g_charger_count}, expected=31")
+    if non_camioneta_v2g_charger_count != 0:
+        errors.append(f"schema: non-camioneta V2G chargers={non_camioneta_v2g_charger_count}, expected=0")
     if charger_active_session_count == 0:
         errors.append("charger CSVs: no active EV sessions")
 
@@ -326,6 +410,9 @@ def _schema_dataset_integrity(schema_path: Optional[str] = None) -> Dict[str, An
         "included_buildings": len(buildings),
         "chargers": charger_count,
         "v2g_chargers": v2g_charger_count,
+        "camioneta_chargers": camioneta_charger_count,
+        "camioneta_v2g_chargers": camioneta_v2g_charger_count,
+        "non_camioneta_v2g_chargers": non_camioneta_v2g_charger_count,
         "electric_vehicle_definitions": len(ev_defs),
         "active_ev_session_rows": charger_active_session_count,
         "active_ev_observations": active_ev_observations,
