@@ -87,7 +87,9 @@ The project default v3 environment uses:
 
 - Schema: `citylearn_iquitos_2023_2025/schema.json`
 - Agents: 17 real Iquitos buildings
-- EV: charger actions/observations embedded in the building spaces
+- EV: 185 Mode 3 charger loadpoints embedded in the building spaces; 31
+  camioneta loadpoints are V2G bidirectional and non-camioneta EVs remain
+  charge-only
 - Reward: collaborative team mean by default
 - CTDE state: concatenated local observations
 - KPIs: full CityLearn v2 `evaluate_v2` table, plus thesis summary extraction
@@ -154,7 +156,8 @@ Precision AC=2.0, Ultra-Freezers=0.8, splits=2.8).
 Full pipeline documentation: `docs/dataset_construction_pipeline.md`.
 
 The validated environment exposes 17 agents, EV actions/observations,
-`state_dim=879`, and full CityLearn v2 KPI tables.
+`state_dim=1856`, 31 bidirectional V2G EV actions and full CityLearn v2 KPI
+tables.
 
 ## Training Observation Normalization
 
@@ -167,9 +170,8 @@ audits remain traceable to source data.
 The common training adapter uses CityLearn's `NormalizedObservationWrapper` by
 default. Temporal observations such as `month`, `day_type` and `hour` are
 encoded cyclically, then active observations are min-max scaled to `[0, 1]`.
-For the 17-building Iquitos EV schema this changes the training CTDE state from
-the raw `state_dim=879` to a normalized `state_dim=930`, while EV
-observations/actions remain exposed.
+For the 17-building Iquitos EV schema, EV observations/actions remain exposed
+and the validated CTDE state dimension is `state_dim=1856`.
 
 Use `--raw-observations` only to reproduce legacy raw-input runs. The default
 training behavior is normalized input:
@@ -266,6 +268,8 @@ python -B CityLearn\scripts\run_citylearn_v3_env_smoke.py `
 The readiness check verifies:
 
 - CityLearn v3 builds the Iquitos 17-building + EV Dec-POMDP.
+- The dataset exposes exactly 31 camioneta V2G loadpoints and 154 charge-only
+  EV loadpoints.
 - CTDE global state and local decentralized observations/actions are exposed.
 - Full CityLearn v2 KPI tables are available.
 - MARLlib imports and registers `citylearn_v3`.
