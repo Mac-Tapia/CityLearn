@@ -12,6 +12,12 @@ param(
     # Use to resume after a partial failure without re-running completed algorithms.
     [ValidateSet("happo", "masac", "matd3", "maac")]
     [string]$StartFromAlgorithm = "happo",
+    # -EndAtAlgorithm: skip all algorithm stages after this one.
+    # Default "maac" preserves existing behavior (run through the end).
+    # Combine with -StartFromAlgorithm to isolate a single algorithm in one
+    # process, e.g. for running several algorithms in separate parallel jobs.
+    [ValidateSet("happo", "masac", "matd3", "maac")]
+    [string]$EndAtAlgorithm = "maac",
     [ValidateSet("full", "efficient", "minimal")]
     [string]$ArtifactProfile = "efficient",
     [int]$TraceRecordInterval = 10,
@@ -565,6 +571,7 @@ $manifest = [ordered]@{
     }
     output_root = $OutputRoot
     start_from_algorithm = $StartFromAlgorithm
+    end_at_algorithm = $EndAtAlgorithm
     algorithm_order = @("happo", "masac", "matd3", "maac")
     jobs = @()
 }
@@ -897,12 +904,20 @@ if ($EffectiveParallelScenarios) {
     Write-Host "Running optimized parallel-scenario schedule. Use -LiveOutput for sequential rich display." -ForegroundColor Green
     $algorithmOrder = @("happo", "masac", "matd3", "maac")
     $startIdx = $algorithmOrder.IndexOf($StartFromAlgorithm.ToLower())
+    $endIdx = $algorithmOrder.IndexOf($EndAtAlgorithm.ToLower())
     foreach ($algorithmName in $algorithmOrder) {
         $thisIdx = $algorithmOrder.IndexOf($algorithmName)
         if ($thisIdx -lt $startIdx) {
             Write-Host "  SKIP  $($algorithmName.ToUpper()) (StartFromAlgorithm=$StartFromAlgorithm)" -ForegroundColor DarkGray
             foreach ($skippedJob in @($jobs | Where-Object { $_.name -eq $algorithmName })) {
                 Add-SkippedTrainingJobRecord -Job $skippedJob -Reason "start_from_algorithm"
+            }
+            continue
+        }
+        if ($thisIdx -gt $endIdx) {
+            Write-Host "  SKIP  $($algorithmName.ToUpper()) (EndAtAlgorithm=$EndAtAlgorithm)" -ForegroundColor DarkGray
+            foreach ($skippedJob in @($jobs | Where-Object { $_.name -eq $algorithmName })) {
+                Add-SkippedTrainingJobRecord -Job $skippedJob -Reason "end_at_algorithm"
             }
             continue
         }
