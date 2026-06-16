@@ -23,6 +23,10 @@ param(
     [int]$TraceRecordInterval = 10,
     [ValidateSet("full", "compact")]
     [string]$TraceDetail = "compact",
+    # Linux/Docker only: caps each parallel job's plain-text log at this size,
+    # rotating into "<scenario>_<algo>-00001.log", "-00002.log", etc. via
+    # coreutils `split` (piped, not applied to the Windows code path).
+    [long]$LogChunkMaxBytes = 10MB,
     [bool]$ParallelScenarios = $true,
     [ValidateRange(1, 16)]
     [int]$MaxConcurrentScenarioJobs = 2,
@@ -201,8 +205,11 @@ else {
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path (Join-Path $ScriptPath "..\..")).Path
 $VenvRoot = Join-Path $ProjectRoot ".venv39-citylearn-v3"
-$VenvScripts = Join-Path $VenvRoot "Scripts"
-$Python = Join-Path $VenvScripts "python.exe"
+# uv/venv layout differs by OS: Windows uses Scripts\python.exe, Linux/macOS use bin/python.
+$VenvBinDirName = if ($IsWindows) { "Scripts" } else { "bin" }
+$PythonExeName = if ($IsWindows) { "python.exe" } else { "python" }
+$VenvScripts = Join-Path $VenvRoot $VenvBinDirName
+$Python = Join-Path $VenvScripts $PythonExeName
 $OutputRootPath = Join-Path $ProjectRoot $OutputRoot
 $LogDir = Join-Path $OutputRootPath "logs"
 $ManifestPath = Join-Path $OutputRootPath "official_full_manifest.json"
@@ -695,7 +702,15 @@ function Wait-TrainingRam {
     $ramCheckInterval = 30
     $ramChecks = 0
     do {
-        $freeGB = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)
+        if ($IsWindows) {
+            $freeGB = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)
+        }
+        else {
+            # Linux/Docker: no Win32_OperatingSystem CIM class; read /proc/meminfo instead.
+            $availLine = Get-Content -LiteralPath "/proc/meminfo" -ErrorAction SilentlyContinue |
+                Where-Object { $_ -match "^MemAvailable:\s*(\d+)" }
+            $freeGB = if ($availLine -match "(\d+)") { [math]::Round([double]$Matches[1] / 1MB, 2) } else { [double]::PositiveInfinity }
+        }
         if ($freeGB -lt $MinFreeGB) {
             if ($ramChecks -eq 0) {
                 Write-Host ""
@@ -780,8 +795,8 @@ function Start-ParallelTrainingJob {
         started_at = $startedAt.ToString("o")
         completed_at = $null
         exit_code = $null
-        log = $logPath
-        stderr_log = $errPath
+        log = if ($IsWindows) { $logPath } else { Join-Path $LogDir "$($Job.scenario)_$($Job.name)-*.log" }
+        stderr_log = if ($IsWindows) { $errPath } else { "merged into log (stdout+stderr combined via 2>&1)" }
         output_dir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
         command = "$Python " + ($commandArgs -join " ")
         parallel_stage = $Job.name
@@ -792,14 +807,31 @@ function Start-ParallelTrainingJob {
 
     $env:FOR_DISABLE_CONSOLE_CTRL_HANDLER = "1"
     $env:PYTHONUNBUFFERED = "1"
-    $process = Start-Process `
-        -FilePath $Python `
-        -ArgumentList $commandArgs `
-        -WorkingDirectory $ProjectRoot `
-        -RedirectStandardOutput $logPath `
-        -RedirectStandardError $errPath `
-        -WindowStyle Hidden `
-        -PassThru
+    if ($IsWindows) {
+        $process = Start-Process `
+            -FilePath $Python `
+            -ArgumentList $commandArgs `
+            -WorkingDirectory $ProjectRoot `
+            -RedirectStandardOutput $logPath `
+            -RedirectStandardError $errPath `
+            -WindowStyle Hidden `
+            -PassThru
+    }
+    else {
+        # Linux/Docker: pipe combined stdout+stderr through coreutils `split` so no
+        # single log file grows past $LogChunkMaxBytes. Produces plain-text chunks
+        # named "<scenario>_<algo>-00001.log", "-00002.log", etc. in $LogDir.
+        $logChunkPrefix = Join-Path $LogDir "$($Job.scenario)_$($Job.name)-"
+        $quotedPythonArgs = ($commandArgs | ForEach-Object { "'" + ($_ -replace "'", "'\''") + "'" }) -join " "
+        # pipefail makes bash's own exit code reflect $Python's exit code, not
+        # split's (split exits 0 once the pipe closes, regardless of python's result).
+        $shellCommand = "set -o pipefail; exec '$Python' $quotedPythonArgs 2>&1 | split -b $LogChunkMaxBytes --numeric-suffixes=1 --suffix-length=5 --additional-suffix=.log - '$logChunkPrefix'"
+        $process = Start-Process `
+            -FilePath "bash" `
+            -ArgumentList @("-c", $shellCommand) `
+            -WorkingDirectory $ProjectRoot `
+            -PassThru
+    }
 
     Write-Host ("  START {0,-9} PID={1} log={2}" -f $label, $process.Id, $logPath) -ForegroundColor Cyan
 
@@ -988,14 +1020,16 @@ foreach ($job in $jobs) {
             # Fuerza flush inmediato de stdout/stderr a los archivos de log
             $env:PYTHONUNBUFFERED = "1"
 
-            $process = Start-Process `
-                -FilePath $Python `
-                -ArgumentList $commandArgs `
-                -WorkingDirectory $ProjectRoot `
-                -RedirectStandardOutput $logPath `
-                -RedirectStandardError $errPath `
-                -WindowStyle Hidden `
-                -PassThru
+            $startProcessArgs = @{
+                FilePath = $Python
+                ArgumentList = $commandArgs
+                WorkingDirectory = $ProjectRoot
+                RedirectStandardOutput = $logPath
+                RedirectStandardError = $errPath
+                PassThru = $true
+            }
+            if ($IsWindows) { $startProcessArgs["WindowStyle"] = "Hidden" }
+            $process = Start-Process @startProcessArgs
 
             $liveProgressPath = Join-Path $ProjectRoot (Join-Path $jobRecord.output_dir "live_progress.json")
             $episodeSummaryPath = Join-Path $ProjectRoot (Join-Path $jobRecord.output_dir "figures\tables\episode_summary.csv")
@@ -1215,15 +1249,17 @@ foreach ($job in $jobs) {
     }
     else {
         $env:FOR_DISABLE_CONSOLE_CTRL_HANDLER = "1"
-        $process = Start-Process `
-            -FilePath $Python `
-            -ArgumentList $commandArgs `
-            -WorkingDirectory $ProjectRoot `
-            -RedirectStandardOutput $logPath `
-            -RedirectStandardError $errPath `
-            -WindowStyle Hidden `
-            -Wait `
-            -PassThru
+        $startProcessArgs = @{
+            FilePath = $Python
+            ArgumentList = $commandArgs
+            WorkingDirectory = $ProjectRoot
+            RedirectStandardOutput = $logPath
+            RedirectStandardError = $errPath
+            Wait = $true
+            PassThru = $true
+        }
+        if ($IsWindows) { $startProcessArgs["WindowStyle"] = "Hidden" }
+        $process = Start-Process @startProcessArgs
         $exitCode = Resolve-TrainingExitCode -Process $process -JobOutputDir $jobRecord.output_dir
     }
     $completedAt = Get-Date
