@@ -2,8 +2,6 @@ import unittest
 import numpy as np
 import pandas as pd
 from unittest.mock import patch, MagicMock
-import math
-from typing import Union, Tuple, List, Mapping, Any, Iterable
 
 from citylearn.energy_model import Battery
 

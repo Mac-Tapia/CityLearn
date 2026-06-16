@@ -1,7 +1,6 @@
 from collections import defaultdict
 from copy import deepcopy
 from enum import Enum
-import hashlib
 import importlib
 import logging
 import os
@@ -11,20 +10,17 @@ from gymnasium import Env, spaces
 import datetime
 import numpy as np
 import pandas as pd
-import random
 from citylearn.base import Environment, EpisodeTracker
 from citylearn.building import Building, DynamicsBuilding
-from citylearn.cost_function import CostFunction
-from citylearn.data import CarbonIntensity, DataSet, OfflineDataError, ChargerSimulation, EnergySimulation, LogisticRegressionOccupantParameters, Pricing, WashingMachineSimulation, Weather
+from citylearn.data import DataSet, OfflineDataError, EnergySimulation
 from citylearn.electric_vehicle import ElectricVehicle
-from citylearn.energy_model import Battery, PV, WashingMachine
+from citylearn.energy_model import WashingMachine
 from citylearn.exporter import EpisodeExporter
 from citylearn.internal.kpi import CityLearnKPIService
 from citylearn.internal.loading import CityLearnLoadingService
 from citylearn.internal.runtime import CityLearnRuntimeService
 from citylearn.utilities import parse_bool
 from citylearn.reward_function import (
-    MultiBuildingRewardFunction,
     RewardFunction,
 )
 from citylearn.utilities import FileHandler
@@ -482,10 +478,10 @@ class CityLearnEnv(Environment, Env):
             shared_observations = []
 
             for i, b in enumerate(self.buildings):
-                for l, h, s in zip(b.observation_space.low, b.observation_space.high, b.active_observations):
+                for low, high, s in zip(b.observation_space.low, b.observation_space.high, b.active_observations):
                     if i == 0 or s not in self.shared_observations or s not in shared_observations:
-                        low_limit.append(l)
-                        high_limit.append(h)
+                        low_limit.append(low)
+                        high_limit.append(high)
 
                     else:
                         pass

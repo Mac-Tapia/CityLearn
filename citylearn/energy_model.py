@@ -1,16 +1,15 @@
-import ast
 import logging
 import math
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Tuple, Union
+from typing import Any, Iterable, List, Mapping, Tuple, Union
 import numpy as np
 import pandas as pd
 try:
     from PySAM import Pvwattsv8
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
     Pvwattsv8 = None
-from citylearn.base import Environment, EpisodeTracker
-from citylearn.data import DataSet, ZERO_DIVISION_PLACEHOLDER, EnergySimulation, WashingMachineSimulation
+from citylearn.base import Environment
+from citylearn.data import DataSet, ZERO_DIVISION_PLACEHOLDER, WashingMachineSimulation
 np.seterr(divide='ignore', invalid='ignore')
 
 LOGGER = logging.getLogger()
@@ -262,7 +261,8 @@ class HeatPump(ElectricDevice):
         cooling_cop = (`t_target_cooling` + 273.15)*`efficiency`/(outdoor_dry_bulb_temperature - `t_target_cooling`)
         """
 
-        c_to_k = lambda x: x + 273.15
+        def c_to_k(x):
+            return x + 273.15
         outdoor_dry_bulb_temperature = np.array(outdoor_dry_bulb_temperature)
 
         if heating:
@@ -1276,8 +1276,6 @@ class Battery(StorageDevice, ElectricDevice):
             return 0.0
 
         degraded_cap = max(self.degraded_capacity, ZERO_DIVISION_PLACEHOLDER)
-        nom_power = max(getattr(self, 'nominal_power', None) or degraded_cap, ZERO_DIVISION_PLACEHOLDER)
-
         # Base linear term (original behaviour)
         base_degrade = self.capacity_loss_coefficient * self.capacity * energy_flow / (2.0 * degraded_cap)
 

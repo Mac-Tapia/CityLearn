@@ -1,6 +1,5 @@
 from typing import Any, List, Mapping, Tuple, Union
 import numpy as np
-from citylearn.building import Building
 from citylearn.data import ZERO_DIVISION_PLACEHOLDER
 import logging
 

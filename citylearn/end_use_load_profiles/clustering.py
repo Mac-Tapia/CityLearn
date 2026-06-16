@@ -44,7 +44,7 @@ class Clustering:
     @maximum_clusters.setter
     def maximum_clusters(self, value: int):
         value = math.ceil(len(self.bldg_ids)/2) if value is None else value
-        assert 2 <= value < len(self.bldg_ids), f'maximum_clusters must be > 2 and less than number of bldg_ids'
+        assert 2 <= value < len(self.bldg_ids), 'maximum_clusters must be > 2 and less than number of bldg_ids'
         self.__maximum_clusters = value
 
     @sum_of_squares_error_minimum_percent_change.setter
@@ -95,13 +95,6 @@ class Clustering:
     def get_optimal_clusters(self, clusters: List[int], sum_of_squares_error: List[float], calinski_harabasz_score: List[float], silhouette_score: List[float], davies_bouldin_score: List[float]) -> int:
         assert len(clusters) == len(sum_of_squares_error) == len(calinski_harabasz_score) == len(davies_bouldin_score), \
             'clusters and scores lists must have equal lengths.'
-        sum_of_squares_error_change = (
-            np.array(sum_of_squares_error, dtype=float)[:-1] 
-            - np.array(sum_of_squares_error, dtype=float)[1:]
-        )*100/np.array(sum_of_squares_error, dtype=float)[:-1]
-        sse_candidates = np.array(clusters[:-1], dtype=int)[
-            sum_of_squares_error_change < self.sum_of_squares_error_minimum_percent_change
-        ]
         optimal_clusters = np.nanmean([
             # sse_candidates.min() if len(sse_candidates) > 0 else np.nan,
             clusters[np.array(calinski_harabasz_score, dtype=float).argmax()],

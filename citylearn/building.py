@@ -15,7 +15,7 @@ from citylearn.energy_model import Battery, ElectricDevice, ElectricHeater, Heat
 from citylearn.internal.building_ops import BuildingOpsService
 from citylearn.occupant import LogisticRegressionOccupant, Occupant
 from citylearn.power_outage import PowerOutage
-from citylearn.preprocessing import Normalize, PeriodicNormalization
+from citylearn.preprocessing import PeriodicNormalization
 from citylearn.utilities import parse_bool
 
 LOGGER = logging.getLogger()
@@ -1848,7 +1848,7 @@ class Building(Environment):
 
             elif key == 'cooling_storage_electricity_consumption':
                 demand = self.energy_simulation.__getattr__(
-                    f'cooling_demand',
+                    'cooling_demand',
                     start_time_step=self.episode_tracker.simulation_start_time_step,
                     end_time_step=self.episode_tracker.simulation_end_time_step
                 )
@@ -1858,7 +1858,7 @@ class Building(Environment):
 
             elif key == 'heating_storage_electricity_consumption':
                 demand = self.energy_simulation.__getattr__(
-                    f'heating_demand',
+                    'heating_demand',
                     start_time_step=self.episode_tracker.simulation_start_time_step,
                     end_time_step=self.episode_tracker.simulation_end_time_step
                 )
@@ -1869,7 +1869,7 @@ class Building(Environment):
 
             elif key == 'dhw_storage_electricity_consumption':
                 demand = self.energy_simulation.__getattr__(
-                    f'dhw_demand',
+                    'dhw_demand',
                     start_time_step=self.episode_tracker.simulation_start_time_step,
                     end_time_step=self.episode_tracker.simulation_end_time_step
                 )
@@ -2573,7 +2573,6 @@ class Building(Environment):
                     'dhw_demand': self.energy_simulation.dhw_demand[t],
                     'solar_generation': self.energy_simulation.solar_generation[t],
                     'indoor_temperature': self.energy_simulation.indoor_dry_bulb_temperature[t],
-                    'solar_generation': self.energy_simulation.solar_generation[t]
                 },
                 'weather': {
                     'outdoor_temperature': self.weather.outdoor_dry_bulb_temperature[t],
@@ -2894,8 +2893,8 @@ class LSTMDynamicsBuilding(DynamicsBuilding):
         # leave out the oldest set of observations and keep only the previous n
         # where n is the lookback + 1 (to include current time step observations)
         self.dynamics._model_input = [
-            l[-self.dynamics.lookback:] + [(observations[k] - min_) / (max_ - min_)]
-            for l, k, min_, max_ in zip(
+            history[-self.dynamics.lookback:] + [(observations[k] - min_) / (max_ - min_)]
+            for history, k, min_, max_ in zip(
                 self.dynamics._model_input,
                 self.dynamics.input_observation_names,
                 self.dynamics.input_normalization_minimum,

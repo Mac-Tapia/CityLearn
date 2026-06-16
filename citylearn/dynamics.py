@@ -133,7 +133,7 @@ class LSTMDynamics(Dynamics, (torch.nn if torch is not None else _TorchNNPlaceho
         except RuntimeError:
             self.load_state_dict(torch.load(self.filepath, map_location=torch.device('cpu'))['model_state_dict'])
         
-        except:
+        except Exception:
             self.load_state_dict(torch.load(self.filepath))
 
         self._hidden_state = self.init_hidden(1)

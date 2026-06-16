@@ -7,9 +7,9 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import numpy as np
+import numpy as np  # noqa: E402
 
-from citylearn_v3_training_common import CityLearnV3BackendAdapter, write_training_artifacts
+from citylearn_v3_training_common import CityLearnV3BackendAdapter, write_training_artifacts  # noqa: E402
 
 
 class _Args:

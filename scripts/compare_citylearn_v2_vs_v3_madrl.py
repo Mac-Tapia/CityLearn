@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Dict, List, Mapping, Optional
 
 import matplotlib
 
@@ -191,7 +191,7 @@ def build_rankings(df: pd.DataFrame, weights: Mapping[str, float]) -> tuple[pd.D
         .agg(
             normalized_score=("normalized_score", "mean"),
             available_kpis=("value", lambda s: int(pd.to_numeric(s, errors="coerce").notna().sum())),
-            improved_kpis=("improved_vs_baseline", lambda s: int((s == True).sum())),
+            improved_kpis=("improved_vs_baseline", lambda s: int(s.sum())),
             total_kpis=("kpi", "count"),
         )
         .reset_index()

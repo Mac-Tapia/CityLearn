@@ -1335,7 +1335,8 @@ def statistical_hypothesis_rows(
     - Wilcoxon SR   : comparacion por pares, muestras pareadas (comparaciones_wilcoxon_madrl.csv)
     """
     omnibus_by_scope = {str(row.get("scope")): row for row in omnibus_rows}
-    best_alg = lambda scope: str(omnibus_by_scope.get(scope, {}).get("best_algorithm_by_median_gain", ""))
+    def best_alg(scope: str) -> str:
+        return str(omnibus_by_scope.get(scope, {}).get("best_algorithm_by_median_gain", ""))
 
     def best_mwu_pairs(scope: str, algorithm: str) -> List[Mapping[str, Any]]:
         return [
@@ -1908,7 +1909,6 @@ def per_building_agent_comparison_rows(building_kpi_rows: Sequence[Mapping[str, 
 
     rows: List[Dict[str, Any]] = []
     for (building, cost_function, axis, scenario), record in sorted(cell.items()):
-        values = [v for algo in ALGORITHM_NAMES for v in [record.get(algo)] if v is not None]
         available_algorithms = [algo for algo in ALGORITHM_NAMES if record.get(algo) is not None]
         best_algorithm = ""
         if available_algorithms:

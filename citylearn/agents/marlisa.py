@@ -8,12 +8,12 @@ from citylearn.citylearn import CityLearnEnv
 try:
     from sklearn.decomposition import PCA
     from sklearn.linear_model import LinearRegression
-except (ModuleNotFoundError, ImportError) as e:
+except (ModuleNotFoundError, ImportError):
     raise Exception("This functionality requires you to install scikit-learn. You can install scikit-learn by : pip scikit-learn, or for more detailed instructions please visit https://scikit-learn.org/stable/install.html.")
 
 try:
     import torch
-except (ModuleNotFoundError, ImportError) as e:
+except (ModuleNotFoundError, ImportError):
     raise Exception("This functionality requires you to install torch. You can install torch by : pip install torch torchvision, or for more detailed instructions please visit https://pytorch.org.")
 
 from citylearn.agents.sac import SAC
@@ -385,7 +385,7 @@ class MARLISA(SAC):
         e = self.regression_encoders[index][0:]
         del e[net_electricity_consumption_ix]
         
-        return np.array([j for j in np.hstack(e*np.array(o, dtype=float)) if j != None], dtype=float).tolist()
+        return np.array([j for j in np.hstack(e*np.array(o, dtype=float)) if j is not None], dtype=float).tolist()
 
     def get_encoded_regression_targets(self, index: int, observations: List[float]) -> float:
         net_electricity_consumption_ix = self.observation_names[index].index('net_electricity_consumption')

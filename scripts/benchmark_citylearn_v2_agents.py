@@ -14,8 +14,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Dict, List, Mapping, Sequence
 
 import numpy as np
 
@@ -35,7 +34,6 @@ from citylearn.agents.sac import SAC
 from citylearn.citylearn import CityLearnEnv
 from citylearn.dec_pomdp import DEFAULT_17_BUILDING_EV_SCHEMA
 from citylearn.scenario_manager import ScenarioManager
-from citylearn.v3.objectives import evaluate_objectives
 
 from citylearn_v3_training_common import (
     _as_float,

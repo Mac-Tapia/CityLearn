@@ -7,7 +7,7 @@ try:
     import torch
     import torch.nn as nn
     import torch.optim as optim
-except (ModuleNotFoundError, ImportError) as e:
+except (ModuleNotFoundError, ImportError):
     raise Exception("This functionality requires you to install torch. You can install torch by : pip install torch torchvision, or for more detailed instructions please visit https://pytorch.org.")
 
 from citylearn.agents.rbc import RBC
@@ -222,7 +222,7 @@ class SAC(RLC):
     def get_normalized_observations(self, index: int, observations: List[float]) -> npt.NDArray[np.float64]:
         try:
             return (np.array(observations, dtype = float) - self.norm_mean[index])/self.norm_std[index]
-        except:
+        except Exception:
             # self.time_step >= self.standardize_start_time_step and self.batch_size <= len(self.replay_buffer[i])
             logging.debug('obs:',observations)
             logging.debug('mean:',self.norm_mean[index])
@@ -231,7 +231,7 @@ class SAC(RLC):
             assert False
 
     def get_encoded_observations(self, index: int, observations: List[float]) -> npt.NDArray[np.float64]:
-        return np.array([j for j in np.hstack(self.encoders[index]*np.array(observations, dtype=float)) if j != None], dtype = float)
+        return np.array([j for j in np.hstack(self.encoders[index]*np.array(observations, dtype=float)) if j is not None], dtype = float)
 
     def set_networks(self, internal_observation_count: int = None):
         internal_observation_count = 0 if internal_observation_count is None else internal_observation_count

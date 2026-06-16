@@ -164,7 +164,8 @@ def _train(model: LSTM, train_loader: DataLoader, val_loader: DataLoader, optimi
     # train_loss_list.append(loss_train.item())
     train_loss_list = loss_train.item()
 
-    flatten = lambda l: [item for sublist in l for item in sublist]
+    def flatten(values):
+        return [item for sublist in values for item in sublist]
     ypred_train = flatten(ypred_train)
     ylab_train = flatten(ylab_train)
 

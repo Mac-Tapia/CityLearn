@@ -7,7 +7,6 @@ import sys
 import logging
 from pathlib import Path
 import time
-import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -24,8 +23,8 @@ def main(step=96):
     print(f"TIMESTEPS ==>\t{step}\n\n")
 
     render_root = ROOT / "SimulationData"
-    start = time.time();
-    env_creation_start = time.time();
+    start = time.time()
+    env_creation_start = time.time()
     env = CityLearnEnv(
         str(SCHEMA),
         central_agent=True,
@@ -36,27 +35,27 @@ def main(step=96):
         random_seed=0,
         debug_timing=True,
     )
-    env_creation_end = time.time();
+    env_creation_end = time.time()
     try:
-        print("running");
-        agent_creation_start = time.time();
+        print("running")
+        agent_creation_start = time.time()
         controller = Agent(env)
-        agent_creation_end = time.time();
+        agent_creation_end = time.time()
 
-        env_reset_start = time.time();
+        env_reset_start = time.time()
         observations, _ = env.reset()
-        env_reset_end = time.time();
+        env_reset_end = time.time()
 
-        total_retrieval_time = 0.0;
-        total_retrievals = 0;
-        total_render_time = .0;
+        total_retrieval_time = 0.0
+        total_retrievals = 0
+        total_render_time = .0
 
         while not env.terminated:
             actions = controller.predict(observations, deterministic=True)
             observations, _, terminated, truncated, info = env.step(actions)
             total_retrieval_time += float(info.get('building_observations_retrieval_time', 0.0))
             total_render_time += float(info.get('partial_render_time', 0.0))
-            total_retrievals += 1;
+            total_retrievals += 1
             if terminated or truncated:
                 break
 
@@ -65,7 +64,7 @@ def main(step=96):
         print(f"Exports written to: {outputs_path}")
     finally:
         env.close()
-    end = time.time();
+    end = time.time()
 
     env_creation = env_creation_end - env_creation_start
     agent_creation = agent_creation_end - agent_creation_start

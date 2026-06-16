@@ -987,7 +987,7 @@ class WashingMachineSimulation(TimeSeriesData):
         def parse_profile(profile_str):
             try:
                 return np.array(eval(profile_str), dtype=float)
-            except:
+            except Exception:
                 return np.array([], dtype=float)
             
 
