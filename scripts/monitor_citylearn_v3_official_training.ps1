@@ -1,7 +1,8 @@
 param(
     [string]$OutputRoot = "",
     [int]$IntervalSeconds = 30,
-    [int]$LogTail = 20
+    [int]$LogTail = 20,
+    [switch]$KeepOpenOnComplete
 )
 
 $ErrorActionPreference = "Continue"
@@ -187,8 +188,8 @@ function Test-TrainingResultsArtifact {
 
     $runDir = Get-TrainingRunDir -Algorithm $Algorithm -Scenario $Scenario -Seed $Seed
     $candidates = @(
-        (Join-Path $runDir "results.json"),
-        (Join-Path $runDir "data\results.json")
+        (Join-Path $runDir "data\results.json"),
+        (Join-Path $runDir "results.json")
     )
 
     foreach ($candidate in $candidates) {
@@ -308,6 +309,10 @@ function Get-ActiveJob {
         }
     }
 
+    if ([string]$status.status -eq "completed") {
+        return $null
+    }
+
     $latestProgressJob = $null
     $latestProgressTime = $null
     foreach ($job in $jobs) {
@@ -364,28 +369,28 @@ function Show-TrainingProgress {
     Write-Host "Directorio: $($job.output_dir)"
 
     $runDir = Join-Path $ProjectRoot $job.output_dir
-    $resultsPath = Join-Path $runDir "results.json"
-    $summaryPath = Join-Path $runDir "training_summary.json"
-    $tracePath = Join-Path $runDir "trace.csv"
-    $timeseriesPath = Join-Path $runDir "timeseries.csv"
+    $resultsPath = Join-Path $runDir "data\results.json"
+    $summaryPath = Join-Path $runDir "data\training_summary.json"
+    $tracePath = Join-Path $runDir "data\trace.csv"
+    $timeseriesPath = Join-Path $runDir "data\timeseries.csv"
     $liveProgressPath = Join-Path $runDir "live_progress.json"
-    $checkpointManifestPath = Join-Path $runDir "checkpoint_manifest.json"
+    $checkpointManifestPath = Join-Path $runDir "data\checkpoint_manifest.json"
     $status = Read-JsonFile -Path $StatusPath
 
     if (-not (Test-Path -LiteralPath $resultsPath)) {
-        $resultsPath = Join-Path $runDir "data\results.json"
+        $resultsPath = Join-Path $runDir "results.json"
     }
     if (-not (Test-Path -LiteralPath $summaryPath)) {
-        $summaryPath = Join-Path $runDir "data\training_summary.json"
+        $summaryPath = Join-Path $runDir "training_summary.json"
     }
     if (-not (Test-Path -LiteralPath $tracePath)) {
-        $tracePath = Join-Path $runDir "data\trace.csv"
+        $tracePath = Join-Path $runDir "trace.csv"
     }
     if (-not (Test-Path -LiteralPath $timeseriesPath)) {
-        $timeseriesPath = Join-Path $runDir "data\timeseries.csv"
+        $timeseriesPath = Join-Path $runDir "timeseries.csv"
     }
     if (-not (Test-Path -LiteralPath $checkpointManifestPath)) {
-        $checkpointManifestPath = Join-Path $runDir "data\checkpoint_manifest.json"
+        $checkpointManifestPath = Join-Path $runDir "checkpoint_manifest.json"
     }
 
     $summary = Read-JsonFile -Path $summaryPath
@@ -653,6 +658,16 @@ while ($true) {
     Show-Artifacts
     Show-Logs
     Write-Host ""
-    Write-Host "  Actualiza cada $IntervalSeconds s. Presiona Ctrl+C para salir." -ForegroundColor DarkGray
+    if ($statusNow -and [string]$statusNow.status -eq "completed" -and -not $KeepOpenOnComplete) {
+        Write-Host "  Entrenamiento completado. Cerrando monitor automaticamente." -ForegroundColor Green
+        exit 0
+    }
+
+    if ($statusNow -and [string]$statusNow.status -eq "completed") {
+        Write-Host "  Entrenamiento completado. Monitor abierto por -KeepOpenOnComplete; presiona Ctrl+C para salir." -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host "  Actualiza cada $IntervalSeconds s. Presiona Ctrl+C para salir." -ForegroundColor DarkGray
+    }
     Start-Sleep -Seconds $IntervalSeconds
 }

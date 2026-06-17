@@ -567,9 +567,11 @@ $manifest = [ordered]@{
         profile = $ArtifactProfile
         trace_record_interval = $TraceRecordInterval
         trace_detail = $TraceDetail
-        root_trace_csv = ($ArtifactProfile -eq "full")
-        statistical_trace_copy = ($ArtifactProfile -eq "full")
-        note = "efficient/minimal reduce per-agent trace generation and avoid duplicate heavy trace CSV mirrors."
+        legacy_root_artifacts = $false
+        root_trace_csv = $false
+        statistical_comparison_artifacts = $false
+        statistical_trace_copy = $false
+        note = "Canonical per-run artifacts are written under data/; duplicate root mirrors and statistical_comparison exports require explicit Python flags."
     }
     reward = [ordered]@{
         function = "citylearn.reward_function.CityLearnV3MADRLRewardFunction"
@@ -762,14 +764,9 @@ function Test-TrainingJobCompleted {
     )
 
     $jobOutputDir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
-    $jobResultsPaths = @(
-        (Join-Path $ProjectRoot (Join-Path $jobOutputDir "data\results.json")),
-        (Join-Path $ProjectRoot (Join-Path $jobOutputDir "results.json"))
-    )
-    foreach ($jobResultsPath in $jobResultsPaths) {
-        if (Test-Path -LiteralPath $jobResultsPath) {
-            return $true
-        }
+    $jobResultsPath = Join-Path $ProjectRoot (Join-Path $jobOutputDir "data\results.json")
+    if (Test-Path -LiteralPath $jobResultsPath) {
+        return $true
     }
 
     return $false

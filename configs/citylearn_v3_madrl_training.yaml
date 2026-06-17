@@ -340,11 +340,12 @@ algorithms:
 artifacts:
   per_run_directory: "outputs/<experiment>/<madrl>/<scenario>_seed_<seed>"
   required_files:
-    - "results.json"
-    - "training_summary.json"
-    - "timeseries.csv"
-    - "trace.csv"
-    - "checkpoint_manifest.json"
+    - "data/results.json"
+    - "data/training_summary.json"
+    - "data/timeseries.csv"
+    - "data/trace.csv"
+    - "data/checkpoint_manifest.json"
+    - "data/artifact_audit.json"
   required_directories:
     - "data"
     - "checkpoints"

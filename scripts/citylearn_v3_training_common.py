@@ -100,9 +100,25 @@ def add_common_citylearn_args(parser: argparse.ArgumentParser) -> None:
         default="full",
         choices=("full", "efficient", "minimal"),
         help=(
-            "Artifact write profile. full preserves legacy root/data CSV mirrors; "
-            "efficient keeps canonical data CSVs and avoids duplicate heavy traces; "
-            "minimal writes the smallest compatible artifact set."
+            "Artifact write profile. full records full-detail canonical data CSVs; "
+            "efficient samples detailed trace rows; minimal writes the smallest compatible artifact set. "
+            "Per-run JSON/CSV artifacts are canonical under data/ unless --legacy-root-artifacts is set."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-root-artifacts",
+        action="store_true",
+        help=(
+            "Also write legacy root-level mirrors such as results.json and timeseries.csv. "
+            "Disabled by default to avoid duplicate/conflicting traceability."
+        ),
+    )
+    parser.add_argument(
+        "--statistical-comparison-artifacts",
+        action="store_true",
+        help=(
+            "Export duplicate comparison copies under OutputRoot/statistical_comparison. "
+            "Disabled by default; use canonical per-run data/ artifacts for clean completed runs."
         ),
     )
     parser.add_argument(
@@ -785,14 +801,13 @@ def _artifact_consistency_audit(
     ]
     last_row = dict(timeseries_rows[-1]) if timeseries_rows else {}
     expected_row_options: List[int] = []
+    expected_rows = None
 
     if expected_episode_time_steps and expected_episodes:
-        expected_row_options = sorted({
-            int(expected_episode_time_steps) * int(expected_episodes),
-            max(int(expected_episode_time_steps) - 1, 1) * int(expected_episodes),
-        })
+        expected_rows = int(expected_episode_time_steps) * int(expected_episodes)
+        expected_row_options = [expected_rows]
 
-    expected_rows = max(expected_row_options) if expected_row_options else None
+    row_delta_vs_expected = None if expected_rows is None else len(timeseries_rows) - expected_rows
     trace_totals = _sum_trace_columns(
         trace_rows,
         [
@@ -806,14 +821,41 @@ def _artifact_consistency_audit(
     )
     warnings: List[Dict[str, object]] = list(report.get("report_warnings", []) or [])
 
-    if expected_row_options and len(timeseries_rows) not in expected_row_options:
+    if expected_rows is not None and len(timeseries_rows) != expected_rows:
         warnings.append({
             "severity": "warning",
             "code": "unexpected_timeseries_rows",
             "message": (
                 f"Recorded {len(timeseries_rows)} timeseries rows; "
-                f"expected one of {expected_row_options}."
+                f"expected {expected_rows} from "
+                f"{expected_episodes} episodes x {expected_episode_time_steps} steps."
             ),
+        })
+
+    episode_step_count_mismatches = []
+    if expected_episode_time_steps:
+        for summary in episode_summaries:
+            steps = _as_int(summary.get("steps"))
+            if steps is None or steps == int(expected_episode_time_steps):
+                continue
+            episode_step_count_mismatches.append({
+                "episode": summary.get("episode"),
+                "steps": steps,
+                "expected_steps": int(expected_episode_time_steps),
+                "last_all_done": summary.get("last_all_done"),
+                "last_global_step": summary.get("last_global_step"),
+                "last_time_step": summary.get("last_time_step"),
+            })
+
+    if episode_step_count_mismatches:
+        warnings.append({
+            "severity": "warning",
+            "code": "episode_step_count_mismatch",
+            "message": (
+                "One or more recorded episodes have a step count different from "
+                f"the configured episode_time_steps={expected_episode_time_steps}."
+            ),
+            "episodes": episode_step_count_mismatches,
         })
 
     if expected_episodes is not None and len(completed_episode_rows) < int(expected_episodes):
@@ -859,9 +901,11 @@ def _artifact_consistency_audit(
         "expected_timeseries_rows": expected_rows,
         "expected_timeseries_row_options": expected_row_options,
         "timeseries_rows": len(timeseries_rows),
+        "timeseries_row_delta_vs_expected": row_delta_vs_expected,
         "trace_rows": len(trace_rows),
         "completed_episode_count_from_timeseries": len(completed_episode_rows),
         "episode_summaries": list(episode_summaries),
+        "episode_step_count_mismatches": episode_step_count_mismatches,
         "last_timeseries_row": last_row,
         "training_trace_totals": trace_totals,
         "objective_report_values": {
@@ -2077,6 +2121,17 @@ def _write_statistical_comparison_artifacts(
     return comparison_dir
 
 
+def _remove_completed_live_progress(output_dir: Path) -> bool:
+    """Remove transient live progress state once final artifacts are durable."""
+
+    live_progress_path = output_dir / "live_progress.json"
+    try:
+        live_progress_path.unlink(missing_ok=True)
+        return True
+    except PermissionError:
+        return False
+
+
 def write_training_artifacts(
     *,
     output_dir: Path,
@@ -2098,10 +2153,12 @@ def write_training_artifacts(
     if artifact_profile not in {"full", "efficient", "minimal"}:
         artifact_profile = "full"
 
-    write_root_timeseries = artifact_profile in {"full", "efficient"}
-    write_root_trace = artifact_profile == "full"
-    write_root_detail_tables = artifact_profile == "full"
-    include_statistical_trace = artifact_profile == "full"
+    legacy_root_artifacts = bool(getattr(args, "legacy_root_artifacts", False))
+    export_statistical_comparison = bool(getattr(args, "statistical_comparison_artifacts", False))
+    write_root_timeseries = legacy_root_artifacts
+    write_root_trace = legacy_root_artifacts and artifact_profile == "full"
+    write_root_detail_tables = legacy_root_artifacts and artifact_profile == "full"
+    include_statistical_trace = export_statistical_comparison and artifact_profile == "full"
 
     timeseries_rows = list(getattr(adapter, "timeseries_records", [])) if adapter is not None else []
     trace_rows = list(getattr(adapter, "trace_records", [])) if adapter is not None else []
@@ -2177,10 +2234,16 @@ def write_training_artifacts(
     }
     checkpoint_manifest_path = data_dir / "checkpoint_manifest.json"
     root_checkpoint_manifest_path = output_dir / "checkpoint_manifest.json"
-    _write_json_mirrors([checkpoint_manifest_path, root_checkpoint_manifest_path], checkpoint_manifest)
+    checkpoint_manifest_outputs = [checkpoint_manifest_path]
+    if legacy_root_artifacts:
+        checkpoint_manifest_outputs.append(root_checkpoint_manifest_path)
+    _write_json_mirrors(checkpoint_manifest_outputs, checkpoint_manifest)
     artifact_audit_path = data_dir / "artifact_audit.json"
     root_artifact_audit_path = output_dir / "artifact_audit.json"
-    _write_json_mirrors([artifact_audit_path, root_artifact_audit_path], artifact_audit)
+    artifact_audit_outputs = [artifact_audit_path]
+    if legacy_root_artifacts:
+        artifact_audit_outputs.append(root_artifact_audit_path)
+    _write_json_mirrors(artifact_audit_outputs, artifact_audit)
     figures_manifest = _write_training_figures_and_tables(
         dirs=dirs,
         report=report,
@@ -2204,18 +2267,29 @@ def write_training_artifacts(
             "root_timeseries_csv": write_root_timeseries,
             "root_trace_csv": write_root_trace,
             "root_building_detail_csv": write_root_detail_tables,
+            "legacy_root_artifacts": legacy_root_artifacts,
+            "statistical_comparison_artifacts": export_statistical_comparison,
             "statistical_comparison_trace_csv": include_statistical_trace,
             **trace_sampling,
         },
         "episodes_recorded": len(episode_summaries),
         "timeseries_rows": len(timeseries_rows),
         "trace_rows": len(trace_rows),
+        "traceability": {
+            "status": artifact_audit.get("status"),
+            "planned_environment_steps": artifact_audit.get("expected_timeseries_rows"),
+            "recorded_environment_steps": len(timeseries_rows),
+            "environment_step_delta_vs_plan": artifact_audit.get("timeseries_row_delta_vs_expected"),
+            "completed_episode_count": artifact_audit.get("completed_episode_count_from_timeseries"),
+            "expected_episode_count": artifact_audit.get("expected_episodes"),
+            "warnings": artifact_audit.get("warnings", []),
+        },
         "timeseries_csv": str(timeseries_path),
         "timeseries_csv_root": str(root_timeseries_path) if write_root_timeseries else None,
         "trace_csv": str(trace_path),
         "trace_csv_root": str(root_trace_path) if write_root_trace else None,
         "checkpoint_manifest": str(checkpoint_manifest_path),
-        "checkpoint_manifest_root": str(root_checkpoint_manifest_path),
+        "checkpoint_manifest_root": str(root_checkpoint_manifest_path) if legacy_root_artifacts else None,
         "checkpoint_count": len(checkpoints),
         "building_detail": building_detail_paths,
         "building_count": len(building_summary_rows),
@@ -2224,7 +2298,7 @@ def write_training_artifacts(
         "normalization": normalization,
         "artifact_audit": artifact_audit,
         "artifact_audit_json": str(artifact_audit_path),
-        "artifact_audit_json_root": str(root_artifact_audit_path),
+        "artifact_audit_json_root": str(root_artifact_audit_path) if legacy_root_artifacts else None,
         "figures_manifest": str(dirs["figures"] / "figures_manifest.json"),
         "figures": figures_manifest,
         "project_axis_metrics": report["project_axis_metrics"],
@@ -2236,32 +2310,38 @@ def write_training_artifacts(
 
     results_path = data_dir / "results.json"
     root_results_path = output_dir / "results.json"
-    _write_json_mirrors([results_path, root_results_path], results)
-    comparison_dir = _write_statistical_comparison_artifacts(
-        output_dir=output_dir,
-        algorithm=algorithm,
-        scenario=str(getattr(args, "scenario", "unknown")),
-        results_path=root_results_path,
-        timeseries_path=root_timeseries_path,
-        trace_path=root_trace_path,
-        include_trace=include_statistical_trace,
-    )
+    results_outputs = [results_path]
+    if legacy_root_artifacts:
+        results_outputs.append(root_results_path)
+    _write_json_mirrors(results_outputs, results)
+    comparison_dir = None
+    if export_statistical_comparison:
+        comparison_dir = _write_statistical_comparison_artifacts(
+            output_dir=output_dir,
+            algorithm=algorithm,
+            scenario=str(getattr(args, "scenario", "unknown")),
+            results_path=results_path,
+            timeseries_path=timeseries_path,
+            trace_path=trace_path,
+            include_trace=include_statistical_trace,
+        )
+    live_progress_removed = _remove_completed_live_progress(output_dir)
     return {
         "artifact_layout": _artifact_layout_payload(dirs),
         "artifact_profile": artifact_profile,
         "artifact_write_policy": results["artifact_write_policy"],
         "results_json": str(results_path),
-        "results_json_root": str(root_results_path),
+        "results_json_root": str(root_results_path) if legacy_root_artifacts else None,
         "timeseries_csv": str(timeseries_path),
         "timeseries_csv_root": str(root_timeseries_path) if write_root_timeseries else None,
         "trace_csv": str(trace_path),
         "trace_csv_root": str(root_trace_path) if write_root_trace else None,
         "building_detail": building_detail_paths,
         "checkpoint_manifest": str(checkpoint_manifest_path),
-        "checkpoint_manifest_root": str(root_checkpoint_manifest_path),
+        "checkpoint_manifest_root": str(root_checkpoint_manifest_path) if legacy_root_artifacts else None,
         "artifact_audit": artifact_audit,
         "artifact_audit_json": str(artifact_audit_path),
-        "artifact_audit_json_root": str(root_artifact_audit_path),
+        "artifact_audit_json_root": str(root_artifact_audit_path) if legacy_root_artifacts else None,
         "figures_manifest": str(dirs["figures"] / "figures_manifest.json"),
         "figures_dir": str(dirs["figures"]),
         "tables_dir": str(dirs["tables"]),
@@ -2270,20 +2350,40 @@ def write_training_artifacts(
         "checkpoint_count": len(checkpoints),
         "timeseries_rows": len(timeseries_rows),
         "trace_rows": len(trace_rows),
-        "statistical_comparison_dir": str(comparison_dir),
+        "statistical_comparison_dir": str(comparison_dir) if comparison_dir is not None else None,
+        "completed_live_progress_removed": live_progress_removed,
     }
 
 
-def write_training_summary(output_dir: Path, summary: Mapping[str, object]) -> Dict[str, str]:
+def write_training_summary(
+    output_dir: Path,
+    summary: Mapping[str, object],
+    *,
+    write_root: Optional[bool] = None,
+) -> Dict[str, Optional[str]]:
     dirs = ensure_artifact_layout(output_dir)
     payload = dict(summary)
     payload.setdefault("artifact_layout", _artifact_layout_payload(dirs))
     root_path = output_dir / "training_summary.json"
     data_path = dirs["data"] / "training_summary.json"
-    _write_json_mirrors([data_path, root_path], payload)
+    if write_root is None:
+        artifacts = payload.get("artifacts")
+        if isinstance(artifacts, Mapping):
+            policy = artifacts.get("artifact_write_policy")
+            if isinstance(policy, Mapping):
+                write_root = bool(policy.get("legacy_root_artifacts", False))
+            else:
+                write_root = bool(artifacts.get("legacy_root_artifacts", False))
+        else:
+            write_root = False
+
+    outputs = [data_path]
+    if write_root:
+        outputs.append(root_path)
+    _write_json_mirrors(outputs, payload)
     return {
         "training_summary_json": str(data_path),
-        "training_summary_json_root": str(root_path),
+        "training_summary_json_root": str(root_path) if write_root else None,
     }
 
 
@@ -3545,6 +3645,7 @@ def install_finite_optimizer_step_guard(
         path.parent.mkdir(parents=True, exist_ok=True)
 
     installed = 0
+    installed_owners: List[str] = []
     seen_optimizers = set()
 
     def iter_named_parameters(spec: Mapping[str, object]):
@@ -3622,10 +3723,24 @@ def install_finite_optimizer_step_guard(
         optimizer.step = guarded_step
         optimizer._citylearn_finite_guard_installed = True
         installed += 1
+        installed_owners.append(owner)
+
+    if path is not None:
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": "finite_optimizer_step_guard_installed",
+            "installed_optimizers": installed,
+            "owners": installed_owners,
+            "reason": "optimizer_step_guard_audit_initialized",
+        }
+        with path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     return {
         "installed_optimizers": installed,
         "audit_path": str(path) if path is not None else None,
+        "audit_file_exists": bool(path is not None and path.is_file()),
+        "audit_initialized": bool(path is not None),
     }
 
 

@@ -182,6 +182,33 @@ python -B CityLearn\scripts\train_citylearn_v3_matd3.py `
   --scenario E1
 ```
 
+## Training Artifact Traceability
+
+Completed MADRL runs use `data/` as the canonical artifact boundary. For each
+`<OutputRoot>/<algorithm>/<scenario>_seed_<seed>/` directory, final evidence is
+accepted from:
+
+- `data/results.json`
+- `data/training_summary.json`
+- `data/artifact_audit.json`
+- `data/checkpoint_manifest.json`
+- `data/timeseries.csv`
+- `data/trace.csv`
+- `checkpoints/`
+- `figures/figures_manifest.json`
+- `figures/tables/`
+
+Root-level mirrors such as `results.json`, `timeseries.csv` or
+`checkpoint_manifest.json` are disabled by default to avoid duplicate or stale
+traceability. They are available only through `--legacy-root-artifacts` for
+legacy consumers. Cross-run copies under `statistical_comparison/` are also
+disabled by default and require `--statistical-comparison-artifacts`.
+
+`live_progress.json` is transient runtime state. The training writer removes it
+after final artifacts are written, and the official monitor exits when
+`official_full_status.json` reaches `completed` unless launched with
+`-KeepOpenOnComplete`.
+
 ## Thesis Objective KPIs
 
 The objective manifest is implemented in `citylearn.v3.objectives` and is
