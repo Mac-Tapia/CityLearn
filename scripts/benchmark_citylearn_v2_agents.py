@@ -14,8 +14,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Dict, List, Mapping, Sequence
 
 import numpy as np
 
@@ -35,7 +34,17 @@ from citylearn.agents.sac import SAC
 from citylearn.citylearn import CityLearnEnv
 from citylearn.dec_pomdp import DEFAULT_17_BUILDING_EV_SCHEMA
 from citylearn.scenario_manager import ScenarioManager
-from citylearn.v3.objectives import evaluate_objectives
+
+# Always default to the Iquitos 2023-2025 dataset so v2 benchmarks compare
+# against the same schema used by the v4 MADRL training runs.
+_IQUITOS_SCHEMA = (
+    CITYLEARN_ROOT
+    / "data"
+    / "datasets"
+    / "citylearn_iquitos_2023_2025"
+    / "schema.json"
+)
+_DEFAULT_SCHEMA = _IQUITOS_SCHEMA
 
 from citylearn_v3_training_common import (
     _as_float,
@@ -60,6 +69,8 @@ AGENT_REGISTRY = {
     "marlisa": MARLISA,
     "random": Agent,
 }
+SCENARIOS = tuple(ScenarioManager.SCENARIOS)
+ALL_SCENARIOS = "ALL"
 
 
 @dataclass(frozen=True)
@@ -73,10 +84,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--schema-path",
-        default=str(DEFAULT_17_BUILDING_EV_SCHEMA),
+        default=str(_DEFAULT_SCHEMA),
         help="CityLearn v2 schema path or dataset name.",
     )
-    parser.add_argument("--scenario", default="E3")
+    parser.add_argument(
+        "--scenario",
+        default="E3",
+        choices=[*SCENARIOS, ALL_SCENARIOS],
+        help="Scenario to benchmark. Use ALL to run E1, E2 and E3.",
+    )
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--episode-time-steps", default=8760, type=int)
     parser.add_argument("--train-episodes", default=0, type=int)
@@ -100,6 +116,10 @@ def parse_args() -> argparse.Namespace:
         help="Write a failure JSON for agents that error and continue.",
     )
     return parser.parse_args()
+
+
+def _scenario_names(value: str) -> List[str]:
+    return list(SCENARIOS) if value == ALL_SCENARIOS else [value]
 
 
 def _write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
@@ -389,11 +409,11 @@ def _write_failure(output_dir: Path, agent_key: str, exc: BaseException) -> None
     _write_json_mirrors([dirs["data"] / "results.json", output_dir / "results.json"], payload)
 
 
-def run_agent(args: argparse.Namespace, agent_key: str) -> Dict[str, object]:
-    output_dir = Path(args.output_dir) / agent_key / f"{args.scenario}_seed_{args.seed}"
+def run_agent(args: argparse.Namespace, agent_key: str, *, scenario: str) -> Dict[str, object]:
+    output_dir = Path(args.output_dir) / agent_key / f"{scenario}_seed_{args.seed}"
     env = _make_env(
         args.schema_path,
-        scenario=args.scenario,
+        scenario=scenario,
         seed=args.seed,
         episode_time_steps=args.episode_time_steps,
     )
@@ -406,17 +426,17 @@ def run_agent(args: argparse.Namespace, agent_key: str) -> Dict[str, object]:
             env.close()
             env = _make_env(
                 args.schema_path,
-                scenario=args.scenario,
+                scenario=scenario,
                 seed=args.seed,
                 episode_time_steps=args.episode_time_steps,
             )
             agent.env = env
 
-        rollout = _rollout(env, agent, scenario=args.scenario)
+        rollout = _rollout(env, agent, scenario=scenario)
         return _write_benchmark_artifacts(
             output_dir=output_dir,
             agent_key=agent_key,
-            scenario=args.scenario,
+            scenario=scenario,
             seed=args.seed,
             episode_time_steps=args.episode_time_steps,
             train_episodes=args.train_episodes,
@@ -432,23 +452,26 @@ def main() -> int:
     output_root = Path(args.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     summaries: List[Dict[str, object]] = []
+    scenarios = _scenario_names(args.scenario)
 
-    for agent_key in args.agents:
-        try:
-            print(f"Running CityLearn v2 original agent: {agent_key}", flush=True)
-            summaries.append(run_agent(args, agent_key))
-        except Exception as exc:
-            output_dir = output_root / agent_key / f"{args.scenario}_seed_{args.seed}"
-            _write_failure(output_dir, agent_key, exc)
-            print(f"FAILED {agent_key}: {exc}", file=sys.stderr, flush=True)
+    for scenario in scenarios:
+        for agent_key in args.agents:
+            try:
+                print(f"Running CityLearn v2 original agent: {agent_key} scenario={scenario}", flush=True)
+                summaries.append(run_agent(args, agent_key, scenario=scenario))
+            except Exception as exc:
+                output_dir = output_root / agent_key / f"{scenario}_seed_{args.seed}"
+                _write_failure(output_dir, agent_key, exc)
+                print(f"FAILED {agent_key} scenario={scenario}: {exc}", file=sys.stderr, flush=True)
 
-            if not args.continue_on_error:
-                raise
+                if not args.continue_on_error:
+                    raise
 
     manifest = {
         "family": "citylearn_v2_original",
         "schema_path": args.schema_path,
         "scenario": args.scenario,
+        "scenarios": scenarios,
         "seed": args.seed,
         "episode_time_steps": args.episode_time_steps,
         "train_episodes": args.train_episodes,
@@ -456,6 +479,7 @@ def main() -> int:
         "runs": [
             {
                 "algorithm": item.get("algorithm"),
+                "scenario": item.get("scenario"),
                 "output_dir": item.get("output_dir"),
                 "timeseries_rows": item.get("timeseries_rows"),
                 "trace_rows": item.get("trace_rows"),

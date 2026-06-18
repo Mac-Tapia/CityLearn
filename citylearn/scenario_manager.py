@@ -245,31 +245,88 @@ class ScenarioManager:
         return None
     
     def apply_scenario_modifications(self, env) -> None:
-        """Apply scenario-specific modifications to CityLearn environment
-        
-        Args:
-            env: CityLearnEnv instance
+        """Apply scenario-specific modifications to CityLearn environment.
+
+        E1 (RTP, multiplier=1.0): Emphasize existing daily price variation (×1.2 amplitude)
+            so the agent sees a meaningful peak/off-peak signal for load shifting.
+        E2 (flat, multiplier=1.0): Replace dynamic pricing with the annual mean price so
+            the agent must rely on the carbon intensity signal rather than price arbitrage.
+        E3 (RTP, multiplier=1.2): Same daily amplification as E1 plus a 1.2× scale-up to
+            increase the economic incentive for demand-response.
+
+        The modifications are applied in-place to each building's pricing series. The
+        original series shape (seasonal trend) is preserved; only amplitude and mean shift
+        change to create scenario-appropriate incentive structures.
         """
         if self.current_config is None:
             logger.warning("No scenario selected. Call select_scenario() first.")
             return
-        
-        logger.info(f"Applying modifications for scenario {self.current_scenario}")
-        
-        # Apply tariff modifications
-        if self.current_config.use_time_of_use:
-            logger.info("Enabling Time-of-Use (TOU) tariff for this scenario")
-        elif self.current_config.use_real_time_pricing:
-            logger.info("Enabling Real-Time Pricing (RTP) for this scenario")
-        
-        # Apply outage settings
-        if self.current_config.enable_outages:
+
+        config = self.current_config
+        modified_count = 0
+
+        for building in getattr(env, "buildings", []):
+            pricing = getattr(building, "pricing", None)
+            if pricing is None:
+                continue
+
+            # Access the FULL underlying array directly from __dict__ to avoid the
+            # episode-window slice that TimeSeriesData.__getattribute__ applies.
+            # Using the sliced property reads only the current episode window (e.g.,
+            # rows 0–8759 for episode 0), and writing that slice back truncates the
+            # full multi-year array — causing an IndexError on episode 2+ when
+            # reset_data_sets() sets start_time_step=8760 and the pricing array
+            # only has 8760 rows instead of the full simulation length.
+            ep_full = getattr(pricing, "__dict__", {}).get("_electricity_pricing", None)
+            if ep_full is None:
+                continue
+
+            prices = np.asarray(ep_full, dtype=float)
+            n = len(prices)
+            if n == 0:
+                continue
+
+            hours_of_day = np.arange(n) % 24
+
+            if not config.use_real_time_pricing and config.tariff_multiplier == 1.0:
+                # E2: flatten to annual-mean price so carbon signal dominates
+                modified = np.full(n, float(np.nanmean(prices)))
+            else:
+                # E1 / E3: amplify existing daily variation and apply tariff multiplier.
+                # daily_shape peaks at hour 14 (≈1.35) and troughs at hour 3 (≈0.65),
+                # creating a clear incentive to shift load away from afternoon peaks.
+                daily_shape = 1.0 + 0.35 * np.sin(2.0 * np.pi * (hours_of_day - 3) / 24.0)
+                modified = prices * daily_shape * config.tariff_multiplier
+
+            # Write the full modified array directly into __dict__ so the entire
+            # simulation range is preserved (not just the current episode window).
+            # np.clip matches the [0, 1] bounds applied in Pricing.__init__.
+            try:
+                pricing.__dict__["_electricity_pricing"] = np.clip(
+                    modified, 0.0, 1.0
+                ).astype("float32")
+                modified_count += 1
+            except (AttributeError, TypeError):
+                # Fall back to writing into the underlying DataFrame if the
+                # property has no setter (older CityLearn v2 variants).
+                data = getattr(pricing, "_data", None) or getattr(pricing, "data", None)
+                if data is not None and hasattr(data, "__setitem__"):
+                    col = "electricity_pricing"
+                    if hasattr(data, "columns") and col in data.columns:
+                        data.loc[data.index[:n], col] = modified
+                        modified_count += 1
+
+        scenario_type = (
+            "flat_mean_price" if not config.use_real_time_pricing
+            else f"rtp_daily_amplified_x{config.tariff_multiplier}"
+        )
+        logger.info(
+            f"Scenario {self.current_scenario}: applied {scenario_type} tariff "
+            f"to {modified_count} buildings."
+        )
+
+        if config.enable_outages:
             logger.info(f"Outages enabled: {len(self.outage_schedule)} scheduled outages")
-        
-        # Legacy DR settings are intentionally disabled for the current
-        # flexibility-carbon-cost thesis axes.
-        if self.current_config.enable_dr_signals:
-            logger.info("Legacy demand-response signals enabled")
     
     def get_scenario_description(self) -> Dict:
         """Get human-readable scenario description"""

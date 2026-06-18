@@ -1,0 +1,160 @@
+{
+  "dataset_dir": "CityLearn\\data\\datasets\\citylearn_iquitos_2023_2025",
+  "schema": "CityLearn\\data\\datasets\\citylearn_iquitos_2023_2025\\schema.json",
+  "rule": "One controlled shiftable load per building through CityLearn WashingMachine API. Cycle energy uses the supplied MADRL_BUILDING_CONSTANTS[building].shiftable value; operating windows follow building type.",
+  "rows": [
+    {
+      "building_id": 1,
+      "file": "Washing_Machine_1.csv",
+      "building_type": "industrial",
+      "shiftable_cycle_kwh": 14.8,
+      "active_window_rows": 7830,
+      "potential_cycles": 783,
+      "potential_energy_kwh": 11588.4
+    },
+    {
+      "building_id": 2,
+      "file": "Washing_Machine_2.csv",
+      "building_type": "administrativo",
+      "shiftable_cycle_kwh": 35.6,
+      "active_window_rows": 7047,
+      "potential_cycles": 783,
+      "potential_energy_kwh": 27874.8
+    },
+    {
+      "building_id": 3,
+      "file": "Washing_Machine_3.csv",
+      "building_type": "transporte_24h",
+      "shiftable_cycle_kwh": 95.0,
+      "active_window_rows": 24112,
+      "potential_cycles": 1096,
+      "potential_energy_kwh": 104120.0
+    },
+    {
+      "building_id": 4,
+      "file": "Washing_Machine_4.csv",
+      "building_type": "mall",
+      "shiftable_cycle_kwh": 22.2,
+      "active_window_rows": 10960,
+      "potential_cycles": 1096,
+      "potential_energy_kwh": 24331.2
+    },
+    {
+      "building_id": 5,
+      "file": "Washing_Machine_5.csv",
+      "building_type": "hotelero_24h",
+      "shiftable_cycle_kwh": 99.0,
+      "active_window_rows": 24112,
+      "potential_cycles": 1096,
+      "potential_energy_kwh": 108504.0
+    },
+    {
+      "building_id": 6,
+      "file": "Washing_Machine_6.csv",
+      "building_type": "mall",
+      "shiftable_cycle_kwh": 176.0,
+      "active_window_rows": 10960,
+      "potential_cycles": 1096,
+      "potential_energy_kwh": 192896.0
+    },
+    {
+      "building_id": 7,
+      "file": "Washing_Machine_7.csv",
+      "building_type": "universitario",
+      "shiftable_cycle_kwh": 39.2,
+      "active_window_rows": 8613,
+      "potential_cycles": 783,
+      "potential_energy_kwh": 30693.6
+    },
+    {
+      "building_id": 8,
+      "file": "Washing_Machine_8.csv",
+      "building_type": "educacion",
+      "shiftable_cycle_kwh": 99.3,
+      "active_window_rows": 6264,
+      "potential_cycles": 783,
+      "potential_energy_kwh": 77751.9
+    },
+    {
+      "building_id": 9,
+      "file": "Washing_Machine_9.csv",
+      "building_type": "transporte_24h",
+      "shiftable_cycle_kwh": 12.1,
+      "active_window_rows": 24112,
+      "potential_cycles": 1096,
+      "potential_energy_kwh": 13261.6
+    },
+    {
+      "building_id": 10,
+      "file": "Washing_Machine_10.csv",
+      "building_type": "administrativo",
+      "shiftable_cycle_kwh": 22.2,
+      "active_window_rows": 7047,
+      "potential_cycles": 783,
+      "potential_energy_kwh": 17382.6
+    },
+    {
+      "building_id": 11,
+      "file": "Washing_Machine_11.csv",
+      "building_type": "salud_24h",
+      "shiftable_cycle_kwh": 73.0,
+      "active_window_rows": 24112,
+      "potential_cycles": 1096,
+      "potential_energy_kwh": 80008.0
+    },
+    {
+      "building_id": 12,
+      "file": "Washing_Machine_12.csv",
+      "building_type": "salud_24h",
+      "shiftable_cycle_kwh": 34.5,
+      "active_window_rows": 24112,
+      "potential_cycles": 1096,
+      "potential_energy_kwh": 37812.0
+    },
+    {
+      "building_id": 13,
+      "file": "Washing_Machine_13.csv",
+      "building_type": "universitario",
+      "shiftable_cycle_kwh": 14.8,
+      "active_window_rows": 8613,
+      "potential_cycles": 783,
+      "potential_energy_kwh": 11588.4
+    },
+    {
+      "building_id": 14,
+      "file": "Washing_Machine_14.csv",
+      "building_type": "portuario_24h",
+      "shiftable_cycle_kwh": 47.0,
+      "active_window_rows": 13152,
+      "potential_cycles": 1096,
+      "potential_energy_kwh": 51512.0
+    },
+    {
+      "building_id": 15,
+      "file": "Washing_Machine_15.csv",
+      "building_type": "educacion",
+      "shiftable_cycle_kwh": 23.4,
+      "active_window_rows": 6264,
+      "potential_cycles": 783,
+      "potential_energy_kwh": 18322.2
+    },
+    {
+      "building_id": 16,
+      "file": "Washing_Machine_16.csv",
+      "building_type": "industrial",
+      "shiftable_cycle_kwh": 51.24,
+      "active_window_rows": 7830,
+      "potential_cycles": 783,
+      "potential_energy_kwh": 40120.92
+    },
+    {
+      "building_id": 17,
+      "file": "Washing_Machine_17.csv",
+      "building_type": "salud_24h",
+      "shiftable_cycle_kwh": 26.3,
+      "active_window_rows": 24112,
+      "potential_cycles": 1096,
+      "potential_energy_kwh": 28824.8
+    }
+  ]
+}

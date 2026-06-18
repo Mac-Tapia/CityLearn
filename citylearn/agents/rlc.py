@@ -6,7 +6,7 @@ from citylearn.preprocessing import Encoder, PeriodicNormalization, Normalize, O
 # conditional imports
 try:
     import torch
-except (ModuleNotFoundError, ImportError) as e:
+except (ModuleNotFoundError, ImportError):
     raise Exception("This functionality requires you to install torch. You can install torch by : pip install torch torchvision, or for more detailed instructions please visit https://pytorch.org.")
 
 from citylearn.agents.base import Agent
@@ -75,7 +75,7 @@ class RLC(Agent):
     def observation_dimension(self) -> int:
         """Number of observations after applying `encoders`."""
 
-        return [len([j for j in np.hstack(e*np.ones(len(s.low))) if j != None]) for e, s in zip(self.encoders, self.observation_space)]
+        return [len([j for j in np.hstack(e*np.ones(len(s.low))) if j is not None]) for e, s in zip(self.encoders, self.observation_space)]
 
     @property
     def hidden_dimension(self) -> List[float]:

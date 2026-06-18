@@ -1,0 +1,18 @@
+ID_Edificio,Nombre_Edificio,Area_Techada_m2,Tipo_Uso_CityLearn,Cant_Estimada_Oficinas_Locales,Sistemas_Refrigeracion_Grandes,Cant_Est_Unidades_Autonomas_Split,Area_Estacionamiento_m2,Tipo_Vehiculo_Predominante_Estac
+B_01,ELECTRO ORIENTE S.A.,14000.0,Office,40,DataCenter Precision AC,50,1350,Mixed_Motos_Trucks
+B_02,MUNICIPALIDAD DISTRITAL DE SAN JUAN BAUTISTA,8000.0,Office,40,None,40,900,Motos_Motokars
+B_03,AEROPUERTO INTERNACIONAL,6000.0,Assembly,25,Chiller Central Water-Cooled,30,5500,Motos_Taxis_Buses
+B_04,HIPERMERCADOS TOTTUS ORIENTE SAC,2500.0,Retail,9,Food Cold Chain Racks / Rooftop,11,2500,Motos_Cars
+B_05,HOTEL PLAZA S.A.,1141.89,MultiFamily_Hotel,44,Commercial Kitchen Walk-in Cold Rooms,45,200,Motos_Cars
+B_06,MALL AVENTURA S.A.,20637.0,Commercial_Mall,105,Multi-Chiller Plant,135,9000,Motos_Motokars_Massive
+B_07,UNAP-FACULTAD DE BIOLOGIA-AULAS,8103.45,Education,30,None,17,1250,Motos_Students
+B_08,PNP- ESCUELA TECNICA SUPERIOR-IQUITOS,21000.0,Assembly_Military,30,None,30,3000,Military_Vehicles
+B_09,GOBIERNO REGIONAL DE LORETO - COER,4479.67,Office_Critical,20,DataCenter Precision AC (N+1),27,1500,Emergency_Trucks
+B_10,GOBIERNO REGIONAL DE LORETO,14295.73,Office,70,Duct Central Split System,82,2500,Motos_Staff
+B_11,HOSPITAL REGIONAL DE LORETO,42649.33,Healthcare_Hospital,80,Clinical Chiller + HEPA / Blood Bank Cold Room,120,4500,Emergency_Ambulances
+B_12,SEGURO SOCIAL DE SALUD - ESSALUD,18197.48,Healthcare,50,Medical Archive AC System,65,2000,Ambulances_Staff
+B_13,UNAP-FACULTAD DE CIENCIAS AD..CONTABLES Y ECO,2723.0,Education,18,None,13,750,Motos_Students
+B_14,AUTORIDAD PORTUARIA NACIONAL,17761.0,Industrial_Port,20,None,22,3750,Heavy_Cargo_Trucks
+B_15,DREL- COLEGIO NACIONAL DE IQUITOS,9889.92,Education,20,None,10,1000,Bicycles_Motos
+B_16,SIMA - IQUITOS S.R.LTDA,10294.0,Industrial,25,Industrial Mobile Vessel AC Units,25,5000,Heavy_Industrial_Cranes
+B_17,ASOCIACION CIVIL SELVA AMAZONICA,1611.23,Laboratory,12,Scientific Ultra-Freezers (-80C),16,4000,Medical_Pickups

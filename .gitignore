@@ -187,3 +187,6 @@ SimulationData/
 results/
 runtime.csv
 *-runtime.csv
+
+# Dataset backup (regenerable desde tools/)
+data/datasets/citylearn_iquitos_2023_2025_backup/

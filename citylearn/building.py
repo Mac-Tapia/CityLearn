@@ -15,7 +15,7 @@ from citylearn.energy_model import Battery, ElectricDevice, ElectricHeater, Heat
 from citylearn.internal.building_ops import BuildingOpsService
 from citylearn.occupant import LogisticRegressionOccupant, Occupant
 from citylearn.power_outage import PowerOutage
-from citylearn.preprocessing import Normalize, PeriodicNormalization
+from citylearn.preprocessing import PeriodicNormalization
 from citylearn.utilities import parse_bool
 
 LOGGER = logging.getLogger()
@@ -1753,14 +1753,14 @@ class Building(Environment):
 
             elif key in ['cooling_device_efficiency']:
                 cop = self.cooling_device.get_cop(data['outdoor_dry_bulb_temperature'], heating=False)
-                low_limit[key] = min(cop)
-                high_limit[key] = max(cop)
+                low_limit[key] = float(np.min(cop))
+                high_limit[key] = float(np.max(cop))
 
             elif key in ['heating_device_efficiency']:
                 if isinstance(self.heating_device, HeatPump):
                     cop = self.heating_device.get_cop(data['outdoor_dry_bulb_temperature'], heating=True)
-                    low_limit[key] = min(cop)
-                    high_limit[key] = max(cop)
+                    low_limit[key] = float(np.min(cop))
+                    high_limit[key] = float(np.max(cop))
                 else:
                     low_limit[key] = self.heating_device.efficiency
                     high_limit[key] = self.heating_device.efficiency
@@ -1811,8 +1811,8 @@ class Building(Environment):
             elif key in ['dhw_device_efficiency']:
                 if isinstance(self.dhw_device, HeatPump):
                     cop = self.dhw_device.get_cop(data['outdoor_dry_bulb_temperature'], heating=True)
-                    low_limit[key] = min(cop)
-                    high_limit[key] = max(cop)
+                    low_limit[key] = float(np.min(cop))
+                    high_limit[key] = float(np.max(cop))
                 else:
                     low_limit[key] = self.dhw_device.efficiency
                     high_limit[key] = self.dhw_device.efficiency
@@ -1827,7 +1827,7 @@ class Building(Environment):
 
             elif key == 'comfort_band':
                 low_limit[key] = 0
-                high_limit[key] = max(data[key])
+                high_limit[key] = float(np.max(data[key]))
 
             elif key in ['cooling_demand', 'heating_demand', 'dhw_demand']:
                 low_limit[key] = 0.0
@@ -1848,7 +1848,7 @@ class Building(Environment):
 
             elif key == 'cooling_storage_electricity_consumption':
                 demand = self.energy_simulation.__getattr__(
-                    f'cooling_demand',
+                    'cooling_demand',
                     start_time_step=self.episode_tracker.simulation_start_time_step,
                     end_time_step=self.episode_tracker.simulation_end_time_step
                 )
@@ -1858,7 +1858,7 @@ class Building(Environment):
 
             elif key == 'heating_storage_electricity_consumption':
                 demand = self.energy_simulation.__getattr__(
-                    f'heating_demand',
+                    'heating_demand',
                     start_time_step=self.episode_tracker.simulation_start_time_step,
                     end_time_step=self.episode_tracker.simulation_end_time_step
                 )
@@ -1869,7 +1869,7 @@ class Building(Environment):
 
             elif key == 'dhw_storage_electricity_consumption':
                 demand = self.energy_simulation.__getattr__(
-                    f'dhw_demand',
+                    'dhw_demand',
                     start_time_step=self.episode_tracker.simulation_start_time_step,
                     end_time_step=self.episode_tracker.simulation_end_time_step
                 )
@@ -1889,16 +1889,16 @@ class Building(Environment):
             elif periodic_normalization and key in periodic_observations:
                 pn = PeriodicNormalization(max(periodic_observations[key]))
                 x_sin, x_cos = pn * np.array(list(periodic_observations[key]))
-                low_limit[f'{key}_cos'], high_limit[f'{key}_cos'] = min(x_cos), max(x_cos)
-                low_limit[f'{key}_sin'], high_limit[f'{key}_sin'] = min(x_sin), max(x_sin)
+                low_limit[f'{key}_cos'], high_limit[f'{key}_cos'] = float(x_cos.min()), float(x_cos.max())
+                low_limit[f'{key}_sin'], high_limit[f'{key}_sin'] = float(x_sin.min()), float(x_sin.max())
 
             elif key == 'occupant_interaction_indoor_dry_bulb_temperature_set_point_delta':
                 # will get set in the overriding  LogisticRegressionOccupantInteractionBuilding._get_observation_space_limits_data
                 pass
 
             else:
-                low_limit[key] = min(data[key])
-                high_limit[key] = max(data[key])
+                low_limit[key] = float(np.min(data[key]))
+                high_limit[key] = float(np.max(data[key]))
 
         low_limit = {k: v - self.observation_space_limit_delta for k, v in low_limit.items()}
         high_limit = {k: v + self.observation_space_limit_delta for k, v in high_limit.items()}
@@ -2573,7 +2573,6 @@ class Building(Environment):
                     'dhw_demand': self.energy_simulation.dhw_demand[t],
                     'solar_generation': self.energy_simulation.solar_generation[t],
                     'indoor_temperature': self.energy_simulation.indoor_dry_bulb_temperature[t],
-                    'solar_generation': self.energy_simulation.solar_generation[t]
                 },
                 'weather': {
                     'outdoor_temperature': self.weather.outdoor_dry_bulb_temperature[t],
@@ -2894,8 +2893,8 @@ class LSTMDynamicsBuilding(DynamicsBuilding):
         # leave out the oldest set of observations and keep only the previous n
         # where n is the lookback + 1 (to include current time step observations)
         self.dynamics._model_input = [
-            l[-self.dynamics.lookback:] + [(observations[k] - min_) / (max_ - min_)]
-            for l, k, min_, max_ in zip(
+            history[-self.dynamics.lookback:] + [(observations[k] - min_) / (max_ - min_)]
+            for history, k, min_, max_ in zip(
                 self.dynamics._model_input,
                 self.dynamics.input_observation_names,
                 self.dynamics.input_normalization_minimum,

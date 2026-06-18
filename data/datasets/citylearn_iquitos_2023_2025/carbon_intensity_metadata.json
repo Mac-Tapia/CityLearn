@@ -1,0 +1,32 @@
+{
+  "titulo": "Metadatos de Intensidad de Carbono — Sistema Aislado Iquitos",
+  "fuente_principal": "MINAM INFOCARBONO — RAGEI 2019 Energia",
+  "url": "https://infocarbono.minam.gob.pe/",
+  "factor_emision_diesel": {
+    "valor": 0.79,
+    "unidad": "kg CO2/kWh",
+    "referencia": "RAGEI 2019 — Energia, MINAM Peru. Factor de emision para sistemas aislados diesel.",
+    "validacion_IPCC": "IPCC Guidelines 2006 — diesel estacionario: 0.79 kg CO2/kWh"
+  },
+  "generadores": [
+    {
+      "empresa": "ELECTRO ORIENTE S.A.",
+      "tipo": "termoelectrica diesel"
+    },
+    {
+      "empresa": "GENRENT",
+      "tipo": "generadores diesel privados"
+    }
+  ],
+  "penetracion_solar": {
+    "valor": 0.15,
+    "nota": "fraccion de generacion solar en el sistema"
+  },
+  "rango_carbon_intensity_kg_kwh": {
+    "minimo": 0.671,
+    "maximo": 0.79,
+    "nota": "varia hora a hora segun irradiancia GHI real"
+  },
+  "alcance_ghg": "Scope 2 — emisiones indirectas por consumo de electricidad",
+  "fecha_acceso": "2025"
+}

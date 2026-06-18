@@ -59,8 +59,6 @@ def test_ev_soc_matches_dataset_on_arrival(from_state: int):
 
     step = env.time_step
     prev_state = sim.electric_vehicle_charger_state[step - 1] if step > 0 else float("nan")
-    prev_ev_id = sim.electric_vehicle_id[step - 1] if step > 0 else None
-
     candidate_index = None
     if prev_state in (2, 3):
         candidate_index = step - 1

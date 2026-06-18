@@ -1,0 +1,35 @@
+{
+  "fecha_generacion": "2026-06-06T17:18:30.412417",
+  "anios": [
+    2023,
+    2024,
+    2025
+  ],
+  "total_horas": 26304,
+  "edificios_generados": 1,
+  "fuentes_meteorologicas": {
+    "2023": "PVGIS-ERA5 (primario) / NASA POWER (fallback)",
+    "2024": "NASA POWER",
+    "2025": "NASA POWER"
+  },
+  "bess_por_edificio": {
+    "1": {
+      "capacidad_kwh": 4020.0,
+      "potencia_kw": 1005.0
+    }
+  },
+  "solar_pv_kwp_dc": {
+    "1": 1703.6
+  },
+  "carbon_intensity_range_kg_kwh": [
+    0.671,
+    0.79
+  ],
+  "pricing": {
+    "source": "TotalFacturado mensual buildingcsv calibrado por energia punta/fuera punta",
+    "currency": "moneda_factura/kWh",
+    "min": 0.383221,
+    "max": 1.066919,
+    "mean": 0.532889935
+  }
+}

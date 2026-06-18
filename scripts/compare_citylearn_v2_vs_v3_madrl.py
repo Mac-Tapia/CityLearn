@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Dict, List, Mapping, Optional
 
 import matplotlib
 
@@ -16,23 +18,102 @@ import pandas as pd
 
 
 DEFAULT_V2_ROOT = Path("outputs/citylearn_v2_original_benchmark")
-DEFAULT_V3_ROOT = Path("outputs/citylearn_v3_madrl_official_full_cuda_v2")
 DEFAULT_OUTPUT = Path("outputs/comparison_citylearn_v2_vs_v3_madrl")
+LATEST_OUTPUT_POINTER = Path("outputs/latest_visible_training_output_root.txt")
+SCRIPT_DIR = Path(__file__).resolve().parent
+SCENARIOS = ("E1", "E2", "E3")
+ALL_SCENARIOS = "ALL"
+V2_FAMILY = "citylearn_v2_original"
+V3_FAMILY = "citylearn_v3_madrl"
+V2_AGENT_CHOICES = (
+    "baseline",
+    "basic_rbc",
+    "hour_rbc",
+    "marlisa",
+    "optimized_rbc",
+    "random",
+    "sac",
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--v2-root", default=str(DEFAULT_V2_ROOT))
-    parser.add_argument("--v3-root", default=str(DEFAULT_V3_ROOT))
+    parser.add_argument(
+        "--v3-root",
+        default=None,
+        help="Completed CityLearn v3 MADRL output root. Defaults to outputs/latest_visible_training_output_root.txt.",
+    )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT))
-    parser.add_argument("--scenario", default="E3")
+    parser.add_argument(
+        "--scenario",
+        default="E3",
+        choices=[*SCENARIOS, ALL_SCENARIOS],
+        help="Scenario to compare. Use ALL to write one comparison folder per scenario.",
+    )
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument(
         "--weights",
         default="OE1=0.34,OE2=0.33,OE3=0.33",
         help="Axis weights used for global ranking.",
     )
+    parser.add_argument(
+        "--auto-benchmark-v2",
+        action="store_true",
+        help="Run benchmark_citylearn_v2_agents.py for missing v2 scenario artifacts before comparing.",
+    )
+    parser.add_argument(
+        "--allow-missing-v2",
+        action="store_true",
+        help="Allow v3-only output. By default, the comparator requires original v2 agent tables.",
+    )
+    parser.add_argument(
+        "--v2-agents",
+        nargs="+",
+        default=["baseline", "hour_rbc"],
+        choices=V2_AGENT_CHOICES,
+        help="Original CityLearn v2 agents to run when --auto-benchmark-v2 is enabled.",
+    )
+    parser.add_argument("--v2-train-episodes", default=0, type=int)
+    parser.add_argument("--episode-time-steps", default=8760, type=int)
+    parser.add_argument(
+        "--schema-path",
+        default=None,
+        help="Optional schema path forwarded to benchmark_citylearn_v2_agents.py.",
+    )
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Forwarded to benchmark_citylearn_v2_agents.py when --auto-benchmark-v2 is enabled.",
+    )
     return parser.parse_args()
+
+
+def _scenario_names(value: str) -> List[str]:
+    return list(SCENARIOS) if value == ALL_SCENARIOS else [value]
+
+
+def resolve_v3_root(value: Optional[str]) -> Path:
+    if value:
+        return Path(value)
+
+    if LATEST_OUTPUT_POINTER.is_file():
+        pointer_value = LATEST_OUTPUT_POINTER.read_text(encoding="utf-8-sig").strip()
+        if pointer_value:
+            return Path(pointer_value)
+
+    candidates = [
+        path
+        for path in Path("outputs").glob("*")
+        if path.is_dir() and (path / "official_full_status.json").is_file()
+    ]
+    if candidates:
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+
+    raise SystemExit(
+        "No CityLearn v3 output root was found. Pass --v3-root or create "
+        "outputs/latest_visible_training_output_root.txt by launching training."
+    )
 
 
 def _read_csv(path: Path) -> pd.DataFrame:
@@ -54,6 +135,10 @@ def _candidate_run_dirs(root: Path, scenario: str, seed: int) -> List[Path]:
     ]
 
 
+def _has_v2_agent_table(root: Path, scenario: str, seed: int, agent: str) -> bool:
+    return (root / agent / f"{scenario}_seed_{seed}" / "figures" / "tables" / "objective_kpis.csv").is_file()
+
+
 def _load_objective_table(run_dir: Path, *, family: str) -> pd.DataFrame:
     table_path = run_dir / "figures" / "tables" / "objective_kpis.csv"
     table = _read_csv(table_path)
@@ -63,7 +148,7 @@ def _load_objective_table(run_dir: Path, *, family: str) -> pd.DataFrame:
 
     method = run_dir.parent.name
     table["family"] = family
-    table["method"] = method.upper() if family == "citylearn_v3_madrl" else method
+    table["method"] = method.upper() if family == V3_FAMILY else method
     table["run_dir"] = str(run_dir)
     table["table_path"] = str(table_path)
     return table
@@ -73,12 +158,12 @@ def load_all(v2_root: Path, v3_root: Path, *, scenario: str, seed: int) -> pd.Da
     tables: List[pd.DataFrame] = []
 
     for run_dir in _candidate_run_dirs(v2_root, scenario, seed):
-        table = _load_objective_table(run_dir, family="citylearn_v2_original")
+        table = _load_objective_table(run_dir, family=V2_FAMILY)
         if not table.empty:
             tables.append(table)
 
     for run_dir in _candidate_run_dirs(v3_root, scenario, seed):
-        table = _load_objective_table(run_dir, family="citylearn_v3_madrl")
+        table = _load_objective_table(run_dir, family=V3_FAMILY)
         if not table.empty:
             tables.append(table)
 
@@ -98,6 +183,65 @@ def load_all(v2_root: Path, v3_root: Path, *, scenario: str, seed: int) -> pd.Da
         df["lower_is_better"] = df["lower_is_better"].map(_to_bool)
 
     return df
+
+
+def _run_v2_benchmark(args: argparse.Namespace, scenarios: List[str], v2_root: Path) -> None:
+    missing = [
+        scenario
+        for scenario in scenarios
+        if any(not _has_v2_agent_table(v2_root, scenario, args.seed, agent) for agent in args.v2_agents)
+    ]
+
+    if not missing:
+        return
+
+    scenario_arg = ALL_SCENARIOS if len(missing) > 1 else missing[0]
+    command = [
+        sys.executable,
+        "-B",
+        str(SCRIPT_DIR / "benchmark_citylearn_v2_agents.py"),
+        "--scenario",
+        scenario_arg,
+        "--seed",
+        str(args.seed),
+        "--episode-time-steps",
+        str(args.episode_time_steps),
+        "--train-episodes",
+        str(args.v2_train_episodes),
+        "--output-dir",
+        str(v2_root),
+        "--agents",
+        *args.v2_agents,
+    ]
+
+    if args.schema_path:
+        command.extend(["--schema-path", args.schema_path])
+
+    if args.continue_on_error:
+        command.append("--continue-on-error")
+
+    print(
+        "Missing CityLearn v2 original benchmark artifacts for "
+        f"{', '.join(missing)}. Running: {' '.join(command)}",
+        flush=True,
+    )
+    subprocess.run(command, check=True)
+
+
+def _validate_required_families(df: pd.DataFrame, *, scenario: str, allow_missing_v2: bool) -> None:
+    families = set(df["family"].dropna().astype(str)) if "family" in df else set()
+
+    if V3_FAMILY not in families:
+        raise SystemExit(
+            f"No CityLearn v3 MADRL objective_kpis.csv files found for scenario {scenario}. "
+            "Check --v3-root and training completion."
+        )
+
+    if not allow_missing_v2 and V2_FAMILY not in families:
+        raise SystemExit(
+            f"No original CityLearn v2 agent objective_kpis.csv files found for scenario {scenario}. "
+            "Run benchmark_citylearn_v2_agents.py first or pass --auto-benchmark-v2."
+        )
 
 
 def _to_bool(value):
@@ -164,7 +308,7 @@ def build_rankings(df: pd.DataFrame, weights: Mapping[str, float]) -> tuple[pd.D
         .agg(
             normalized_score=("normalized_score", "mean"),
             available_kpis=("value", lambda s: int(pd.to_numeric(s, errors="coerce").notna().sum())),
-            improved_kpis=("improved_vs_baseline", lambda s: int((s == True).sum())),
+            improved_kpis=("improved_vs_baseline", lambda s: int(s.sum())),
             total_kpis=("kpi", "count"),
         )
         .reset_index()
@@ -208,7 +352,7 @@ def _plot_axis(df: pd.DataFrame, output_dir: Path, axis: str) -> Optional[Path]:
     )
 
     labels = [f"{row.method}\n{row.family.replace('citylearn_', '')}" for row in summary.itertuples()]
-    colors = ["#2f7d6d" if family == "citylearn_v3_madrl" else "#6f7fa8" for family in summary["family"]]
+    colors = ["#2f7d6d" if family == V3_FAMILY else "#6f7fa8" for family in summary["family"]]
     fig, ax = plt.subplots(figsize=(11, max(4, 0.45 * len(summary))))
     ax.barh(labels, summary["score"], color=colors)
     ax.set_xlabel("normalized KPI score (higher is better)")
@@ -277,25 +421,32 @@ def _summary_json(df: pd.DataFrame, axis_rank: pd.DataFrame, global_rank: pd.Dat
         "rows": int(len(df)),
         "families": sorted(df["family"].dropna().unique().tolist()) if not df.empty else [],
         "methods": sorted(df["method"].dropna().unique().tolist()) if not df.empty else [],
+        "v2_methods": sorted(df.loc[df["family"] == V2_FAMILY, "method"].dropna().unique().tolist()) if not df.empty else [],
+        "v3_methods": sorted(df.loc[df["family"] == V3_FAMILY, "method"].dropna().unique().tolist()) if not df.empty else [],
         "best_by_axis": best_by_axis,
         "best_global": best_global,
     }
 
 
-def main() -> int:
-    args = parse_args()
-    v2_root = Path(args.v2_root)
-    v3_root = Path(args.v3_root)
-    output_dir = Path(args.output_dir)
+def run_comparison(
+    *,
+    v2_root: Path,
+    v3_root: Path,
+    output_dir: Path,
+    scenario: str,
+    seed: int,
+    weights: Mapping[str, float],
+    allow_missing_v2: bool,
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    weights = parse_weights(args.weights)
-    df = load_all(v2_root, v3_root, scenario=args.scenario, seed=args.seed)
+    df = load_all(v2_root, v3_root, scenario=scenario, seed=seed)
 
     if df.empty:
         raise SystemExit(
             "No objective_kpis.csv files found. Run benchmark_citylearn_v2_agents.py "
             "and ensure MADRL v3 runs have completed artifacts."
         )
+    _validate_required_families(df, scenario=scenario, allow_missing_v2=allow_missing_v2)
 
     scored = _normalized_scores(df)
     axis_rank, global_rank = build_rankings(df, weights)
@@ -318,12 +469,42 @@ def main() -> int:
         figures.append(str(heatmap))
 
     summary = _summary_json(df, axis_rank, global_rank, weights)
+    summary["scenario"] = scenario
+    summary["v2_root"] = str(v2_root)
+    summary["v3_root"] = str(v3_root)
     summary["figures"] = figures
-    (output_dir / "comparison_summary.json").write_text(
+    summary_path = output_dir / "comparison_summary.json"
+    summary_path.write_text(
         json.dumps(summary, indent=2),
         encoding="utf-8",
     )
-    print(output_dir / "comparison_summary.json")
+    return summary_path
+
+
+def main() -> int:
+    args = parse_args()
+    v2_root = Path(args.v2_root)
+    v3_root = resolve_v3_root(args.v3_root)
+    output_root = Path(args.output_dir)
+    weights = parse_weights(args.weights)
+    scenarios = _scenario_names(args.scenario)
+
+    if args.auto_benchmark_v2:
+        _run_v2_benchmark(args, scenarios, v2_root)
+
+    for scenario in scenarios:
+        output_dir = output_root / scenario if args.scenario == ALL_SCENARIOS else output_root
+        summary_path = run_comparison(
+            v2_root=v2_root,
+            v3_root=v3_root,
+            output_dir=output_dir,
+            scenario=scenario,
+            seed=args.seed,
+            weights=weights,
+            allow_missing_v2=args.allow_missing_v2,
+        )
+        print(summary_path)
+
     return 0
 
 

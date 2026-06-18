@@ -292,6 +292,7 @@ def make_citylearn_dec_pomdp(
     random_seed: Optional[int] = None,
     scenario: Optional[str] = None,
     reward_aggregation: str = "team_mean",
+    normalize_observations: bool = False,
     offline: bool = True,
     **citylearn_kwargs,
 ) -> CityLearnDecPOMDPEnv:
@@ -314,6 +315,11 @@ def make_citylearn_dec_pomdp(
         manager.select_scenario(scenario)
         manager.apply_scenario_modifications(env)
 
+    if normalize_observations:
+        from citylearn.wrappers import NormalizedObservationWrapper
+
+        env = NormalizedObservationWrapper(env)
+
     return CityLearnDecPOMDPEnv(
         env,
         reward_aggregation=reward_aggregation,
@@ -328,6 +334,7 @@ def make_citylearn_17_building_ev_dec_pomdp(
     random_seed: Optional[int] = None,
     scenario: Optional[str] = None,
     reward_aggregation: str = "team_mean",
+    normalize_observations: bool = False,
     offline: bool = True,
     **citylearn_kwargs,
 ) -> CityLearnDecPOMDPEnv:
@@ -340,6 +347,7 @@ def make_citylearn_17_building_ev_dec_pomdp(
         random_seed=random_seed,
         scenario=scenario,
         reward_aggregation=reward_aggregation,
+        normalize_observations=normalize_observations,
         offline=offline,
         **citylearn_kwargs,
     )

@@ -27,6 +27,7 @@ class CityLearnV3ExperimentConfig:
     reward_aggregation: str = "team_mean"
     reward_function: str = "citylearn.reward_function.CityLearnV3MADRLRewardFunction"
     central_agent: bool = False
+    normalize_observations: bool = False
     backend_policy: str = "official_repository"
     use_citylearn_v2_kpis: bool = True
     multiobjective_method: str = "TOPSIS"
@@ -70,6 +71,7 @@ class CityLearnV3ExperimentConfig:
             episode_time_steps=episode_time_steps,
             reward_aggregation=self.reward_aggregation,
             central_agent=self.central_agent,
+            normalize_observations=self.normalize_observations,
             backend_policy=self.backend_policy,
             use_citylearn_v2_kpis=self.use_citylearn_v2_kpis,
             multiobjective_method=self.multiobjective_method,

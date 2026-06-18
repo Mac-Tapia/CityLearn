@@ -63,7 +63,8 @@ class LogisticRegressionOccupant(Occupant):
         delta = super().predict()
         response = None
         interaction_input, delta_input = x
-        interaction_probability = lambda  a, b, x_ : 1/(1 + np.exp(-(a + b*x_)))
+        def interaction_probability(a, b, x_):
+            return 1/(1 + np.exp(-(a + b*x_)))
         increase_setpoint_probability = interaction_probability(self.parameters.a_increase[self.time_step], self.parameters.b_increase[self.time_step], interaction_input)
         decrease_setpoint_probability = interaction_probability(self.parameters.a_decrease[self.time_step], self.parameters.b_decrease[self.time_step], interaction_input)
         random_seed = max(self.random_seed, 1) + self.time_step

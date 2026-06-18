@@ -85,12 +85,129 @@ env = make_citylearn_v3_project_env(scenario="E1", seed=0)
 
 The project default v3 environment uses:
 
-- Schema: `citylearn_challenge_2022_phase_all_plus_evs/schema.json`
-- Agents: 17 CityLearn buildings
-- EV: charger actions/observations embedded in the building spaces
+- Schema: `citylearn_iquitos_2023_2025/schema.json`
+- Agents: 17 real Iquitos buildings
+- EV: 185 Mode 3 charger loadpoints embedded in the building spaces; 31
+  camioneta loadpoints are V2G bidirectional and non-camioneta EVs remain
+  charge-only
 - Reward: collaborative team mean by default
 - CTDE state: concatenated local observations
 - KPIs: full CityLearn v2 `evaluate_v2` table, plus thesis summary extraction
+
+## Iquitos Dataset Distillation
+
+The active thesis dataset is generated from real building inputs in
+`CityLearn/data/buildingcsv/` and integrated into
+`CityLearn/data/datasets/citylearn_iquitos_2023_2025/`.
+
+### Real building parameters (updated 2026-06-04)
+
+`building.csv` provides the authoritative building inventory for all 17 buildings:
+real official names, exact roof areas, CityLearn use types, large cooling systems
+(Chiller Water-Cooled, Multi-Chiller Plant, Clinical Chiller + HEPA,
+DataCenter Precision AC, Industrial Mobile Vessel AC, Scientific Ultra-Freezers -80C),
+estimated split AC unit counts, and predominant vehicle types.
+
+Key area corrections from building.csv vs previous estimates:
+
+| ID | Building | Area m2 | Cooling system |
+|---|---|---:|---|
+| B05 | Hotel Plaza S.A. | 1,141.89 | Commercial Kitchen Cold Rooms |
+| B09 | Gobierno Regional COER | 4,479.67 | DataCenter Precision AC (N+1) |
+| B10 | Gobierno Regional de Loreto | 14,295.73 | Duct Central Split System |
+| B11 | Hospital Regional de Loreto | 42,649.33 | Clinical Chiller + HEPA + Blood Bank |
+| B12 | Seguro Social EsSalud | 18,197.48 | Medical Archive AC System |
+| B14 | Autoridad Portuaria Nacional | 17,761.00 | Splits autonomos |
+| B15 | DREL Colegio Nacional | 9,889.92 | Splits autonomos |
+| B16 | SIMA Iquitos S.R.Ltda | 10,294.00 | Industrial Mobile Vessel AC |
+| B17 | Asociacion Civil Selva Amazonica | 1,611.23 | Scientific Ultra-Freezers -80C |
+
+`cooling_peak` is estimated as `split_units * 3.5 kW` plus large system capacity.
+COP is assigned per real cooling system type (Chiller=4.5, Multi-Chiller=5.0,
+Precision AC=2.0, Ultra-Freezers=0.8, splits=2.8).
+
+### Distillation from monthly measurements
+
+- `B_02.csv` through `B_17.csv` provide monthly measured meter inputs.
+  `Building_1.csv` is preserved because there is no matching `buildingcsv`
+  source for B_01. All building CSVs keep the 12-column, 26,304-row structure.
+- `tools/distill_building_loads.py` converts monthly measurements into hourly
+  CityLearn loads by calendar-aware transformations, not arbitrary synthesis.
+  `EnergiaActivaHoraPunta` and `EnergiaActivaFueraPunta` are the physical kWh
+  source; `totalEnergiaActiva` is used as fallback only when the peak/off-peak
+  split is missing.
+- The distilled `non_shiftable_load` is residual:
+  `NSL = E_medido_mes - cooling_demand/COP - dhw_demand/COP`.
+  Monthly balance delta is guaranteed < 0.1%. EV, BESS and PV are control/DER
+  assets and are not subtracted from historical building meter energy.
+- `TotalFacturado` and `Tarifa` calibrate `pricing.csv` via
+  `C_mes = p_punta * E_punta + p_fuera * E_fuera`. Output is the
+  CityLearn-compatible hourly `electricity_pricing` plus 1/2/3-hour forecasts.
+- Missing months are forecasted with `calendar_month_mean_overlap_scaled` and
+  documented in `tools/dataset_docs/distillation_report.csv`.
+- `tools/generate_iquitos_dataset.py` synchronizes names, areas, PV sizing
+  (pvlib SAPM, SunPower SPR-315E), BESS sizing (Hesse 2017 method), EV charger
+  profiles (50 files) and carbon intensity (0.671-0.790 kgCO2/kWh, RAGEI 2019).
+- `dhw_demand` is non-zero only for B05 (Hotel, 614 kWh/day), B11 (Hospital,
+  1200 kWh/day) and B12 (EsSalud, 780 kWh/day). All other buildings have
+  dhw_demand=0 because tropical Iquitos (28-38 degC) does not require domestic
+  hot water heating in commercial buildings without dedicated DHW devices.
+
+Full pipeline documentation: `docs/dataset_construction_pipeline.md`.
+
+The validated environment exposes 17 agents, EV actions/observations,
+`state_dim=1856`, 31 bidirectional V2G EV actions and full CityLearn v2 KPI
+tables.
+
+## Training Observation Normalization
+
+Training launchers normalize observations before they enter the MADRL backend.
+This step is applied at the environment-wrapper layer, not by modifying the
+dataset CSV files. The Iquitos dataset keeps physical units such as kWh, kgCO2,
+prices, SOC percentages and charger states so CityLearn simulation, KPIs and
+audits remain traceable to source data.
+
+The common training adapter uses CityLearn's `NormalizedObservationWrapper` by
+default. Temporal observations such as `month`, `day_type` and `hour` are
+encoded cyclically, then active observations are min-max scaled to `[0, 1]`.
+For the 17-building Iquitos EV schema, EV observations/actions remain exposed
+and the validated CTDE state dimension is `state_dim=1856`.
+
+Use `--raw-observations` only to reproduce legacy raw-input runs. The default
+training behavior is normalized input:
+
+```powershell
+python -B CityLearn\scripts\train_citylearn_v3_matd3.py `
+  --schema-path CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json `
+  --scenario E1
+```
+
+## Training Artifact Traceability
+
+Completed MADRL runs use `data/` as the canonical artifact boundary. For each
+`<OutputRoot>/<algorithm>/<scenario>_seed_<seed>/` directory, final evidence is
+accepted from:
+
+- `data/results.json`
+- `data/training_summary.json`
+- `data/artifact_audit.json`
+- `data/checkpoint_manifest.json`
+- `data/timeseries.csv`
+- `data/trace.csv`
+- `checkpoints/`
+- `figures/figures_manifest.json`
+- `figures/tables/`
+
+Root-level mirrors such as `results.json`, `timeseries.csv` or
+`checkpoint_manifest.json` are disabled by default to avoid duplicate or stale
+traceability. They are available only through `--legacy-root-artifacts` for
+legacy consumers. Cross-run copies under `statistical_comparison/` are also
+disabled by default and require `--statistical-comparison-artifacts`.
+
+`live_progress.json` is transient runtime state. The training writer removes it
+after final artifacts are written, and the official monitor exits when
+`official_full_status.json` reaches `completed` unless launched with
+`-KeepOpenOnComplete`.
 
 ## Thesis Objective KPIs
 
@@ -164,22 +281,78 @@ Activate and validate it:
 
 ```powershell
 .\.venv39-citylearn-v3\Scripts\Activate.ps1
-python -B CityLearn\scripts\check_citylearn_v3_training_ready.py --strict
-python -B CityLearn\scripts\run_citylearn_v3_env_smoke.py --episode-time-steps 4 --steps 3
+python -B CityLearn\scripts\check_citylearn_v3_training_ready.py `
+  --strict `
+  --schema-path CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json `
+  --scenario E1
+python -B CityLearn\scripts\run_citylearn_v3_env_smoke.py `
+  --schema-path CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json `
+  --scenario E1 `
+  --episode-time-steps 4 `
+  --steps 3
 ```
 
 The readiness check verifies:
 
-- `pip check` has no broken requirements.
-- CityLearn v3 builds the 17-building + EV Dec-POMDP.
+- CityLearn v3 builds the Iquitos 17-building + EV Dec-POMDP.
+- The dataset exposes exactly 31 camioneta V2G loadpoints and 154 charge-only
+  EV loadpoints.
 - CTDE global state and local decentralized observations/actions are exposed.
 - Full CityLearn v2 KPI tables are available.
 - MARLlib imports and registers `citylearn_v3`.
 - HAPPO, MASAC and MAAC official sources import in Python 3.9.
 - MATD3 PyTorch imports through the `marlbenchmark/off-policy` backend.
-- MATD3 official source is present, but its training entry point imports
-  `tensorflow.contrib`, so official MATD3 training requires a separate legacy
-  TensorFlow 1.x environment or a documented compatibility port.
+- MATD3 legacy TensorFlow 1.x source is present as reference only; active
+  training uses the PyTorch off-policy backend.
+- `pip check` is reported as metadata consistency only unless
+  `--require-pip-check` is explicitly requested. The validated stack keeps
+  `numpy==1.23.5` for Ray/CityLearn compatibility.
+
+## Training Launch Boundary
+
+Full training must not be launched as part of file/documentation validation.
+Use smoke checks first. The official 12-job chain is launched only after an
+explicit user confirmation:
+
+The launchers activate the project environment before spawning training jobs:
+`VIRTUAL_ENV` is set to `.venv39-citylearn-v3`, that environment's `Scripts`
+directory is prepended to `PATH`, and `PYTHONPATH` is set to the project root
+plus `CityLearn/`. Each manifest records the resolved `python.exe`,
+`virtual_env` and `pythonpath` under `active_project_environment`.
+
+MASAC and MAAC use the official discrete-action backends, while CityLearn
+buildings expose multi-dimensional continuous control actions. The adapter maps
+each discrete policy output to a compact one-axis CityLearn action basis by
+default (`--discrete-action-mode axis`). This preserves the official backend
+interface without enumerating the exponential cartesian product of all actuator
+bins, which is not memory-tractable for the 17-building EV schema. HAPPO and
+MATD3 remain continuous-action backends.
+
+Verify the launch environment without starting training:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File CityLearn\scripts\launch_citylearn_v3_official_training.ps1 `
+  -Scenario E1 `
+  -EpisodeTimeSteps 4 `
+  -Episodes 1 `
+  -SchemaPath CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json `
+  -OutputRoot outputs\citylearn_v3_env_dryrun `
+  -DryRun
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File CityLearn\scripts\launch_citylearn_v3_official_training.ps1 `
+  -Scenario ALL `
+  -Seed 0 `
+  -EpisodeTimeSteps 8760 `
+  -Episodes 5 `
+  -SchemaPath CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json `
+  -OutputRoot outputs\citylearn_v3_madrl_iquitos_official_full_cuda_v1 `
+  -TorchThreads 12 `
+  -LiveProgressInterval 250 `
+  -LiveOutput `
+  -Cuda
+```
 
 ## MATD3 PyTorch Backend
 

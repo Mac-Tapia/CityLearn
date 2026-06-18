@@ -134,6 +134,28 @@ def test_citylearn_v3_env_is_generic_for_citylearn_v2_datasets():
         env.close()
 
 
+def test_citylearn_v3_env_can_normalize_observations_before_training():
+    env = make_citylearn_v3_env(
+        schema_path="data/datasets/baeda_3dem/schema.json",
+        episode_time_steps=4,
+        seed=0,
+        normalize_observations=True,
+    )
+
+    try:
+        observations, _ = env.reset()
+        description = describe_environment(env)
+        values = np.concatenate([value.reshape(-1) for value in observations.values()])
+
+        assert description["normalize_observations"] is True
+        assert np.nanmin(values) >= 0.0
+        assert np.nanmax(values) <= 1.0
+        assert all(float(env.observation_space(agent).low.min()) == 0.0 for agent in env.agents)
+        assert all(float(env.observation_space(agent).high.max()) == 1.0 for agent in env.agents)
+    finally:
+        env.close()
+
+
 def test_citylearn_v3_marllib_adapter_pads_heterogeneous_spaces():
     config = CityLearnV3ExperimentConfig().for_smoke_test(episode_time_steps=4)
     env = CityLearnV3MARLlibEnv({"config": config, "scenario": "E1", "seed": 0})

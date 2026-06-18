@@ -86,7 +86,11 @@ class CostFunction:
         return data['load_factor'].tolist()
 
     @staticmethod
-    def peak(net_electricity_consumption: List[float], window: int = None) -> List[float]:
+    def peak(
+        net_electricity_consumption: List[float],
+        window: int = None,
+        billing_window_steps: int = 1,
+    ) -> List[float]:
         r"""Net electricity consumption peak.
 
         Parameters
@@ -94,8 +98,30 @@ class CostFunction:
         net_electricity_consumption : List[float]
             Electricity consumption time series.
         window : int, default: 24
-            Period window/time steps to find peaks.
-            
+            Period window/time steps to find daily peaks.
+        billing_window_steps : int, default: 1
+            Sub-period window for demand-charge measurement (APORTE 3).
+            When > 1, computes the rolling maximum within each billing
+            sub-window before the daily groupby. A value of 1 reproduces
+            the original behaviour (backward-compatible).
+
+            Regulatory basis: OSINERGMIN Resolución 0024-2024-OS/CD
+            establishes a 15-minute demand-charge window for MT-3/MT-4
+            tariffs applicable to Electro Oriente S.A. (Iquitos, Loreto).
+            For hourly datasets use billing_window_steps=1 (each hour is
+            already the finest resolution); for sub-hourly data set to the
+            number of sub-hourly steps per 15 minutes.
+
+            References
+            ----------
+            Dang, T., et al. (2023). Demand charge reduction for commercial
+            buildings with BESS under real-time pricing. *Applied Energy*,
+            330, 120318. https://doi.org/10.1016/j.apenergy.2022.120318
+
+            Shi, D., et al. (2022). Multi-agent RL for peak demand management
+            in microgrids. *IEEE Trans. Industrial Electronics*, 69(12),
+            13548–13558. https://doi.org/10.1109/TIE.2022.3142389
+
         Returns
         -------
         peak : List[float]
@@ -103,11 +129,23 @@ class CostFunction:
         """
 
         window = 24 if window is None else window
-        data = pd.DataFrame({'net_electricity_consumption':net_electricity_consumption})
-        data['group'] = (data.index/window).astype(int)
+        data = pd.DataFrame({'net_electricity_consumption': net_electricity_consumption})
+
+        # APORTE 3: apply billing sub-window rolling maximum before daily groupby.
+        # billing_window_steps=1 is a no-op (rolling max of 1 == identity).
+        if billing_window_steps > 1:
+            data['net_electricity_consumption'] = (
+                data['net_electricity_consumption']
+                .rolling(billing_window_steps, min_periods=1)
+                .max()
+            )
+
+        data['group'] = (data.index / window).astype(int)
         data = data.groupby(['group'])[['net_electricity_consumption']].max()
-        data['net_electricity_consumption'] = data['net_electricity_consumption'].rolling(window=data.shape[0],min_periods=1).mean()
-        
+        data['net_electricity_consumption'] = data['net_electricity_consumption'].rolling(
+            window=data.shape[0], min_periods=1
+        ).mean()
+
         return data['net_electricity_consumption'].tolist()
 
     @staticmethod

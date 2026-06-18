@@ -6,7 +6,7 @@ import pandas as pd
 
 try:
     from ray.rllib.env import MultiAgentEnv
-except (ModuleNotFoundError, ImportError) as e:
+except (ModuleNotFoundError, ImportError):
     from gymnasium import Env as MultiAgentEnv
 
 from citylearn.citylearn import CityLearnEnv
@@ -31,8 +31,8 @@ class ClippedObservationWrapper(ObservationWrapper):
         """Returns normalized observations."""
 
         for i, (o, s) in enumerate(zip(observations, self.observation_space)):
-            for j, (o_, l, u) in enumerate(zip(o, s.low, s.high)):
-                observations[i][j] = min(max(o_, l), u)
+            for j, (value, low, upper) in enumerate(zip(o, s.low, s.high)):
+                observations[i][j] = min(max(value, low), upper)
 
         return observations
 
@@ -213,8 +213,8 @@ class NormalizedActionWrapper(ActionWrapper):
         for i, s in enumerate(self.env.unwrapped.action_space):
             transformed_actions_ = []
             
-            for j, (l, h) in enumerate(zip(s.low, s.high)):
-                a = actions[i][j]*(h - l) + l
+            for j, (low, high) in enumerate(zip(s.low, s.high)):
+                a = actions[i][j]*(high - low) + low
                 transformed_actions_.append(a)
             
             transformed_actions.append(transformed_actions_)

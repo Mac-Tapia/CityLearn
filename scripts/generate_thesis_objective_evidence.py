@@ -11,8 +11,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import json
+import math
+import random
 import sys
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
@@ -27,7 +31,10 @@ if str(CITYLEARN_ROOT) not in sys.path:
 
 
 ALGORITHMS = ("happo", "masac", "matd3", "maac")
+ALGORITHM_NAMES = tuple(algorithm.upper() for algorithm in ALGORITHMS)
 SCENARIOS = ("E1", "E2", "E3")
+STATISTICAL_ALPHA = 0.05
+BOOTSTRAP_ITERATIONS = 2000
 TABLE_NAMES = (
     "episode_summary",
     "objective_kpis",
@@ -37,6 +44,7 @@ TABLE_NAMES = (
     "exploration_summary",
     "agent_reward_summary",
     "checkpoint_inventory",
+    "building_kpis",
 )
 FIGURE_NAMES = (
     "reward_timeseries.png",
@@ -122,10 +130,32 @@ def parse_args() -> argparse.Namespace:
 
 def parse_output_roots(items: Sequence[str]) -> Dict[str, Path]:
     if not items:
-        items = [
-            "official_local_5ep=outputs/citylearn_v3_madrl_official_full_cuda_v2",
-            "colab_pro_50ep=outputs/citylearn_v3_madrl_colab_pro_50ep",
-        ]
+        items = []
+        latest_pointer = PROJECT_ROOT / "outputs" / "latest_visible_training_output_root.txt"
+        if latest_pointer.is_file():
+            latest_value = latest_pointer.read_text(encoding="utf-8-sig").strip()
+            if latest_value:
+                items.append(f"official_active={latest_value}")
+
+        colab_root = PROJECT_ROOT / "outputs" / "citylearn_v3_madrl_colab_pro_50ep"
+        if colab_root.exists():
+            items.append("colab_pro_50ep=outputs/citylearn_v3_madrl_colab_pro_50ep")
+
+        if not items:
+            candidates = [
+                path
+                for path in (PROJECT_ROOT / "outputs").glob("*")
+                if path.is_dir() and (path / "official_full_status.json").is_file()
+            ]
+            if candidates:
+                latest = max(candidates, key=lambda path: path.stat().st_mtime)
+                items.append(f"official_latest=outputs/{latest.name}")
+
+        if not items:
+            raise ValueError(
+                "No training output root found. Pass --output-root LABEL=PATH "
+                "or launch training to create outputs/latest_visible_training_output_root.txt."
+            )
 
     output_roots: Dict[str, Path] = {}
     for item in items:
@@ -224,6 +254,256 @@ def as_bool(value: Any) -> Optional[bool]:
     if text in {"false", "0", "no"}:
         return False
     return None
+
+
+def finite_values(values: Iterable[Any]) -> List[float]:
+    output: List[float] = []
+    for value in values:
+        numeric = as_float(value)
+        if numeric is not None and math.isfinite(numeric):
+            output.append(float(numeric))
+    return output
+
+
+def mean_value(values: Sequence[float]) -> Optional[float]:
+    values = finite_values(values)
+    return None if not values else float(sum(values) / len(values))
+
+
+def median_value(values: Sequence[float]) -> Optional[float]:
+    values = sorted(finite_values(values))
+    if not values:
+        return None
+    midpoint = len(values) // 2
+    if len(values) % 2:
+        return float(values[midpoint])
+    return float((values[midpoint - 1] + values[midpoint]) / 2.0)
+
+
+def sample_variance(values: Sequence[float]) -> Optional[float]:
+    values = finite_values(values)
+    if len(values) < 2:
+        return None
+    avg = float(sum(values) / len(values))
+    return float(sum((value - avg) ** 2 for value in values) / (len(values) - 1))
+
+
+def standard_deviation(values: Sequence[float]) -> Optional[float]:
+    variance = sample_variance(values)
+    if variance is None:
+        return None
+    return float(math.sqrt(max(variance, 0.0)))
+
+
+def scipy_stats_module():
+    try:
+        from scipy import stats  # type: ignore
+
+        return stats
+    except Exception:
+        return None
+
+
+def rankdata_average(values: Sequence[float]) -> List[float]:
+    indexed = sorted((float(value), index) for index, value in enumerate(values))
+    ranks = [0.0] * len(indexed)
+    cursor = 0
+    while cursor < len(indexed):
+        end = cursor + 1
+        while end < len(indexed) and indexed[end][0] == indexed[cursor][0]:
+            end += 1
+        average_rank = (cursor + 1 + end) / 2.0
+        for _, original_index in indexed[cursor:end]:
+            ranks[original_index] = average_rank
+        cursor = end
+    return ranks
+
+
+def kruskal_h_fallback(groups: Mapping[str, Sequence[float]]) -> Optional[float]:
+    clean_groups = {name: finite_values(values) for name, values in groups.items()}
+    clean_groups = {name: values for name, values in clean_groups.items() if values}
+    if len(clean_groups) < 2:
+        return None
+
+    pooled: List[float] = []
+    slices: Dict[str, tuple[int, int]] = {}
+    for name, values in clean_groups.items():
+        start = len(pooled)
+        pooled.extend(values)
+        slices[name] = (start, len(pooled))
+
+    total_n = len(pooled)
+    if total_n < 2:
+        return None
+
+    ranks = rankdata_average(pooled)
+    numerator = 0.0
+    for name, (start, end) in slices.items():
+        group_ranks = ranks[start:end]
+        numerator += (sum(group_ranks) ** 2) / len(clean_groups[name])
+
+    h_statistic = (12.0 / (total_n * (total_n + 1.0))) * numerator - 3.0 * (total_n + 1.0)
+
+    tie_counts: Dict[float, int] = {}
+    for value in pooled:
+        tie_counts[value] = tie_counts.get(value, 0) + 1
+    tie_sum = sum(count ** 3 - count for count in tie_counts.values() if count > 1)
+    if tie_sum and total_n > 1:
+        correction = 1.0 - tie_sum / (total_n ** 3 - total_n)
+        if correction > 0:
+            h_statistic /= correction
+
+    return float(max(h_statistic, 0.0))
+
+
+def mann_whitney_u_fallback(group_a: Sequence[float], group_b: Sequence[float]) -> Optional[float]:
+    a_values = finite_values(group_a)
+    b_values = finite_values(group_b)
+    if not a_values or not b_values:
+        return None
+    pooled = a_values + b_values
+    ranks = rankdata_average(pooled)
+    rank_sum_a = sum(ranks[: len(a_values)])
+    u_a = rank_sum_a - len(a_values) * (len(a_values) + 1) / 2.0
+    return float(u_a)
+
+
+def brown_forsythe_w_fallback(groups: Mapping[str, Sequence[float]]) -> Optional[float]:
+    clean_groups = {name: finite_values(values) for name, values in groups.items()}
+    clean_groups = {name: values for name, values in clean_groups.items() if len(values) >= 2}
+    group_count = len(clean_groups)
+    total_n = sum(len(values) for values in clean_groups.values())
+    if group_count < 2 or total_n <= group_count:
+        return None
+
+    deviations: Dict[str, List[float]] = {}
+    for name, values in clean_groups.items():
+        center = median_value(values)
+        if center is None:
+            continue
+        deviations[name] = [abs(value - center) for value in values]
+
+    all_deviations = [value for values in deviations.values() for value in values]
+    grand_mean = mean_value(all_deviations)
+    if grand_mean is None:
+        return None
+
+    numerator = 0.0
+    denominator = 0.0
+    for name, values in deviations.items():
+        group_mean = mean_value(values)
+        if group_mean is None:
+            continue
+        numerator += len(values) * (group_mean - grand_mean) ** 2
+        denominator += sum((value - group_mean) ** 2 for value in values)
+
+    if denominator <= 0.0:
+        return 0.0
+    return float(((total_n - group_count) / (group_count - 1)) * (numerator / denominator))
+
+
+def stable_seed(*parts: object) -> int:
+    seed = 0
+    for char in "|".join(str(part) for part in parts):
+        seed = (seed * 131 + ord(char)) % (2 ** 32)
+    return seed
+
+
+def bootstrap_mean_difference_ci(
+    group_a: Sequence[float],
+    group_b: Sequence[float],
+    *,
+    iterations: int = BOOTSTRAP_ITERATIONS,
+    confidence: float = 0.95,
+    rng_seed: int = 0,
+) -> tuple[Optional[float], Optional[float]]:
+    a_values = finite_values(group_a)
+    b_values = finite_values(group_b)
+    if not a_values or not b_values or iterations <= 0:
+        return None, None
+
+    rng = random.Random(rng_seed)
+    diffs: List[float] = []
+    for _ in range(iterations):
+        sample_a = [a_values[rng.randrange(len(a_values))] for _ in a_values]
+        sample_b = [b_values[rng.randrange(len(b_values))] for _ in b_values]
+        mean_a = mean_value(sample_a)
+        mean_b = mean_value(sample_b)
+        if mean_a is not None and mean_b is not None:
+            diffs.append(mean_a - mean_b)
+
+    if not diffs:
+        return None, None
+
+    diffs.sort()
+    alpha = max(0.0, min(1.0, 1.0 - confidence))
+    low_index = int(math.floor((alpha / 2.0) * (len(diffs) - 1)))
+    high_index = int(math.ceil((1.0 - alpha / 2.0) * (len(diffs) - 1)))
+    return float(diffs[low_index]), float(diffs[high_index])
+
+
+def cliffs_delta(group_a: Sequence[float], group_b: Sequence[float]) -> Optional[float]:
+    a_values = finite_values(group_a)
+    b_values = finite_values(group_b)
+    if not a_values or not b_values:
+        return None
+    greater = 0
+    lower = 0
+    for value_a in a_values:
+        for value_b in b_values:
+            if value_a > value_b:
+                greater += 1
+            elif value_a < value_b:
+                lower += 1
+    return float((greater - lower) / (len(a_values) * len(b_values)))
+
+
+def vargha_delaney_a12(group_a: Sequence[float], group_b: Sequence[float]) -> Optional[float]:
+    delta = cliffs_delta(group_a, group_b)
+    if delta is None:
+        return None
+    return float((delta + 1.0) / 2.0)
+
+
+def cohen_d(group_a: Sequence[float], group_b: Sequence[float]) -> Optional[float]:
+    a_values = finite_values(group_a)
+    b_values = finite_values(group_b)
+    if len(a_values) < 2 or len(b_values) < 2:
+        return None
+    var_a = sample_variance(a_values)
+    var_b = sample_variance(b_values)
+    mean_a = mean_value(a_values)
+    mean_b = mean_value(b_values)
+    if var_a is None or var_b is None or mean_a is None or mean_b is None:
+        return None
+    pooled = ((len(a_values) - 1) * var_a + (len(b_values) - 1) * var_b) / (len(a_values) + len(b_values) - 2)
+    if pooled <= 0.0:
+        return None
+    return float((mean_a - mean_b) / math.sqrt(pooled))
+
+
+def hedges_g(group_a: Sequence[float], group_b: Sequence[float]) -> Optional[float]:
+    d_value = cohen_d(group_a, group_b)
+    if d_value is None:
+        return None
+    degrees_of_freedom = len(finite_values(group_a)) + len(finite_values(group_b)) - 2
+    if degrees_of_freedom <= 1:
+        return d_value
+    correction = 1.0 - (3.0 / (4.0 * degrees_of_freedom - 1.0))
+    return float(d_value * correction)
+
+
+def cliffs_delta_magnitude(delta: Optional[float]) -> str:
+    if delta is None:
+        return "no_calculable"
+    absolute = abs(delta)
+    if absolute < 0.147:
+        return "negligible"
+    if absolute < 0.33:
+        return "pequeno"
+    if absolute < 0.474:
+        return "mediano"
+    return "grande"
 
 
 def objective_manifest() -> Dict[str, Any]:
@@ -508,6 +788,777 @@ def build_demonstration_statement(
     )
 
 
+def algorithm_kpi_score_rows(objective_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Build baseline-aware KPI scores for cross-algorithm statistics.
+
+    The score is a signed relative gain against the baseline. Positive values
+    are better for both lower-is-better and higher-is-better KPIs.
+    """
+
+    rows: List[Dict[str, Any]] = []
+    for row in objective_rows:
+        algorithm = str(row.get("algorithm", "")).upper()
+        axis = str(row.get("axis", ""))
+        scenario = str(row.get("scenario", ""))
+        kpi = str(row.get("kpi", ""))
+        value = as_float(row.get("value"))
+        baseline = as_float(row.get("baseline"))
+        lower_is_better = as_bool(row.get("lower_is_better"))
+        available = as_bool(row.get("available"))
+
+        if (
+            algorithm not in ALGORITHM_NAMES
+            or axis not in OBJECTIVE_DEFINITIONS
+            or value is None
+            or baseline is None
+            or lower_is_better is None
+            or available is not True
+        ):
+            continue
+
+        raw_delta = value - baseline
+        signed_absolute_gain = -raw_delta if lower_is_better else raw_delta
+        denominator = abs(baseline)
+        baseline_zero_normalization = False
+        if denominator < 1.0e-12:
+            denominator = max(abs(value), 1.0)
+            baseline_zero_normalization = True
+
+        signed_relative_gain = signed_absolute_gain / denominator
+        rows.append({
+            "scope": axis,
+            "axis": axis,
+            "scenario": scenario,
+            "dimension": OBJECTIVE_DEFINITIONS[axis]["dimension"],
+            "output_profile": row.get("output_profile", ""),
+            "algorithm": algorithm,
+            "kpi": kpi,
+            "value": value,
+            "baseline": baseline,
+            "lower_is_better": lower_is_better,
+            "raw_delta_value_minus_baseline": raw_delta,
+            "signed_absolute_gain": signed_absolute_gain,
+            "signed_relative_gain": signed_relative_gain,
+            "improved_vs_baseline": as_bool(row.get("improved_vs_baseline")),
+            "baseline_zero_normalization": baseline_zero_normalization,
+            "score_rule": "positive_signed_relative_gain_is_better",
+            "source": row.get("source", ""),
+            "run_path": row.get("run_path", ""),
+        })
+
+    return rows
+
+
+def statistical_scopes(score_rows: Sequence[Mapping[str, Any]]) -> List[str]:
+    axes = [
+        axis for axis in OBJECTIVE_DEFINITIONS
+        if any(row.get("axis") == axis for row in score_rows)
+    ]
+    return axes + (["ALL"] if score_rows else [])
+
+
+def score_groups(score_rows: Sequence[Mapping[str, Any]], scope: str) -> Dict[str, List[float]]:
+    groups: Dict[str, List[float]] = {algorithm: [] for algorithm in ALGORITHM_NAMES}
+    for row in score_rows:
+        if scope != "ALL" and row.get("axis") != scope:
+            continue
+        algorithm = str(row.get("algorithm", "")).upper()
+        if algorithm not in groups:
+            continue
+        value = as_float(row.get("signed_relative_gain"))
+        if value is not None and math.isfinite(value):
+            groups[algorithm].append(value)
+    return groups
+
+
+def group_summary_payload(groups: Mapping[str, Sequence[float]], reducer) -> Dict[str, Any]:
+    output: Dict[str, Any] = {}
+    for algorithm in ALGORITHM_NAMES:
+        values = finite_values(groups.get(algorithm, []))
+        reduced = reducer(values) if values else None
+        output[algorithm] = reduced
+    return output
+
+
+def best_algorithm_by_median(groups: Mapping[str, Sequence[float]]) -> tuple[str, Optional[float]]:
+    medians = group_summary_payload(groups, median_value)
+    valid = {algorithm: value for algorithm, value in medians.items() if value is not None}
+    if not valid:
+        return "", None
+    algorithm = max(valid, key=lambda name: valid[name])
+    return algorithm, valid[algorithm]
+
+
+def statistical_omnibus_rows(score_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    stats = scipy_stats_module()
+
+    for scope in statistical_scopes(score_rows):
+        groups = score_groups(score_rows, scope)
+        clean_groups = {name: values for name, values in groups.items() if values}
+        scenario = "ALL" if scope == "ALL" else OBJECTIVE_DEFINITIONS[scope]["scenario"]
+        dimension = "Todos los ejes" if scope == "ALL" else OBJECTIVE_DEFINITIONS[scope]["dimension"]
+        kruskal_h = kruskal_h_fallback(clean_groups)
+        kruskal_p = None
+        kruskal_status = "fallback_statistic_without_p_value"
+        brown_w = brown_forsythe_w_fallback(clean_groups)
+        brown_p = None
+        brown_status = "fallback_statistic_without_p_value"
+        shapiro_results: Dict[str, Dict[str, Any]] = {
+            algo: {"statistic": None, "p_value": None, "status": "not_computed"}
+            for algo in ALGORITHM_NAMES
+        }
+
+        if len(clean_groups) >= 2 and stats is not None:
+            try:
+                result = stats.kruskal(*[clean_groups[name] for name in sorted(clean_groups)])
+                kruskal_h = float(result.statistic)
+                kruskal_p = float(result.pvalue)
+                kruskal_status = "ok"
+            except ValueError as exc:
+                if "All numbers are identical" in str(exc):
+                    kruskal_h = 0.0
+                    kruskal_p = 1.0
+                    kruskal_status = "all_values_identical"
+                else:
+                    kruskal_status = f"not_calculable: {exc}"
+            except Exception as exc:
+                kruskal_status = f"not_calculable: {exc}"
+
+            try:
+                result = stats.levene(*[clean_groups[name] for name in sorted(clean_groups)], center="median")
+                brown_w = float(result.statistic)
+                brown_p = float(result.pvalue)
+                if not math.isfinite(brown_w) or not math.isfinite(brown_p):
+                    brown_w = 0.0
+                    brown_p = 1.0
+                    brown_status = "all_deviations_identical"
+                else:
+                    brown_status = "ok"
+            except Exception as exc:
+                brown_status = f"not_calculable: {exc}"
+
+            for algo_name in ALGORITHM_NAMES:
+                sw_values = finite_values(clean_groups.get(algo_name, []))
+                if len(sw_values) >= 3:
+                    try:
+                        sw_result = stats.shapiro(sw_values)
+                        shapiro_results[algo_name] = {
+                            "statistic": float(sw_result.statistic),
+                            "p_value": float(sw_result.pvalue),
+                            "status": "ok",
+                        }
+                    except Exception as exc:
+                        shapiro_results[algo_name]["status"] = f"not_calculable: {exc}"
+                elif sw_values:
+                    shapiro_results[algo_name]["status"] = "insufficient_data_n<3"
+                else:
+                    shapiro_results[algo_name]["status"] = "no_data"
+
+        normality_violated = any(
+            r["p_value"] is not None and r["p_value"] < STATISTICAL_ALPHA
+            for r in shapiro_results.values()
+        )
+
+        best_algorithm, best_median = best_algorithm_by_median(clean_groups)
+        rows.append({
+            "scope": scope,
+            "scenario": scenario,
+            "dimension": dimension,
+            "method": (
+                "Shapiro-Wilk normalidad por grupo; Kruskal-Wallis omnibus; "
+                "Levene/Brown-Forsythe varianza homogenea"
+            ),
+            "alpha": STATISTICAL_ALPHA,
+            "n_algorithms": len(clean_groups),
+            "algorithms": ", ".join(name for name in ALGORITHM_NAMES if name in clean_groups),
+            "n_total": sum(len(values) for values in clean_groups.values()),
+            "group_n_json": json.dumps({name: len(clean_groups.get(name, [])) for name in ALGORITHM_NAMES}, sort_keys=True),
+            "group_mean_signed_relative_gain_json": json.dumps(group_summary_payload(clean_groups, mean_value), sort_keys=True),
+            "group_median_signed_relative_gain_json": json.dumps(group_summary_payload(clean_groups, median_value), sort_keys=True),
+            "best_algorithm_by_median_gain": best_algorithm,
+            "best_median_signed_relative_gain": best_median,
+            "shapiro_wilk_statistic_HAPPO": shapiro_results["HAPPO"]["statistic"],
+            "shapiro_wilk_p_value_HAPPO": shapiro_results["HAPPO"]["p_value"],
+            "shapiro_wilk_normality_rejected_HAPPO": (
+                None if shapiro_results["HAPPO"]["p_value"] is None
+                else shapiro_results["HAPPO"]["p_value"] < STATISTICAL_ALPHA
+            ),
+            "shapiro_wilk_status_HAPPO": shapiro_results["HAPPO"]["status"],
+            "shapiro_wilk_statistic_MASAC": shapiro_results["MASAC"]["statistic"],
+            "shapiro_wilk_p_value_MASAC": shapiro_results["MASAC"]["p_value"],
+            "shapiro_wilk_normality_rejected_MASAC": (
+                None if shapiro_results["MASAC"]["p_value"] is None
+                else shapiro_results["MASAC"]["p_value"] < STATISTICAL_ALPHA
+            ),
+            "shapiro_wilk_status_MASAC": shapiro_results["MASAC"]["status"],
+            "shapiro_wilk_statistic_MATD3": shapiro_results["MATD3"]["statistic"],
+            "shapiro_wilk_p_value_MATD3": shapiro_results["MATD3"]["p_value"],
+            "shapiro_wilk_normality_rejected_MATD3": (
+                None if shapiro_results["MATD3"]["p_value"] is None
+                else shapiro_results["MATD3"]["p_value"] < STATISTICAL_ALPHA
+            ),
+            "shapiro_wilk_status_MATD3": shapiro_results["MATD3"]["status"],
+            "shapiro_wilk_statistic_MAAC": shapiro_results["MAAC"]["statistic"],
+            "shapiro_wilk_p_value_MAAC": shapiro_results["MAAC"]["p_value"],
+            "shapiro_wilk_normality_rejected_MAAC": (
+                None if shapiro_results["MAAC"]["p_value"] is None
+                else shapiro_results["MAAC"]["p_value"] < STATISTICAL_ALPHA
+            ),
+            "shapiro_wilk_status_MAAC": shapiro_results["MAAC"]["status"],
+            "normality_assumption_violated_any_group": normality_violated,
+            "shapiro_wilk_note": (
+                "SW p<0.05 rechaza normalidad; si algun grupo la rechaza, "
+                "los tests no parametricos (Kruskal-Wallis, Wilcoxon, Mann-Whitney) quedan justificados."
+            ),
+            "kruskal_h_statistic": kruskal_h,
+            "kruskal_p_value": kruskal_p,
+            "kruskal_status": kruskal_status,
+            "kruskal_significant_alpha_0_05": None if kruskal_p is None else kruskal_p < STATISTICAL_ALPHA,
+            "brown_forsythe_w_statistic": brown_w,
+            "brown_forsythe_p_value": brown_p,
+            "brown_forsythe_status": brown_status,
+            "variance_heterogeneity_alpha_0_05": None if brown_p is None else brown_p < STATISTICAL_ALPHA,
+            "method_note": (
+                "Samples are KPI-level signed relative gains against baseline; "
+                "positive values favor the algorithm. Interpret p-values as exploratory "
+                "when only one seed is available."
+            ),
+        })
+
+    return rows
+
+
+def mann_whitney_pairwise_rows(
+    score_rows: Sequence[Mapping[str, Any]],
+    *,
+    bootstrap_iterations: int = BOOTSTRAP_ITERATIONS,
+) -> List[Dict[str, Any]]:
+    """Mann-Whitney U para muestras INDEPENDIENTES.
+
+    Hipotesis: H0: las distribuciones de ganancias KPI de algoritmo_a y
+    algoritmo_b son identicas (muestras no pareadas).
+    """
+    rows: List[Dict[str, Any]] = []
+    stats = scipy_stats_module()
+
+    for scope in statistical_scopes(score_rows):
+        groups = score_groups(score_rows, scope)
+        scenario = "ALL" if scope == "ALL" else OBJECTIVE_DEFINITIONS[scope]["scenario"]
+        dimension = "Todos los ejes" if scope == "ALL" else OBJECTIVE_DEFINITIONS[scope]["dimension"]
+
+        for algorithm_a, algorithm_b in itertools.combinations(ALGORITHM_NAMES, 2):
+            values_a = finite_values(groups.get(algorithm_a, []))
+            values_b = finite_values(groups.get(algorithm_b, []))
+            mean_a = mean_value(values_a)
+            mean_b = mean_value(values_b)
+            median_a = median_value(values_a)
+            median_b = median_value(values_b)
+            u_statistic = mann_whitney_u_fallback(values_a, values_b)
+            u_p_value = None
+            u_status = "fallback_statistic_without_p_value"
+
+            if values_a and values_b and stats is not None:
+                try:
+                    result = stats.mannwhitneyu(values_a, values_b, alternative="two-sided", method="auto")
+                    u_statistic = float(result.statistic)
+                    u_p_value = float(result.pvalue)
+                    u_status = "ok"
+                except Exception as exc:
+                    u_status = f"not_calculable: {exc}"
+            elif not values_a or not values_b:
+                u_status = "insufficient_data"
+
+            ci_low, ci_high = bootstrap_mean_difference_ci(
+                values_a,
+                values_b,
+                iterations=bootstrap_iterations,
+                rng_seed=stable_seed(scope, algorithm_a, algorithm_b, "bootstrap"),
+            )
+            delta = cliffs_delta(values_a, values_b)
+            a12 = vargha_delaney_a12(values_a, values_b)
+            d_value = cohen_d(values_a, values_b)
+            g_value = hedges_g(values_a, values_b)
+            mean_difference = None if mean_a is None or mean_b is None else mean_a - mean_b
+            median_difference = None if median_a is None or median_b is None else median_a - median_b
+            if median_difference is None:
+                better_by_median = ""
+            elif median_difference > 0:
+                better_by_median = algorithm_a
+            elif median_difference < 0:
+                better_by_median = algorithm_b
+            else:
+                better_by_median = "empate"
+
+            if u_p_value is not None:
+                mwu_interpretation = (
+                    f"p={u_p_value:.4f} < alpha={STATISTICAL_ALPHA} → se rechaza H0: "
+                    f"las distribuciones de {algorithm_a} y {algorithm_b} difieren significativamente."
+                    if u_p_value < STATISTICAL_ALPHA
+                    else f"p={u_p_value:.4f} >= alpha={STATISTICAL_ALPHA} → no se rechaza H0: "
+                    f"no hay diferencia significativa entre las distribuciones de {algorithm_a} y {algorithm_b}."
+                )
+            else:
+                mwu_interpretation = "no calculable"
+
+            rows.append({
+                "scope": scope,
+                "scenario": scenario,
+                "dimension": dimension,
+                "test": "Mann-Whitney U",
+                "hypothesis_H0": f"Las distribuciones de {algorithm_a} y {algorithm_b} son identicas (muestras independientes)",
+                "sample_type": "independiente",
+                "algorithm_a": algorithm_a,
+                "algorithm_b": algorithm_b,
+                "n_a": len(values_a),
+                "n_b": len(values_b),
+                "mean_a": mean_a,
+                "mean_b": mean_b,
+                "median_a": median_a,
+                "median_b": median_b,
+                "mean_difference_a_minus_b": mean_difference,
+                "median_difference_a_minus_b": median_difference,
+                "better_by_median": better_by_median,
+                "mann_whitney_u": u_statistic,
+                "mann_whitney_p_value": u_p_value,
+                "mann_whitney_status": u_status,
+                "mann_whitney_significant_alpha_0_05": None if u_p_value is None else u_p_value < STATISTICAL_ALPHA,
+                "alpha": STATISTICAL_ALPHA,
+                "mwu_interpretation": mwu_interpretation,
+                "cliffs_delta": delta,
+                "cliffs_delta_magnitude": cliffs_delta_magnitude(delta),
+                "vargha_delaney_a12": a12,
+                "cohen_d": d_value,
+                "hedges_g": g_value,
+                "bootstrap_mean_diff_ci_low": ci_low,
+                "bootstrap_mean_diff_ci_high": ci_high,
+                "bootstrap_iterations": bootstrap_iterations,
+                "effect_direction_note": (
+                    "Positive differences, Cliff's delta, Cohen d and Hedges g favor algorithm_a; "
+                    "A12 > 0.5 favors algorithm_a."
+                ),
+            })
+
+    return rows
+
+
+def pairwise_statistical_rows(
+    score_rows: Sequence[Mapping[str, Any]],
+    *,
+    bootstrap_iterations: int = BOOTSTRAP_ITERATIONS,
+) -> List[Dict[str, Any]]:
+    """Backward-compatible alias for independent pairwise comparisons."""
+    return mann_whitney_pairwise_rows(
+        score_rows,
+        bootstrap_iterations=bootstrap_iterations,
+    )
+
+
+def wilcoxon_pairwise_rows(
+    score_rows: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Wilcoxon signed-rank para muestras PAREADAS.
+
+    Hipotesis: H0: la mediana de las diferencias pareadas d_i = A_i - B_i
+    es cero (mismo KPI, mismo edificio/episodio, dos algoritmos distintos).
+    Completamente independiente de Mann-Whitney U.
+    """
+    rows: List[Dict[str, Any]] = []
+    stats = scipy_stats_module()
+
+    for scope in statistical_scopes(score_rows):
+        groups = score_groups(score_rows, scope)
+        scenario = "ALL" if scope == "ALL" else OBJECTIVE_DEFINITIONS[scope]["scenario"]
+        dimension = "Todos los ejes" if scope == "ALL" else OBJECTIVE_DEFINITIONS[scope]["dimension"]
+
+        for algorithm_a, algorithm_b in itertools.combinations(ALGORITHM_NAMES, 2):
+            values_a = finite_values(groups.get(algorithm_a, []))
+            values_b = finite_values(groups.get(algorithm_b, []))
+            n_paired = min(len(values_a), len(values_b))
+            paired_a = values_a[:n_paired]
+            paired_b = values_b[:n_paired]
+            differences = [a - b for a, b in zip(paired_a, paired_b)]
+            n_nonzero = sum(1 for d in differences if d != 0)
+            median_diff = median_value(differences) if differences else None
+
+            wc_statistic = None
+            wc_p_value = None
+            wc_status = "not_computed"
+
+            if n_paired >= 1 and stats is not None:
+                if n_nonzero > 0:
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings(
+                                "ignore",
+                                message="Exact p-value calculation does not work if there are zeros.*",
+                                category=UserWarning,
+                            )
+                            warnings.filterwarnings(
+                                "ignore",
+                                message="Sample size too small for normal approximation.*",
+                                category=UserWarning,
+                            )
+                            wc_result = stats.wilcoxon(paired_a, paired_b, alternative="two-sided")
+                        wc_statistic = float(wc_result.statistic)
+                        wc_p_value = float(wc_result.pvalue)
+                        wc_status = f"ok_n_paired={n_paired}_n_nonzero={n_nonzero}"
+                        if n_nonzero < n_paired:
+                            wc_status += "_zero_differences_normal_approximation"
+                        if n_nonzero < 10:
+                            wc_status += "_small_sample_exploratory"
+                    except Exception as exc:
+                        wc_status = f"not_calculable: {exc}"
+                else:
+                    wc_status = "all_differences_zero"
+            elif n_paired < 1:
+                wc_status = "no_paired_data"
+
+            if median_diff is None:
+                better_by_diff = ""
+            elif median_diff > 0:
+                better_by_diff = algorithm_a
+            elif median_diff < 0:
+                better_by_diff = algorithm_b
+            else:
+                better_by_diff = "empate"
+
+            if wc_p_value is not None:
+                wc_interpretation = (
+                    f"p={wc_p_value:.4f} < alpha={STATISTICAL_ALPHA} → se rechaza H0: "
+                    f"las diferencias pareadas {algorithm_a}-{algorithm_b} son sistematicamente distintas de cero."
+                    if wc_p_value < STATISTICAL_ALPHA
+                    else f"p={wc_p_value:.4f} >= alpha={STATISTICAL_ALPHA} → no se rechaza H0: "
+                    f"no hay diferencia sistematica detectada en las diferencias pareadas {algorithm_a}-{algorithm_b}."
+                )
+            else:
+                wc_interpretation = "no calculable"
+
+            rows.append({
+                "scope": scope,
+                "scenario": scenario,
+                "dimension": dimension,
+                "test": "Wilcoxon signed-rank",
+                "hypothesis_H0": (
+                    f"La mediana de las diferencias pareadas d_i = {algorithm_a}_i - {algorithm_b}_i es cero"
+                ),
+                "sample_type": "pareado_por_indice_kpi",
+                "algorithm_a": algorithm_a,
+                "algorithm_b": algorithm_b,
+                "n_a": len(values_a),
+                "n_b": len(values_b),
+                "n_paired": n_paired,
+                "n_nonzero_differences": n_nonzero,
+                "median_difference_a_minus_b": median_diff,
+                "better_by_median_difference": better_by_diff,
+                "wilcoxon_T_statistic": wc_statistic,
+                "wilcoxon_p_value": wc_p_value,
+                "wilcoxon_status": wc_status,
+                "wilcoxon_significant_alpha_0_05": None if wc_p_value is None else wc_p_value < STATISTICAL_ALPHA,
+                "alpha": STATISTICAL_ALPHA,
+                "wilcoxon_interpretation": wc_interpretation,
+                "method_note": (
+                    "Wilcoxon signed-rank es un test NO parametrico para muestras PAREADAS. "
+                    "Difiere de Mann-Whitney U (muestras independientes): aqui se comparan "
+                    "diferencias d_i = A_i - B_i sobre el mismo KPI/edificio en ambos algoritmos."
+                ),
+            })
+
+    return rows
+
+
+def enrich_objective_compliance_with_statistics(
+    objective_compliance: Sequence[Mapping[str, Any]],
+    omnibus_rows: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    omnibus_by_scope = {str(row.get("scope")): row for row in omnibus_rows}
+    enriched: List[Dict[str, Any]] = []
+
+    for row in objective_compliance:
+        axis = str(row.get("axis", ""))
+        stats_row = omnibus_by_scope.get(axis, {})
+        p_value = as_float(stats_row.get("kruskal_p_value"))
+        variance_p_value = as_float(stats_row.get("brown_forsythe_p_value"))
+        significant = as_bool(stats_row.get("kruskal_significant_alpha_0_05"))
+        best_algorithm = str(stats_row.get("best_algorithm_by_median_gain", ""))
+        normality_violated = as_bool(stats_row.get("normality_assumption_violated_any_group"))
+        sw_p_happo = as_float(stats_row.get("shapiro_wilk_p_value_HAPPO"))
+        sw_p_masac = as_float(stats_row.get("shapiro_wilk_p_value_MASAC"))
+        sw_p_matd3 = as_float(stats_row.get("shapiro_wilk_p_value_MATD3"))
+        sw_p_maac = as_float(stats_row.get("shapiro_wilk_p_value_MAAC"))
+
+        if not stats_row:
+            interpretation = "Analisis estadistico no calculable por falta de scores KPI-normalizados."
+        else:
+            sw_verdict = (
+                "Shapiro-Wilk rechaza normalidad en al menos un grupo (tests no parametricos justificados)."
+                if normality_violated is True
+                else "Shapiro-Wilk no rechaza normalidad en ningún grupo (tests no parametricos aplicados por precaucion)."
+                if normality_violated is False
+                else "Shapiro-Wilk no calculable."
+            )
+            if significant is True:
+                interpretation = (
+                    f"{sw_verdict} "
+                    f"Kruskal-Wallis detecta diferencias globales entre algoritmos MADRL en {axis}; "
+                    f"el mejor por mediana de ganancia relativa KPI-normalizada es {best_algorithm}."
+                )
+            else:
+                interpretation = (
+                    f"{sw_verdict} "
+                    f"Kruskal-Wallis no detecta diferencias globales significativas en {axis} con alpha=0.05; "
+                    f"el ranking KPI observado se conserva como evidencia descriptiva, "
+                    f"con {best_algorithm or 'sin algoritmo dominante'} por mediana de ganancia relativa."
+                )
+
+        output = dict(row)
+        output.update({
+            "statistical_method": (
+                "Shapiro-Wilk normalidad por grupo; Kruskal-Wallis omnibus; "
+                "Mann-Whitney U + Wilcoxon signed-rank por pares; "
+                "Cliff's delta; Vargha-Delaney A12; Cohen d; Hedges g; "
+                "Levene/Brown-Forsythe; bootstrap CI 95%"
+            ),
+            "statistical_score_unit": "signed_relative_gain_vs_baseline_positive_is_better",
+            "statistical_best_algorithm_by_median_gain": best_algorithm,
+            "normality_assumption_violated_any_group": normality_violated,
+            "shapiro_wilk_p_value_HAPPO": sw_p_happo,
+            "shapiro_wilk_p_value_MASAC": sw_p_masac,
+            "shapiro_wilk_p_value_MATD3": sw_p_matd3,
+            "shapiro_wilk_p_value_MAAC": sw_p_maac,
+            "kruskal_p_value": p_value,
+            "kruskal_significant_alpha_0_05": significant,
+            "brown_forsythe_p_value": variance_p_value,
+            "variance_heterogeneity_alpha_0_05": as_bool(stats_row.get("variance_heterogeneity_alpha_0_05")),
+            "statistical_interpretation": interpretation,
+            "statistical_evidence_files": (
+                "scores_kpi_algoritmo_madrl.csv; analisis_estadistico_madrl.csv (SW+KW); "
+                "comparaciones_mwu_madrl.csv (MWU); comparaciones_wilcoxon_madrl.csv (Wilcoxon SR); "
+                "hipotesis_estadisticas_madrl.csv"
+            ),
+            "statistical_limitation": (
+                "Contrastes exploratorios sobre KPIs normalizados de una corrida por algoritmo; "
+                "no sustituyen replicacion por multiples semillas."
+            ),
+        })
+        enriched.append(output)
+
+    return enriched
+
+
+def statistical_hypothesis_rows(
+    objective_compliance: Sequence[Mapping[str, Any]],
+    omnibus_rows: Sequence[Mapping[str, Any]],
+    mwu_rows: Sequence[Mapping[str, Any]],
+    wilcoxon_rows: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Tabla de demostracion de hipotesis con los 4 tests separados.
+
+    Fuente de datos: KPIs de entrenamiento de los 4 MADRL
+    (HAPPO, MASAC, MATD3, MAAC) sobre los 3 ejes OE1/OE2/OE3.
+
+    - Shapiro-Wilk  : normalidad por grupo de algoritmo (analisis_estadistico_madrl.csv)
+    - Kruskal-Wallis: diferencias globales entre los 4 MADRL (analisis_estadistico_madrl.csv)
+    - Mann-Whitney U: comparacion por pares, muestras independientes (comparaciones_mwu_madrl.csv)
+    - Wilcoxon SR   : comparacion por pares, muestras pareadas (comparaciones_wilcoxon_madrl.csv)
+    """
+    omnibus_by_scope = {str(row.get("scope")): row for row in omnibus_rows}
+    def best_alg(scope: str) -> str:
+        return str(omnibus_by_scope.get(scope, {}).get("best_algorithm_by_median_gain", ""))
+
+    def best_mwu_pairs(scope: str, algorithm: str) -> List[Mapping[str, Any]]:
+        return [
+            r for r in mwu_rows
+            if r.get("scope") == scope
+            and (r.get("algorithm_a") == algorithm or r.get("algorithm_b") == algorithm)
+        ]
+
+    def best_wc_pairs(scope: str, algorithm: str) -> List[Mapping[str, Any]]:
+        return [
+            r for r in wilcoxon_rows
+            if r.get("scope") == scope
+            and (r.get("algorithm_a") == algorithm or r.get("algorithm_b") == algorithm)
+        ]
+
+    rows: List[Dict[str, Any]] = []
+
+    for axis_code, definition in OBJECTIVE_DEFINITIONS.items():
+        compliance = next((row for row in objective_compliance if row.get("axis") == axis_code), {})
+        omnibus = omnibus_by_scope.get(axis_code, {})
+        best_algorithm = best_alg(axis_code)
+        mwu_best = best_mwu_pairs(axis_code, best_algorithm)
+        wc_best = best_wc_pairs(axis_code, best_algorithm)
+        sig_mwu = [r for r in mwu_best if as_bool(r.get("mann_whitney_significant_alpha_0_05")) is True]
+        sig_wc = [r for r in wc_best if as_bool(r.get("wilcoxon_significant_alpha_0_05")) is True]
+
+        rows.append({
+            "axis": axis_code,
+            "scenario": definition["scenario"],
+            "dimension": definition["dimension"],
+            "hypothesis_or_expected_result": definition["expected_result"],
+            "data_source": (
+                "KPIs de entrenamiento de 4 algoritmos MADRL "
+                "(HAPPO, MASAC, MATD3, MAAC) sobre resultados de simulacion CityLearn v3"
+            ),
+            "observed_compliance_status": compliance.get("objective_compliance_status", ""),
+            "observed_demonstration_statement": compliance.get("demonstration_statement", ""),
+            "statistical_best_algorithm_by_median_gain": best_algorithm,
+            # --- TEST 1: Shapiro-Wilk (normalidad por grupo) ---
+            "SW_test": "Shapiro-Wilk",
+            "SW_H0": "Los KPI-gains de cada algoritmo MADRL siguen distribucion normal",
+            "SW_normality_violated_any_group": omnibus.get("normality_assumption_violated_any_group"),
+            "SW_p_value_HAPPO": omnibus.get("shapiro_wilk_p_value_HAPPO"),
+            "SW_p_value_MASAC": omnibus.get("shapiro_wilk_p_value_MASAC"),
+            "SW_p_value_MATD3": omnibus.get("shapiro_wilk_p_value_MATD3"),
+            "SW_p_value_MAAC": omnibus.get("shapiro_wilk_p_value_MAAC"),
+            "SW_conclusion": (
+                "Normalidad rechazada en al menos un grupo → tests no parametricos justificados."
+                if as_bool(omnibus.get("normality_assumption_violated_any_group")) is True
+                else "Ningún grupo rechaza normalidad → tests no parametricos aplicados por precaucion."
+                if as_bool(omnibus.get("normality_assumption_violated_any_group")) is False
+                else "SW no calculable."
+            ),
+            # --- TEST 2: Kruskal-Wallis (omnibus, 4 grupos) ---
+            "KW_test": "Kruskal-Wallis",
+            "KW_H0": f"Las distribuciones de KPI-gains de HAPPO, MASAC, MATD3 y MAAC son identicas en {axis_code}",
+            "KW_H_statistic": omnibus.get("kruskal_h_statistic"),
+            "KW_p_value": omnibus.get("kruskal_p_value"),
+            "KW_significant_alpha_0_05": omnibus.get("kruskal_significant_alpha_0_05"),
+            "KW_conclusion": (
+                f"p={omnibus.get('kruskal_p_value')} < 0.05 → se rechaza H0: existe diferencia entre los 4 MADRL en {axis_code}."
+                if as_bool(omnibus.get("kruskal_significant_alpha_0_05")) is True
+                else f"p={omnibus.get('kruskal_p_value')} >= 0.05 → no se rechaza H0: no se detecta diferencia global en {axis_code}."
+                if as_bool(omnibus.get("kruskal_significant_alpha_0_05")) is False
+                else "KW no calculable."
+            ),
+            # --- TEST 3: Mann-Whitney U (pares independientes) ---
+            "MWU_test": "Mann-Whitney U",
+            "MWU_H0": f"Distribuciones de {best_algorithm} y cada rival son identicas (muestras independientes) en {axis_code}",
+            "MWU_pairs_with_best": len(mwu_best),
+            "MWU_significant_pairs_with_best": len(sig_mwu),
+            "MWU_p_values_with_best": "; ".join(
+                f"{r.get('algorithm_a')} vs {r.get('algorithm_b')}: p={r.get('mann_whitney_p_value')}"
+                for r in mwu_best
+            ),
+            "MWU_conclusion": (
+                f"{len(sig_mwu)}/{len(mwu_best)} pares con {best_algorithm} son significativos (MWU p<0.05)."
+                if mwu_best else "Sin pares calculables."
+            ),
+            # --- TEST 4: Wilcoxon signed-rank (pares pareados) ---
+            "WC_test": "Wilcoxon signed-rank",
+            "WC_H0": f"Mediana de diferencias pareadas {best_algorithm}_i - rival_i es cero en {axis_code}",
+            "WC_pairs_with_best": len(wc_best),
+            "WC_significant_pairs_with_best": len(sig_wc),
+            "WC_p_values_with_best": "; ".join(
+                f"{r.get('algorithm_a')} vs {r.get('algorithm_b')}: p={r.get('wilcoxon_p_value')}"
+                for r in wc_best
+            ),
+            "WC_conclusion": (
+                f"{len(sig_wc)}/{len(wc_best)} pares con {best_algorithm} son significativos (Wilcoxon p<0.05)."
+                if wc_best else "Sin pares calculables."
+            ),
+            # --- Metadatos comunes ---
+            "alpha": STATISTICAL_ALPHA,
+            "effect_sizes_reported": "Cliff's delta, Vargha-Delaney A12, Cohen d, Hedges g (en comparaciones_mwu_madrl.csv)",
+            "bootstrap_ci_reported": "95% CI diferencia de medias (en comparaciones_mwu_madrl.csv)",
+            "evidence_files": (
+                "analisis_estadistico_madrl.csv (SW+KW); "
+                "comparaciones_mwu_madrl.csv (MWU+tamanos efecto); "
+                "comparaciones_wilcoxon_madrl.csv (Wilcoxon SR)"
+            ),
+            "decision_rule": (
+                "KPI compliance es la evidencia primaria de tesis; los 4 tests estadisticos "
+                "son soporte confirmatorio aplicado sobre KPI-gains de entrenamiento MADRL."
+            ),
+            "limitations": (
+                "Contrastes exploratorios sobre KPI-gains de una corrida por algoritmo; "
+                "no sustituyen replicacion con multiples semillas."
+            ),
+        })
+
+    overall = omnibus_by_scope.get("ALL", {})
+    best_all = best_alg("ALL")
+    mwu_best_all = best_mwu_pairs("ALL", best_all)
+    wc_best_all = best_wc_pairs("ALL", best_all)
+    sig_mwu_all = [r for r in mwu_best_all if as_bool(r.get("mann_whitney_significant_alpha_0_05")) is True]
+    sig_wc_all = [r for r in wc_best_all if as_bool(r.get("wilcoxon_significant_alpha_0_05")) is True]
+
+    rows.append({
+        "axis": "OG",
+        "scenario": "ALL",
+        "dimension": "Gestion coordinada integral",
+        "hypothesis_or_expected_result": "Determinar el mejor MADRL en los tres ejes integrados.",
+        "data_source": (
+            "KPIs de entrenamiento de 4 algoritmos MADRL "
+            "(HAPPO, MASAC, MATD3, MAAC) sobre resultados de simulacion CityLearn v3"
+        ),
+        "observed_compliance_status": "ranking_integrado_por_kpis",
+        "observed_demonstration_statement": "La evidencia descriptiva integrada se calcula sobre los KPIs comparables de OE1, OE2 y OE3.",
+        "statistical_best_algorithm_by_median_gain": best_all,
+        "SW_test": "Shapiro-Wilk",
+        "SW_H0": "Los KPI-gains de cada algoritmo MADRL siguen distribucion normal (ALL ejes)",
+        "SW_normality_violated_any_group": overall.get("normality_assumption_violated_any_group"),
+        "SW_p_value_HAPPO": overall.get("shapiro_wilk_p_value_HAPPO"),
+        "SW_p_value_MASAC": overall.get("shapiro_wilk_p_value_MASAC"),
+        "SW_p_value_MATD3": overall.get("shapiro_wilk_p_value_MATD3"),
+        "SW_p_value_MAAC": overall.get("shapiro_wilk_p_value_MAAC"),
+        "SW_conclusion": (
+            "Normalidad rechazada en al menos un grupo → tests no parametricos justificados."
+            if as_bool(overall.get("normality_assumption_violated_any_group")) is True
+            else "Ningún grupo rechaza normalidad → tests no parametricos aplicados por precaucion."
+            if as_bool(overall.get("normality_assumption_violated_any_group")) is False
+            else "SW no calculable."
+        ),
+        "KW_test": "Kruskal-Wallis",
+        "KW_H0": "Las distribuciones de KPI-gains de HAPPO, MASAC, MATD3 y MAAC son identicas (ALL ejes)",
+        "KW_H_statistic": overall.get("kruskal_h_statistic"),
+        "KW_p_value": overall.get("kruskal_p_value"),
+        "KW_significant_alpha_0_05": overall.get("kruskal_significant_alpha_0_05"),
+        "KW_conclusion": (
+            f"p={overall.get('kruskal_p_value')} < 0.05 → diferencia global entre los 4 MADRL (ALL ejes)."
+            if as_bool(overall.get("kruskal_significant_alpha_0_05")) is True
+            else f"p={overall.get('kruskal_p_value')} >= 0.05 → no se detecta diferencia global (ALL ejes)."
+            if as_bool(overall.get("kruskal_significant_alpha_0_05")) is False
+            else "KW no calculable."
+        ),
+        "MWU_test": "Mann-Whitney U",
+        "MWU_H0": f"Distribuciones de {best_all} y cada rival son identicas (independientes, ALL ejes)",
+        "MWU_pairs_with_best": len(mwu_best_all),
+        "MWU_significant_pairs_with_best": len(sig_mwu_all),
+        "MWU_p_values_with_best": "; ".join(
+            f"{r.get('algorithm_a')} vs {r.get('algorithm_b')}: p={r.get('mann_whitney_p_value')}"
+            for r in mwu_best_all
+        ),
+        "MWU_conclusion": (
+            f"{len(sig_mwu_all)}/{len(mwu_best_all)} pares con {best_all} son significativos (MWU p<0.05)."
+            if mwu_best_all else "Sin pares calculables."
+        ),
+        "WC_test": "Wilcoxon signed-rank",
+        "WC_H0": f"Mediana de diferencias pareadas {best_all}_i - rival_i es cero (ALL ejes)",
+        "WC_pairs_with_best": len(wc_best_all),
+        "WC_significant_pairs_with_best": len(sig_wc_all),
+        "WC_p_values_with_best": "; ".join(
+            f"{r.get('algorithm_a')} vs {r.get('algorithm_b')}: p={r.get('wilcoxon_p_value')}"
+            for r in wc_best_all
+        ),
+        "WC_conclusion": (
+            f"{len(sig_wc_all)}/{len(wc_best_all)} pares con {best_all} son significativos (Wilcoxon p<0.05)."
+            if wc_best_all else "Sin pares calculables."
+        ),
+        "alpha": STATISTICAL_ALPHA,
+        "effect_sizes_reported": "Cliff's delta, Vargha-Delaney A12, Cohen d, Hedges g (en comparaciones_mwu_madrl.csv)",
+        "bootstrap_ci_reported": "95% CI diferencia de medias (en comparaciones_mwu_madrl.csv)",
+        "evidence_files": (
+            "analisis_estadistico_madrl.csv (SW+KW); "
+            "comparaciones_mwu_madrl.csv (MWU+tamanos efecto); "
+            "comparaciones_wilcoxon_madrl.csv (Wilcoxon SR)"
+        ),
+        "decision_rule": "Usar ranking KPI integrado como evidencia primaria O.G.; tests como soporte.",
+        "limitations": "Contrastes exploratorios sobre KPI-gains de una corrida; requiere mas semillas.",
+    })
+    return rows
+
+
 def methodological_matrix_rows(manifest_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for row in manifest_rows:
@@ -519,7 +1570,12 @@ def methodological_matrix_rows(manifest_rows: Sequence[Mapping[str, Any]]) -> Li
             "scenario": row["scenario"],
             "measurement_source": row["source"],
             "instrument": "CityLearn v2 evaluate_v2 + CityLearn v3 proposed MADRL artifact tables",
-            "technique": "Simulacion computacional, entrenamiento MADRL, comparacion contra baseline y analisis de KPIs",
+            "technique": (
+                "Simulacion computacional, entrenamiento MADRL, comparacion contra baseline, "
+                "analisis de KPIs, Shapiro-Wilk normalidad, Kruskal-Wallis, "
+                "Mann-Whitney U, Wilcoxon signed-rank, Cliff's delta, "
+                "Vargha-Delaney A12, Cohen d, Hedges g, Levene/Brown-Forsythe y bootstrap CI"
+            ),
             "scale": "Numerica continua o ratio segun KPI",
             "interpretation_rule": "Usar lower_is_better y delta_vs_baseline cuando exista baseline disponible",
         })
@@ -540,8 +1596,16 @@ def consistency_matrix_rows() -> List[Dict[str, Any]]:
             "dimension": definition["dimension"],
             "scenario": definition["scenario"],
             "method": "Simulacion computacional no experimental con CityLearn v2 y capa CityLearn v3 propuesta",
-            "technique": "Entrenamiento MADRL CTDE, extraccion de KPIs y comparacion contra baseline",
-            "instrument": "Scripts train_citylearn_v3_*.py, objective_kpis.csv, axis_baseline_comparison.csv, figures_manifest.json",
+            "technique": (
+                "Entrenamiento MADRL CTDE, extraccion de KPIs, comparacion contra baseline, "
+                "Shapiro-Wilk normalidad, Kruskal-Wallis, Mann-Whitney U, "
+                "Wilcoxon signed-rank y contrastes no parametricos con tamanos de efecto"
+            ),
+            "instrument": (
+                "Scripts train_citylearn_v3_*.py, objective_kpis.csv, axis_baseline_comparison.csv, "
+                "figures_manifest.json, analisis_estadistico_madrl.csv (SW+KW), "
+                "comparaciones_mwu_madrl.csv (MWU), comparaciones_wilcoxon_madrl.csv (Wilcoxon SR)"
+            ),
         })
     return rows
 
@@ -670,8 +1734,12 @@ def citylearn_v3_rows() -> List[Dict[str, Any]]:
         },
         {
             "section": "Instrumentacion",
-            "content": "La capa de entrenamiento exporta resumenes, trazas, series de tiempo, KPIs, comparacion contra baseline, figuras y checkpoints.",
-            "evidence": "CityLearn/scripts/citylearn_v3_training_common.py; run_artifact_inventory.csv",
+            "content": (
+                "La capa de entrenamiento exporta resumenes, trazas, series de tiempo, KPIs, "
+                "comparacion contra baseline, figuras, checkpoints y matrices estadisticas "
+                "MADRL multialgoritmo."
+            ),
+            "evidence": "CityLearn/scripts/citylearn_v3_training_common.py; run_artifact_inventory.csv; analisis_estadistico_madrl.csv",
             "thesis_use": "Definir tecnicas e instrumentos de recoleccion de datos.",
         },
         {
@@ -721,6 +1789,172 @@ def co2_cost_rows(manifest_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, 
             "evidence_source": "matriz_kpis_tesis.csv; objective_kpis.csv por corrida cuando el entrenamiento exista",
             "status": "definido_metodologicamente",
         })
+    return rows
+
+
+def district_agent_comparison_rows(objective_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Build a wide district-level comparison: one row per (kpi, axis, scenario), columns per algorithm.
+
+    Source: objective_kpis.csv (district-level KPIs from evaluate_v2, one file per run).
+    Produces the same shape as ``per_building_agent_comparison_rows`` so both tables
+    can be read together, with ``building="District"`` as the entity identifier.
+    """
+    cell: Dict[tuple, Dict[str, Any]] = {}
+
+    for row in objective_rows:
+        algorithm = str(row.get("algorithm", "")).upper()
+        if algorithm not in ALGORITHM_NAMES:
+            continue
+        kpi = str(row.get("kpi", ""))
+        axis = str(row.get("axis", ""))
+        value = as_float(row.get("value"))
+        if not kpi or not axis or value is None:
+            continue
+        scenario = str(row.get("scenario", ""))
+        lower_is_better = as_bool(row.get("lower_is_better"))
+        baseline = as_float(row.get("baseline"))
+        delta = as_float(row.get("delta_vs_baseline"))
+        improved = as_bool(row.get("improved_vs_baseline"))
+        key = (kpi, axis, scenario)
+        record = cell.setdefault(key, {
+            "building": "District",
+            "kpi": kpi,
+            "axis": axis,
+            "scenario": scenario,
+            "lower_is_better": lower_is_better,
+            "baseline": baseline,
+            "HAPPO": None,
+            "HAPPO_delta": None,
+            "HAPPO_improved": None,
+            "MASAC": None,
+            "MASAC_delta": None,
+            "MASAC_improved": None,
+            "MATD3": None,
+            "MATD3_delta": None,
+            "MATD3_improved": None,
+            "MAAC": None,
+            "MAAC_delta": None,
+            "MAAC_improved": None,
+        })
+        record[algorithm] = value
+        record[f"{algorithm}_delta"] = delta
+        record[f"{algorithm}_improved"] = improved
+        if record["baseline"] is None and baseline is not None:
+            record["baseline"] = baseline
+        if record["lower_is_better"] is None and lower_is_better is not None:
+            record["lower_is_better"] = lower_is_better
+
+    rows: List[Dict[str, Any]] = []
+    for (kpi, axis, scenario), record in sorted(cell.items()):
+        available_algorithms = [algo for algo in ALGORITHM_NAMES if record.get(algo) is not None]
+        best_algorithm = ""
+        if available_algorithms:
+            lib = record.get("lower_is_better")
+            if lib is True:
+                best_algorithm = min(available_algorithms, key=lambda a: record.get(a) or float("inf"))
+            elif lib is False:
+                best_algorithm = max(available_algorithms, key=lambda a: record.get(a) or float("-inf"))
+        row = dict(record)
+        row["available_algorithms"] = ", ".join(available_algorithms)
+        row["best_algorithm"] = best_algorithm
+        rows.append(row)
+
+    return rows
+
+
+def _building_kpi_to_axis(cost_function: str) -> str:
+    """Map a building-level evaluate_v2 KPI name to an objective axis code."""
+    cf = cost_function.lower()
+    if "emissions" in cf:
+        return "OE2"
+    if "cost" in cf:
+        return "OE3"
+    return "OE1"
+
+
+def per_building_kpi_flat_rows(building_kpi_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten building-level KPI rows from all runs, one row per (algorithm, scenario, building, kpi).
+
+    Input rows come from ``collect_table_rows(run_inventory, "building_kpis")`` and
+    have the evaluate_v2 frame columns (cost_function, value, name, level) enriched
+    with algorithm, scenario, output_profile, seed, run_path by the collector.
+    """
+    rows: List[Dict[str, Any]] = []
+    for row in building_kpi_rows:
+        algorithm = str(row.get("algorithm", "")).upper()
+        if algorithm not in ALGORITHM_NAMES:
+            continue
+        building = str(row.get("name", ""))
+        cost_function = str(row.get("cost_function", ""))
+        value = as_float(row.get("value"))
+        if not building or not cost_function or value is None:
+            continue
+        scenario = str(row.get("scenario", ""))
+        axis = _building_kpi_to_axis(cost_function)
+        rows.append({
+            "algorithm": algorithm,
+            "scenario": scenario,
+            "output_profile": row.get("output_profile", ""),
+            "building": building,
+            "cost_function": cost_function,
+            "axis": axis,
+            "value": value,
+        })
+    return rows
+
+
+def per_building_agent_comparison_rows(building_kpi_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Build a wide comparison table: one row per (building, cost_function, axis, scenario) with a value column per algorithm.
+
+    This lets the thesis compare how each MADRL agent controls each specific building
+    across all KPI dimensions (OE1 flexibilidad, OE2 CO2, OE3 costos).
+    """
+    cell: Dict[tuple, Dict[str, Any]] = {}
+
+    for row in building_kpi_rows:
+        algorithm = str(row.get("algorithm", "")).upper()
+        if algorithm not in ALGORITHM_NAMES:
+            continue
+        building = str(row.get("name", ""))
+        cost_function = str(row.get("cost_function", ""))
+        value = as_float(row.get("value"))
+        if not building or not cost_function or value is None:
+            continue
+        scenario = str(row.get("scenario", ""))
+        axis = _building_kpi_to_axis(cost_function)
+        key = (building, cost_function, axis, scenario)
+        record = cell.setdefault(key, {
+            "building": building,
+            "cost_function": cost_function,
+            "axis": axis,
+            "scenario": scenario,
+            "HAPPO": None,
+            "MASAC": None,
+            "MATD3": None,
+            "MAAC": None,
+        })
+        record[algorithm] = value
+
+    rows: List[Dict[str, Any]] = []
+    for (building, cost_function, axis, scenario), record in sorted(cell.items()):
+        available_algorithms = [algo for algo in ALGORITHM_NAMES if record.get(algo) is not None]
+        best_algorithm = ""
+        if available_algorithms:
+            lower_is_better = not any(
+                kw in cost_function.lower()
+                for kw in ("generation", "self_consumption", "charge", "discharge",
+                           "throughput", "departure_met", "departure_within", "success",
+                           "v2g", "ev_charge", "traded", "import_share")
+            )
+            if lower_is_better:
+                best_algorithm = min(available_algorithms, key=lambda a: record.get(a) or float("inf"))
+            else:
+                best_algorithm = max(available_algorithms, key=lambda a: record.get(a) or float("-inf"))
+        row = dict(record)
+        row["available_algorithms"] = ", ".join(available_algorithms)
+        row["best_algorithm"] = best_algorithm
+        rows.append(row)
+
     return rows
 
 
@@ -797,6 +2031,7 @@ def write_summary_markdown(
     *,
     objective_compliance: Sequence[Mapping[str, Any]],
     run_inventory: Sequence[Mapping[str, Any]],
+    statistical_omnibus: Sequence[Mapping[str, Any]],
     table_names: Sequence[str],
 ) -> None:
     lines = [
@@ -817,8 +2052,31 @@ def write_summary_markdown(
             f"- Algoritmos con KPIs: {row['algorithms_with_kpis'] or 'pendiente'}",
             f"- KPIs medidos/esperados: {row['measured_kpi_count']}/{row['expected_kpi_count']}",
             f"- KPIs mejorados/no mejorados: {row['improved_kpi_records']}/{row['not_improved_kpi_records']}",
+            f"- Mejor algoritmo por mediana estadistica: {row.get('statistical_best_algorithm_by_median_gain') or 'no calculable'}",
+            f"- Kruskal-Wallis p-value: {row.get('kruskal_p_value') if row.get('kruskal_p_value') not in (None, '') else 'no calculable'}",
             "",
             row["demonstration_statement"],
+            "",
+            row.get("statistical_interpretation", ""),
+            "",
+        ])
+
+    if statistical_omnibus:
+        lines.extend([
+            "## Analisis estadistico MADRL",
+            "",
+            "Los contrastes se calculan sobre `signed_relative_gain` por KPI comparable; valores positivos favorecen al algoritmo frente al baseline.",
+            "",
+        ])
+        for row in statistical_omnibus:
+            lines.append(
+                f"- `{row.get('scope')}`: Kruskal p={row.get('kruskal_p_value')}; "
+                f"Brown-Forsythe p={row.get('brown_forsythe_p_value')}; "
+                f"mejor mediana={row.get('best_algorithm_by_median_gain') or 'no calculable'}."
+            )
+        lines.extend([
+            "",
+            "Estos p-values son apoyo exploratorio cuando solo existe una semilla por algoritmo; la evidencia primaria sigue siendo la matriz KPI/baseline.",
             "",
         ])
 
@@ -854,12 +2112,30 @@ def main() -> int:
     run_inventory = scan_runs(output_roots, args.seed)
     objective_rows = collect_table_rows(run_inventory, "objective_kpis")
     axis_rows = collect_table_rows(run_inventory, "axis_baseline_comparison")
+    raw_building_kpi_rows = collect_table_rows(run_inventory, "building_kpis")
+    per_building_flat = per_building_kpi_flat_rows(raw_building_kpi_rows)
+    per_building_comparison = per_building_agent_comparison_rows(raw_building_kpi_rows)
+    district_comparison = district_agent_comparison_rows(objective_rows)
     manifest_rows = kpi_manifest_rows(manifest)
     objective_compliance = compute_objective_compliance(
         manifest=manifest,
         run_inventory=run_inventory,
         objective_rows=objective_rows,
         axis_rows=axis_rows,
+    )
+    statistical_score_rows = algorithm_kpi_score_rows(objective_rows)
+    statistical_omnibus = statistical_omnibus_rows(statistical_score_rows)
+    statistical_mwu = mann_whitney_pairwise_rows(statistical_score_rows)
+    statistical_wilcoxon = wilcoxon_pairwise_rows(statistical_score_rows)
+    objective_compliance = enrich_objective_compliance_with_statistics(
+        objective_compliance,
+        statistical_omnibus,
+    )
+    statistical_hypotheses = statistical_hypothesis_rows(
+        objective_compliance,
+        statistical_omnibus,
+        statistical_mwu,
+        statistical_wilcoxon,
     )
     methodology_rows = methodological_matrix_rows(manifest_rows)
     consistency_rows = consistency_matrix_rows()
@@ -881,6 +2157,11 @@ def main() -> int:
         "matriz_kpis_tesis": manifest_rows,
         "matriz_resultados_madrl": objective_rows,
         "matriz_baseline_por_eje": axis_rows,
+        "scores_kpi_algoritmo_madrl": statistical_score_rows,
+        "analisis_estadistico_madrl": statistical_omnibus,
+        "comparaciones_mwu_madrl": statistical_mwu,
+        "comparaciones_wilcoxon_madrl": statistical_wilcoxon,
+        "hipotesis_estadisticas_madrl": statistical_hypotheses,
         "matriz_operacionalizacion_variables": methodology_rows,
         "Marco_metodologico_MADRL": methodology_rows,
         "CityLearn_v3_Propuesto": citylearn_v3,
@@ -891,6 +2172,9 @@ def main() -> int:
         "Datasets_y_codigo": dataset_code,
         "Arquitectura_Propuesta": architecture,
         "Aplicabilidad_SEAI_Iquitos": seai,
+        "kpis_por_edificio_y_agente": per_building_flat,
+        "comparativa_edificios_por_agente": per_building_comparison,
+        "comparativa_distrito_por_agente": district_comparison,
     }
 
     for name, rows in tables.items():
@@ -918,6 +2202,7 @@ def main() -> int:
         output_dir / "resumen_evidencia_tesis.md",
         objective_compliance=objective_compliance,
         run_inventory=run_inventory,
+        statistical_omnibus=statistical_omnibus,
         table_names=sorted(tables),
     )
 
@@ -925,6 +2210,13 @@ def main() -> int:
         "output_dir": str(output_dir),
         "run_count": len(run_inventory),
         "objective_rows": len(objective_rows),
+        "statistical_score_rows": len(statistical_score_rows),
+        "statistical_omnibus_rows": len(statistical_omnibus),
+        "statistical_mwu_rows": len(statistical_mwu),
+        "statistical_wilcoxon_rows": len(statistical_wilcoxon),
+        "per_building_flat_rows": len(per_building_flat),
+        "per_building_comparison_rows": len(per_building_comparison),
+        "district_comparison_rows": len(district_comparison),
         "objective_compliance": objective_compliance,
     }, indent=2, ensure_ascii=False))
     return 0

@@ -1,6 +1,5 @@
 from typing import Any, List, Mapping, Tuple, Union
 import numpy as np
-from citylearn.building import Building
 from citylearn.data import ZERO_DIVISION_PLACEHOLDER
 import logging
 
@@ -17,7 +16,7 @@ class RewardFunction:
     **kwargs : dict
         Other keyword arguments for custom reward calculation.
     """
-    
+
     def __init__(self, env_metadata: Mapping[str, Any], exponent: float = None, **kwargs):
         penalty_coefficient = kwargs.pop('charging_constraint_penalty_coefficient', None)
         self.env_metadata = env_metadata
@@ -31,13 +30,13 @@ class RewardFunction:
     @env_metadata.setter
     def env_metadata(self, env_metadata: Mapping[str, Any]):
         self._env_metadata = env_metadata
-    
+
     @property
     def central_agent(self) -> bool:
         """Expect 1 central agent to control all buildings."""
 
         return self.env_metadata['central_agent']
-    
+
     @property
     def exponent(self) -> float:
         return self.__exponent
@@ -86,7 +85,7 @@ class RewardFunction:
             reward = reward_list
 
         return reward
-    
+
 class MultiBuildingRewardFunction(RewardFunction):
     def __init__(self, env, reward_functions: dict[str, RewardFunction]):
         self.env = env
@@ -115,7 +114,7 @@ class MultiBuildingRewardFunction(RewardFunction):
         self._env_metadata = env_metadata
         for rf in self.reward_functions.values():
             rf.env_metadata = env_metadata
-    
+
 
 class MARL(RewardFunction):
     """MARL reward function class.
@@ -139,12 +138,12 @@ class MARL(RewardFunction):
             reward = [reward_list.sum()]
         else:
             reward = reward_list.tolist()
-        
+
         return reward
 
 class IndependentSACReward(RewardFunction):
     """Recommended for use with the `SAC` controllers.
-    
+
     Returned reward assumes that the building-agents act independently of each other, without sharing information through the reward.
 
     Parameters
@@ -152,7 +151,7 @@ class IndependentSACReward(RewardFunction):
     env_metadata: Mapping[str, Any]:
         General static information about the environment.
     """
-    
+
     def __init__(self, env_metadata: Mapping[str, Any]):
         super().__init__(env_metadata)
 
@@ -166,15 +165,15 @@ class IndependentSACReward(RewardFunction):
             reward = reward_list
 
         return reward
-    
+
 class SolarPenaltyReward(RewardFunction):
     """The reward is designed to minimize electricity consumption and maximize solar generation to charge energy storage systems.
 
     The reward is calculated for each building, i and summed to provide the agent with a reward that is representative of all the
-    building or buildings (in centralized case)it controls. It encourages net-zero energy use by penalizing grid load satisfaction 
+    building or buildings (in centralized case)it controls. It encourages net-zero energy use by penalizing grid load satisfaction
     when there is energy in the energy storage systems as well as penalizing net export when the energy storage systems are not
     fully charged through the penalty term. There is neither penalty nor reward when the energy storage systems are fully charged
-    during net export to the grid. Whereas, when the energy storage systems are charged to capacity and there is net import from the 
+    during net export to the grid. Whereas, when the energy storage systems are charged to capacity and there is net import from the
     grid the penalty is maximized.
 
     Parameters
@@ -210,9 +209,9 @@ class SolarPenaltyReward(RewardFunction):
             reward = [sum(reward_list)]
         else:
             reward = reward_list
-        
+
         return reward
-    
+
 class ComfortReward(RewardFunction):
     """Reward for occupant thermal comfort satisfaction.
 
@@ -235,7 +234,7 @@ class ComfortReward(RewardFunction):
         Penalty exponent for when in cooling mode but temperature is below setpoint lower
         boundary or heating mode but temperature is above setpoint upper boundary.
     """
-    
+
     def __init__(self, env_metadata: Mapping[str, Any], band: float = None, lower_exponent: float = None, higher_exponent: float = None):
         super().__init__(env_metadata)
         self.band = band
@@ -245,15 +244,15 @@ class ComfortReward(RewardFunction):
     @property
     def band(self) -> float:
         return self.__band
-    
+
     @property
     def lower_exponent(self) -> float:
         return self.__lower_exponent
-    
+
     @property
     def higher_exponent(self) -> float:
         return self.__higher_exponent
-    
+
     @band.setter
     def band(self, band: float):
         self.__band = band
@@ -282,11 +281,11 @@ class ComfortReward(RewardFunction):
                 lower_bound_comfortable_indoor_dry_bulb_temperature = set_point - band
                 upper_bound_comfortable_indoor_dry_bulb_temperature = set_point + band
                 delta = abs(indoor_dry_bulb_temperature - set_point)
-                
+
                 if indoor_dry_bulb_temperature < lower_bound_comfortable_indoor_dry_bulb_temperature:
                     exponent = self.lower_exponent if hvac_mode == 2 else self.higher_exponent
                     reward = -(delta**exponent)
-                
+
                 elif lower_bound_comfortable_indoor_dry_bulb_temperature <= indoor_dry_bulb_temperature < set_point:
                     reward = 0.0 if heating else -delta
 
@@ -332,7 +331,7 @@ class ComfortReward(RewardFunction):
             reward = reward_list
 
         return reward
-    
+
 class SolarPenaltyAndComfortReward(RewardFunction):
     """Addition of :py:class:`citylearn.reward_function.SolarPenaltyReward` and :py:class:`citylearn.reward_function.ComfortReward`.
 
@@ -352,7 +351,7 @@ class SolarPenaltyAndComfortReward(RewardFunction):
     coefficients: Tuple, default = (1.0, 1.0)
         Coefficents for `citylearn.reward_function.SolarPenaltyReward` and :py:class:`citylearn.reward_function.ComfortReward` values respectively.
     """
-    
+
     def __init__(self, env_metadata: Mapping[str, Any], band: float = None, lower_exponent: float = None, higher_exponent: float = None, coefficients: Tuple = None):
         self.__functions: List[RewardFunction] = [
             SolarPenaltyReward(env_metadata),
@@ -364,18 +363,18 @@ class SolarPenaltyAndComfortReward(RewardFunction):
     @property
     def coefficients(self) -> Tuple:
         return self.__coefficients
-    
+
     @RewardFunction.env_metadata.setter
     def env_metadata(self, env_metadata: Mapping[str, Any]) -> Mapping[str, Any]:
         RewardFunction.env_metadata.fset(self, env_metadata)
 
         for f in self.__functions:
             f.env_metadata = self.env_metadata
-    
+
     @coefficients.setter
     def coefficients(self, coefficients: Tuple):
         coefficients = [1.0]*len(self.__functions) if coefficients is None else coefficients
-        assert len(coefficients) == len(self.__functions), f'{type(self).__name__} needs {len(self.__functions)} coefficients.' 
+        assert len(coefficients) == len(self.__functions), f'{type(self).__name__} needs {len(self.__functions)} coefficients.'
         self.__coefficients = coefficients
 
     def calculate(self, observations: List[Mapping[str, Union[int, float]]]) -> List[float]:
@@ -497,7 +496,7 @@ class Electric_Vehicles_Reward_Function(MARL):
                     if -0.25 < soc_diff <= -0.10:
                         contributions["soc_under"] += 2 * self.weights["soc_under"] * penalty_multiplier
                     elif soc_diff <= -0.25:
-                        contributions["soc_under"] += (self.weights["soc_under"] ** 2) * penalty_multiplier
+                        contributions["soc_under"] += -abs(self.weights["soc_under"] ** 2) * penalty_multiplier
                     elif -0.10 < soc_diff <= 0.10:
                         contributions["close_soc"] += self.weights["close_soc"] * penalty_multiplier
 
@@ -531,50 +530,99 @@ CITYLEARN_V3_AXIS_REWARD_WEIGHTS = {
 
 
 CITYLEARN_V3_MADRL_REWARD_PROFILES = {
+    # v4 — unified_comparable_v4:
+    # · bess_cycle_weight=0.10: penaliza ciclado excesivo de BESS por paso (Wan et al., 2022;
+    #   Perez et al., 2021). Previene oscilación carga/descarga que acumula degradación
+    #   sin beneficio estratégico, observada en MAAC (×79 throughput vs MATD3).
+    # · ev_urgency_hours 4→8 h: amplía ventana de urgencia EV para dar señal de gradiente
+    #   más temprana a políticas con entropía (MASAC, MAAC) antes de la salida del vehículo
+    #   (Pinto et al., 2022; Montoya-Martínez et al., 2023).
+    # · ev_departure_deficit_weight 0.55→0.70: refuerza penalización en paso de salida.
+    # · ev_idle_deficit_weight 0.15→0.25: penaliza inactividad dentro de ventana urgente.
     "HAPPO": {
-        "profile_name": "happo_on_policy_cooperative_ctde",
-        "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
-        "team_reward_ratio": 0.75,
-        "ev_weight": 0.15,
-        "reward_scale": 1.00,
-        "ramp_weight": 0.35,
-        "peak_weight": 0.45,
-    },
-    "MASAC": {
-        "profile_name": "masac_entropy_regularized_dense_local_signal",
-        "axis_weight_multipliers": {"flex": 0.95, "carbon": 1.00, "cost": 1.05},
-        "team_reward_ratio": 0.55,
-        "ev_weight": 0.12,
-        "reward_scale": 0.80,
-        "ramp_weight": 0.30,
-        "peak_weight": 0.40,
-    },
-    "MATD3": {
-        "profile_name": "matd3_deterministic_peak_ramp_control",
-        "axis_weight_multipliers": {"flex": 1.15, "carbon": 0.95, "cost": 1.10},
-        "team_reward_ratio": 0.65,
-        "ev_weight": 0.10,
-        "reward_scale": 1.10,
-        "ramp_weight": 0.45,
-        "peak_weight": 0.50,
-    },
-    "MAAC": {
-        "profile_name": "maac_attention_coordinated_multiagent",
-        "axis_weight_multipliers": {"flex": 1.05, "carbon": 1.05, "cost": 1.00},
-        "team_reward_ratio": 0.80,
-        "ev_weight": 0.16,
-        "reward_scale": 1.00,
-        "ramp_weight": 0.38,
-        "peak_weight": 0.42,
-    },
-    "MADRL": {
-        "profile_name": "generic_citylearn_v3_madrl",
+        "profile_name": "happo_unified_comparable_v4",
         "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
         "team_reward_ratio": 0.70,
-        "ev_weight": 0.12,
+        "ev_weight": 0.25,
         "reward_scale": 1.00,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "bess_cycle_weight": 0.10,
+        "bess_cycle_scale": 0.05,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.70,
+        "ev_urgency_deficit_weight": 0.30,
+        "ev_idle_deficit_weight": 0.25,
+    },
+    "MASAC": {
+        "profile_name": "masac_unified_comparable_v4",
+        "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
+        "team_reward_ratio": 0.70,
+        "ev_weight": 0.25,
+        "reward_scale": 1.00,
+        "ramp_weight": 0.35,
+        "peak_weight": 0.45,
+        "bess_cycle_weight": 0.10,
+        "bess_cycle_scale": 0.05,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.70,
+        "ev_urgency_deficit_weight": 0.30,
+        "ev_idle_deficit_weight": 0.25,
+    },
+    "MATD3": {
+        "profile_name": "matd3_unified_comparable_v4",
+        "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
+        "team_reward_ratio": 0.70,
+        "ev_weight": 0.25,
+        "reward_scale": 1.00,
+        "ramp_weight": 0.35,
+        "peak_weight": 0.45,
+        "bess_cycle_weight": 0.10,
+        "bess_cycle_scale": 0.05,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.70,
+        "ev_urgency_deficit_weight": 0.30,
+        "ev_idle_deficit_weight": 0.25,
+    },
+    "MAAC": {
+        "profile_name": "maac_unified_comparable_v4",
+        "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
+        "team_reward_ratio": 0.70,
+        "ev_weight": 0.25,
+        "reward_scale": 1.00,
+        "ramp_weight": 0.35,
+        "peak_weight": 0.45,
+        "bess_cycle_weight": 0.10,
+        "bess_cycle_scale": 0.05,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.70,
+        "ev_urgency_deficit_weight": 0.30,
+        "ev_idle_deficit_weight": 0.25,
+    },
+    "MADRL": {
+        "profile_name": "generic_citylearn_v3_madrl_v4",
+        "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
+        "team_reward_ratio": 0.70,
+        "ev_weight": 0.25,
+        "reward_scale": 1.00,
+        "ramp_weight": 0.35,
+        "peak_weight": 0.45,
+        "bess_cycle_weight": 0.10,
+        "bess_cycle_scale": 0.05,
+        "ev_soc_tolerance": 0.05,
+        "ev_soc_critical_deficit": 0.25,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.70,
+        "ev_urgency_deficit_weight": 0.30,
+        "ev_idle_deficit_weight": 0.25,
     },
 }
 
@@ -608,10 +656,12 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
         self.axis_weights = self._build_axis_weights(axis_weights)
         self._last_district_import = None
         self._last_component_breakdown = {}
+        self._last_bess_socs: dict = {}
 
     def reset(self):
         self._last_district_import = None
         self._last_component_breakdown = {}
+        self._last_bess_socs = {}
 
     @property
     def metadata(self) -> Mapping[str, Any]:
@@ -696,9 +746,73 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
             return 0.0
 
         violation = self._safe_float(observation.get("charging_constraint_violation_kwh"), 0.0)
-        ev_reward = self.calculate_ev_penalty(observation, current_reward=0.0)
-        ev_reward -= max(0.0, violation) * self.charging_constraint_penalty_coefficient
-        return float(ev_reward)
+        ev_raw = self.calculate_ev_penalty(observation, current_reward=0.0)
+        ev_raw -= max(0.0, violation) * self.charging_constraint_penalty_coefficient
+        # Acotar a [-1, 1] para equiparar escala con flex/carbon/cost (que ya usan
+        # _soft()/tanh). El divisor 10.0 corresponde al peso close_soc del framework
+        # base: con 1 cargador activo ev_raw ∈ [-10, +10] → tanh(ev_raw/10) ∈ (-1, 1).
+        base_term = float(np.tanh(ev_raw / 10.0))
+        service_constraint = self._ev_service_constraint_term(observation)
+        return float(np.clip(base_term + service_constraint, -1.0, 1.0))
+
+    def _ev_service_constraint_term(self, observation: Mapping[str, Union[int, float, dict]]) -> float:
+        """Penalize unmet EV service obligations independently of energy KPIs."""
+
+        ev_chargers: Mapping[str, Mapping[str, Any]] = observation.get("electric_vehicles_chargers_dict", {})
+        if not ev_chargers:
+            return 0.0
+
+        tolerance = max(self._safe_float(self.profile.get("ev_soc_tolerance"), 0.05), ZERO_DIVISION_PLACEHOLDER)
+        critical_deficit = max(
+            self._safe_float(self.profile.get("ev_soc_critical_deficit"), 0.25),
+            tolerance,
+        )
+        urgency_hours = max(self._safe_float(self.profile.get("ev_urgency_hours"), 4.0), 0.0)
+        departure_weight = max(self._safe_float(self.profile.get("ev_departure_deficit_weight"), 0.55), 0.0)
+        urgency_weight = max(self._safe_float(self.profile.get("ev_urgency_deficit_weight"), 0.30), 0.0)
+        idle_weight = max(self._safe_float(self.profile.get("ev_idle_deficit_weight"), 0.15), 0.0)
+
+        departure_terms = []
+        urgency_terms = []
+        idle_terms = []
+
+        for data in ev_chargers.values():
+            if not data.get("connected", False):
+                continue
+
+            soc_now = self._safe_float(data.get("battery_soc"), default=np.nan)
+            required_soc = self._safe_float(data.get("required_soc"), default=np.nan)
+            if not np.isfinite(soc_now) or not np.isfinite(required_soc):
+                continue
+
+            deficit = max(0.0, required_soc - soc_now)
+            if deficit <= tolerance:
+                continue
+
+            hours_until_departure = max(self._safe_float(data.get("hours_until_departure"), 0.0), 0.0)
+            last_charged_kwh = self._safe_float(data.get("last_charged_kwh"), 0.0)
+            deficit_ratio = float(np.clip((deficit - tolerance) / critical_deficit, 0.0, 1.0))
+            urgency_factor = 0.0
+
+            if hours_until_departure <= urgency_hours:
+                urgency_factor = float((urgency_hours - hours_until_departure + 1.0) / (urgency_hours + 1.0))
+                urgency_terms.append(deficit_ratio * urgency_factor)
+
+            if hours_until_departure <= ZERO_DIVISION_PLACEHOLDER:
+                departure_terms.append(deficit_ratio)
+
+            if urgency_factor > 0.0 and last_charged_kwh <= ZERO_DIVISION_PLACEHOLDER:
+                idle_terms.append(deficit_ratio * urgency_factor)
+
+        def mean_or_zero(values: List[float]) -> float:
+            return 0.0 if not values else float(np.mean(values))
+
+        penalty = (
+            departure_weight * mean_or_zero(departure_terms)
+            + urgency_weight * mean_or_zero(urgency_terms)
+            + idle_weight * mean_or_zero(idle_terms)
+        )
+        return -float(np.clip(penalty, 0.0, 1.0))
 
     def calculate(self, observations: List[Mapping[str, Union[int, float, dict]]]) -> List[float]:
         net_values = [self._safe_float(o.get("net_electricity_consumption")) for o in observations]
@@ -713,14 +827,18 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
 
         peak_weight = float(self.profile.get("peak_weight", 0.45))
         ramp_weight = float(self.profile.get("ramp_weight", 0.35))
-        ev_weight = float(self.profile.get("ev_weight", 0.12))
+        ev_weight = float(self.profile.get("ev_weight", 0.25))
         reward_scale = float(self.profile.get("reward_scale", 1.0))
         team_reward_ratio = float(np.clip(self.profile.get("team_reward_ratio", 0.70), 0.0, 1.0))
         individual_ratio = 1.0 - team_reward_ratio
+        # BESS cycling penalty (v4): penaliza |ΔSOC| por paso para inhibir oscilación
+        # carga/descarga sin beneficio estratégico (Wan et al., 2022; Perez et al., 2021).
+        bess_cycle_weight = float(self.profile.get("bess_cycle_weight", 0.0))
+        bess_cycle_scale = max(float(self.profile.get("bess_cycle_scale", 0.05)), ZERO_DIVISION_PLACEHOLDER)
         rewards = []
         components = []
 
-        for observation, net_value, import_value, export_value in zip(observations, net_values, imports, exports):
+        for i, (observation, net_value, import_value, export_value) in enumerate(zip(observations, net_values, imports, exports)):
             price = max(self._safe_float(observation.get("electricity_pricing")), 0.0)
             carbon = max(self._safe_float(observation.get("carbon_intensity")), 0.0)
             price_norm = price / (price + self.price_reference) if price > 0.0 else 0.0
@@ -746,11 +864,23 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
             cost_component = -cost_penalty + cost_credit
             ev_component = ev_weight * self._ev_term(observation)
 
+            # Penalización BESS por ciclado excesivo: -w·tanh(|soc_t - soc_{t-1}| / scale)
+            bess_cycle_component = 0.0
+            if bess_cycle_weight > ZERO_DIVISION_PLACEHOLDER:
+                bess_soc_now = self._safe_float(observation.get("electrical_storage_soc"), default=np.nan)
+                bess_soc_prev = self._last_bess_socs.get(i, np.nan)
+                if np.isfinite(bess_soc_now) and np.isfinite(bess_soc_prev):
+                    bess_delta = abs(bess_soc_now - bess_soc_prev)
+                    bess_cycle_component = -bess_cycle_weight * self._soft(bess_delta, bess_cycle_scale)
+                if np.isfinite(bess_soc_now):
+                    self._last_bess_socs[i] = bess_soc_now
+
             scalar_reward = reward_scale * (
                 self.axis_weights["flex"] * flex_component
                 + self.axis_weights["carbon"] * carbon_component
                 + self.axis_weights["cost"] * cost_component
                 + ev_component
+                + bess_cycle_component
             )
             rewards.append(float(scalar_reward))
             components.append({
@@ -759,6 +889,7 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
                 "carbon": carbon_component,
                 "cost": cost_component,
                 "ev": ev_component,
+                "bess_cycle": bess_cycle_component,
             })
 
         team_reward = float(np.mean(rewards)) if rewards else 0.0

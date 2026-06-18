@@ -509,7 +509,7 @@ class Neighborhood:
 
             building_data.to_csv(os.path.join(schema_directory, building['energy_simulation']), index=False)
 
-        schema_filepath = os.path.join(schema_directory, f'schema.json')
+        schema_filepath = os.path.join(schema_directory, 'schema.json')
         template = user_customization_function(template) if user_customization_function is not None else template
         FileHandler.write_json(schema_filepath, template)
         

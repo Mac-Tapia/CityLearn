@@ -76,15 +76,22 @@ class CityLearnV3MARLlibEnv(MultiAgentEnv):
         scenario = env_config.pop("scenario", env_config.pop("map_name", None))
         scenario = None if scenario in {None, "citylearn_v3"} else str(scenario)
         seed = env_config.pop("seed", None)
+        normalize_observations = bool(env_config.pop("normalize_observations", True))
 
         self.citylearn_v3 = make_citylearn_v3_env(
             config,
             scenario=scenario,
             seed=None if seed is None else int(seed),
+            normalize_observations=normalize_observations,
             **env_config,
         )
         self.config = config
-        self.env_config = {"scenario": scenario, **env_config}
+        self.normalize_observations = normalize_observations
+        self.env_config = {
+            "scenario": scenario,
+            "normalize_observations": normalize_observations,
+            **env_config,
+        }
         self.agents = self.citylearn_v3.possible_agents[:]
         self.num_agents = len(self.agents)
         self._agent_to_id = {agent: i for i, agent in enumerate(self.agents)}
@@ -167,6 +174,7 @@ class CityLearnV3MARLlibEnv(MultiAgentEnv):
             "agent_order": self.agents,
             "original_observation_dims": self.original_observation_dims,
             "original_action_dims": self.original_action_dims,
+            "normalize_observations": self.normalize_observations,
         }
 
     def _format_observations(self, observations: Mapping[str, np.ndarray]) -> Dict[str, Dict[str, np.ndarray]]:

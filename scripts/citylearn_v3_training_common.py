@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import hashlib
 import itertools
 import json
+import os
+import pickle
+import shutil
 import sys
+import threading
+import time
 import types
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 from gym import spaces
@@ -20,6 +28,7 @@ CITYLEARN_ROOT = SCRIPT_PATH.parents[1]
 PROJECT_ROOT = SCRIPT_PATH.parents[2]
 EXTERNAL_ROOT = PROJECT_ROOT / "external"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "citylearn_v3_madrl"
+_CSV_CACHE_DIR = PROJECT_ROOT / "outputs" / "dataset_cache"
 DATA_DIR_NAME = "data"
 CHECKPOINT_DIR_NAME = "checkpoints"
 FIGURES_DIR_NAME = "figures"
@@ -68,11 +77,202 @@ def add_common_citylearn_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--episode-time-steps", default=4, type=int, help="Episode length for the launcher.")
     parser.add_argument("--output-dir", default=None, help="Directory for logs, models and summaries.")
     parser.add_argument(
+        "--normalize-observations",
+        dest="normalize_observations",
+        action="store_true",
+        default=True,
+        help="Use CityLearn min-max observation normalization and cyclic time encoding before backend training.",
+    )
+    parser.add_argument(
+        "--raw-observations",
+        dest="normalize_observations",
+        action="store_false",
+        help="Disable observation normalization and feed raw CityLearn units to the backend.",
+    )
+    parser.add_argument(
         "--live-progress-interval",
         default=250,
         type=int,
         help="Environment steps between live_progress.json writes.",
     )
+    parser.add_argument(
+        "--artifact-profile",
+        default="full",
+        choices=("full", "efficient", "minimal"),
+        help=(
+            "Artifact write profile. full records full-detail canonical data CSVs; "
+            "efficient samples detailed trace rows; minimal writes the smallest compatible artifact set. "
+            "Per-run JSON/CSV artifacts are canonical under data/ unless --legacy-root-artifacts is set."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-root-artifacts",
+        action="store_true",
+        help=(
+            "Also write legacy root-level mirrors such as results.json and timeseries.csv. "
+            "Disabled by default to avoid duplicate/conflicting traceability."
+        ),
+    )
+    parser.add_argument(
+        "--statistical-comparison-artifacts",
+        action="store_true",
+        help=(
+            "Export duplicate comparison copies under OutputRoot/statistical_comparison. "
+            "Disabled by default; use canonical per-run data/ artifacts for clean completed runs."
+        ),
+    )
+    parser.add_argument(
+        "--trace-record-interval",
+        default=1,
+        type=int,
+        help=(
+            "Record one detailed per-agent trace row every N environment steps. "
+            "Use 1 for full traces; larger values reduce memory and CSV I/O."
+        ),
+    )
+    parser.add_argument(
+        "--trace-detail",
+        default="full",
+        choices=("full", "compact"),
+        help="full includes named observation/action columns; compact keeps summary and energy columns only.",
+    )
+    parser.add_argument(
+        "--gpu-profile",
+        default="auto",
+        choices=("auto", "local4060_fast", "local4060", "balanced", "conservative", "aws"),
+        help="Torch/CUDA runtime profile. local4060_fast keeps RTX 4060 runs lighter; local4060 enables larger local GPU settings.",
+    )
+    parser.add_argument(
+        "--cuda-memory-fraction",
+        default=None,
+        type=float,
+        help=(
+            "Optional per-process CUDA memory cap in the range (0, 1]. "
+            "Launchers set this from dedicated VRAM reported by nvidia-smi, "
+            "not from Windows shared GPU memory."
+        ),
+    )
+
+
+def configure_torch_runtime(
+    torch_module=None,
+    *,
+    use_cuda: bool = False,
+    torch_threads: Optional[int] = None,
+    gpu_profile: str = "auto",
+    cuda_memory_fraction: Optional[float] = None,
+) -> Dict[str, object]:
+    """Configure Torch for MADRL training and return runtime metadata."""
+
+    if torch_module is None:
+        import torch as torch_module
+
+    profile = str(gpu_profile or "auto").strip().lower()
+    os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+
+    if use_cuda:
+        default_cuda_alloc_conf = (
+            "max_split_size_mb:128"
+            if sys.platform.startswith("win")
+            else "expandable_segments:True,max_split_size_mb:128"
+        )
+        current_cuda_alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "").strip()
+
+        if not current_cuda_alloc_conf:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = default_cuda_alloc_conf
+        elif sys.platform.startswith("win") and "expandable_segments" in current_cuda_alloc_conf.lower():
+            parts = [
+                part.strip()
+                for part in current_cuda_alloc_conf.split(",")
+                if part.strip() and not part.strip().lower().startswith("expandable_segments")
+            ]
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(parts) if parts else "max_split_size_mb:128"
+
+    requested_threads = _as_int(torch_threads)
+    if requested_threads is not None and requested_threads > 0:
+        try:
+            torch_module.set_num_threads(requested_threads)
+        except Exception:
+            pass
+
+    cuda_available = bool(torch_module.cuda.is_available())
+    cuda_enabled = bool(use_cuda and cuda_available)
+    matmul_precision = None
+    tf32_allowed = False
+    requested_cuda_memory_fraction = None
+    cuda_memory_fraction_applied = None
+    cuda_memory_fraction_error = None
+
+    if cuda_memory_fraction is not None:
+        try:
+            requested_cuda_memory_fraction = float(cuda_memory_fraction)
+        except Exception:
+            requested_cuda_memory_fraction = None
+
+    if hasattr(torch_module, "set_float32_matmul_precision"):
+        matmul_precision = "high" if profile in {"auto", "local4060_fast", "local4060", "balanced", "aws"} else "highest"
+        try:
+            torch_module.set_float32_matmul_precision(matmul_precision)
+        except Exception:
+            matmul_precision = None
+
+    if cuda_enabled:
+        try:
+            torch_module.cuda.set_device(0)
+        except Exception:
+            pass
+
+        if requested_cuda_memory_fraction is not None:
+            if 0.0 < requested_cuda_memory_fraction <= 1.0:
+                try:
+                    torch_module.cuda.set_per_process_memory_fraction(requested_cuda_memory_fraction, 0)
+                    cuda_memory_fraction_applied = requested_cuda_memory_fraction
+                except Exception as exc:
+                    cuda_memory_fraction_error = str(exc)
+            else:
+                cuda_memory_fraction_error = (
+                    f"cuda_memory_fraction outside (0, 1]: {requested_cuda_memory_fraction}"
+                )
+
+        try:
+            torch_module.backends.cuda.matmul.allow_tf32 = profile != "conservative"
+            tf32_allowed = bool(torch_module.backends.cuda.matmul.allow_tf32)
+        except Exception:
+            pass
+
+        try:
+            torch_module.backends.cudnn.allow_tf32 = profile != "conservative"
+            torch_module.backends.cudnn.benchmark = profile in {"auto", "local4060_fast", "local4060", "balanced", "aws"}
+        except Exception:
+            pass
+
+    device_name = None
+    device_total_memory_gib = None
+
+    if cuda_available:
+        try:
+            device_name = torch_module.cuda.get_device_name(0)
+            device_total_memory_gib = float(torch_module.cuda.get_device_properties(0).total_memory / (1024**3))
+        except Exception:
+            pass
+
+    return {
+        "profile": profile,
+        "cuda_requested": bool(use_cuda),
+        "cuda_available": cuda_available,
+        "cuda_enabled": cuda_enabled,
+        "cuda_device": "cuda:0" if cuda_enabled else "cpu",
+        "cuda_device_name": device_name,
+        "cuda_device_total_memory_gib": device_total_memory_gib,
+        "cuda_memory_fraction_requested": requested_cuda_memory_fraction,
+        "cuda_memory_fraction_applied": cuda_memory_fraction_applied,
+        "cuda_memory_fraction_error": cuda_memory_fraction_error,
+        "torch_threads": requested_threads,
+        "matmul_precision": matmul_precision,
+        "tf32_allowed": tf32_allowed,
+        "cudnn_benchmark": bool(cuda_enabled and profile in {"auto", "local4060_fast", "local4060", "balanced", "aws"}),
+        "pytorch_cuda_alloc_conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+    }
 
 
 def resolve_output_dir(output_dir: Optional[str], algorithm: str, scenario: str, seed: int) -> Path:
@@ -100,6 +300,58 @@ def ensure_artifact_layout(output_dir: Path) -> Dict[str, Path]:
     return dirs
 
 
+def start_live_progress_heartbeat(
+    adapter,
+    interval_seconds: int,
+    *,
+    active_stage: str,
+    note: Optional[str] = None,
+    initial_stage: Optional[str] = None,
+    initial_note: Optional[str] = None,
+):
+    """Start a daemon heartbeat thread for external MADRL backend update phases."""
+
+    if adapter is None or not hasattr(adapter, "write_live_heartbeat"):
+        return None, None
+
+    interval_seconds = int(interval_seconds)
+    if interval_seconds <= 0:
+        return None, None
+
+    stop_event = threading.Event()
+
+    if initial_stage:
+        try:
+            adapter.write_live_heartbeat(stage=initial_stage, note=initial_note or note)
+        except Exception:
+            pass
+
+    def heartbeat_loop() -> None:
+        while not stop_event.wait(interval_seconds):
+            try:
+                adapter.write_live_heartbeat(stage=active_stage, note=note)
+            except Exception:
+                pass
+
+    thread = threading.Thread(
+        target=heartbeat_loop,
+        name=f"{active_stage}-live-progress-heartbeat",
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread
+
+
+def stop_live_progress_heartbeat(stop_event, thread, *, timeout_seconds: float = 5.0) -> None:
+    """Stop a heartbeat returned by ``start_live_progress_heartbeat``."""
+
+    if stop_event is not None:
+        stop_event.set()
+
+    if thread is not None:
+        thread.join(timeout=timeout_seconds)
+
+
 def _artifact_layout_payload(dirs: Mapping[str, Path]) -> Dict[str, str]:
     return {name: str(path) for name, path in dirs.items()}
 
@@ -123,6 +375,15 @@ def _as_float(value) -> Optional[float]:
     return output if np.isfinite(output) else None
 
 
+def _as_int(value) -> Optional[int]:
+    try:
+        output = int(value)
+    except (TypeError, ValueError):
+        return None
+
+    return output
+
+
 def _series_value(owner, name: str, index: Optional[int]) -> Optional[float]:
     values = getattr(owner, name, None)
 
@@ -142,6 +403,30 @@ def _series_value(owner, name: str, index: Optional[int]) -> Optional[float]:
 
     index = max(0, min(int(index), array.size - 1))
     return _as_float(array[index])
+
+
+def _district_current_scalar(citylearn_env, attr: str, time_step) -> Optional[float]:
+    """Sum attr[time_step] across buildings without triggering the env-level DataFrame property.
+
+    The env-level properties (e.g. net_electricity_consumption_without_storage) build a full
+    pd.DataFrame of shape (n_buildings, n_steps_so_far) on every call — O(n) memory per step,
+    O(n^2) total. This helper reads the per-building list directly and sums, which is O(1).
+    """
+    buildings = getattr(citylearn_env, "buildings", None) or []
+    if not buildings:
+        return None
+    total = 0.0
+    for b in buildings:
+        series = getattr(b, attr, None)
+        if series is None:
+            return None
+        try:
+            idx = int(time_step) if time_step is not None else len(series) - 1
+            idx = max(0, min(idx, len(series) - 1))
+            total += float(series[idx])
+        except (IndexError, TypeError, ValueError):
+            return None
+    return total
 
 
 def _mean_current_building_signal(citylearn_env, source_name: str, series_name: str, index: Optional[int]) -> Optional[float]:
@@ -239,7 +524,10 @@ def _resolve_objective_env(candidate):
         return None
 
     if hasattr(candidate, "adapter"):
-        return candidate.adapter.env
+        adapter = getattr(candidate, "adapter", None)
+
+        if hasattr(adapter, "env"):
+            return adapter.env
 
     if hasattr(candidate, "envs"):
         envs = getattr(candidate, "envs")
@@ -276,6 +564,101 @@ def _resolve_adapter(candidate):
     return None
 
 
+def _empty_objectives() -> Dict[str, object]:
+    from citylearn.v3.objectives import objective_manifest
+
+    return {
+        "manifest": objective_manifest(),
+        "axes": {},
+        "project_axis_metrics": {},
+        "axis_kpis": {},
+        "supporting_values": {},
+        "all_values": {},
+        "kpi_frame_rows": 0,
+    }
+
+
+def _adapter_completed_objectives(adapter) -> Optional[Mapping[str, object]]:
+    if adapter is None:
+        return None
+
+    objectives = getattr(adapter, "last_completed_objectives", None)
+
+    if isinstance(objectives, Mapping) and "all_values" in objectives:
+        return objectives
+
+    return None
+
+
+def _last_timeseries_row(adapter) -> Dict[str, object]:
+    rows = getattr(adapter, "timeseries_records", None) if adapter is not None else None
+
+    if not rows:
+        return {}
+
+    return dict(rows[-1])
+
+
+def _report_source_metadata(candidate, adapter, objective_env, source_type: str) -> Dict[str, object]:
+    last_row = _last_timeseries_row(adapter)
+    return {
+        "type": source_type,
+        "candidate_class": candidate.__class__.__name__ if candidate is not None else None,
+        "objective_env_class": objective_env.__class__.__name__ if objective_env is not None else None,
+        "adapter_class": adapter.__class__.__name__ if adapter is not None else None,
+        "adapter_algorithm": getattr(adapter, "algorithm", None) if adapter is not None else None,
+        "completed_episode_count": getattr(adapter, "completed_episode_count", 0) if adapter is not None else 0,
+        "last_completed_episode": getattr(adapter, "last_completed_episode", None) if adapter is not None else None,
+        "last_completed_global_step": getattr(adapter, "last_completed_global_step", None) if adapter is not None else None,
+        "last_completed_time_step": getattr(adapter, "last_completed_time_step", None) if adapter is not None else None,
+        "last_recorded_global_step": last_row.get("global_step"),
+        "last_recorded_episode": last_row.get("episode"),
+        "last_recorded_episode_step": last_row.get("episode_step"),
+        "last_recorded_time_step": last_row.get("time_step"),
+        "last_recorded_all_done": last_row.get("all_done"),
+        "timeseries_rows": len(getattr(adapter, "timeseries_records", []) or []) if adapter is not None else 0,
+        "trace_rows": len(getattr(adapter, "trace_records", []) or []) if adapter is not None else 0,
+        "episode_time_steps": getattr(adapter, "episode_time_steps", None) if adapter is not None else None,
+        "snapshot_error": getattr(adapter, "last_completed_snapshot_error", None) if adapter is not None else None,
+    }
+
+
+def _report_warnings(report_source: Mapping[str, object], objectives: Mapping[str, object]) -> List[Dict[str, object]]:
+    warnings: List[Dict[str, object]] = []
+    source_type = report_source.get("type")
+    last_all_done = report_source.get("last_recorded_all_done")
+
+    if source_type == "current_environment" and last_all_done is False:
+        warnings.append({
+            "severity": "warning",
+            "code": "current_env_incomplete",
+            "message": "The current environment was not at an all_done episode boundary when KPIs were evaluated.",
+        })
+
+    if source_type == "last_completed_episode_snapshot" and last_all_done is False:
+        warnings.append({
+            "severity": "info",
+            "code": "using_completed_snapshot_after_backend_reset",
+            "message": "The backend current environment is incomplete; KPIs come from the last completed episode snapshot.",
+        })
+
+    if report_source.get("snapshot_error"):
+        warnings.append({
+            "severity": "warning",
+            "code": "completed_snapshot_error",
+            "message": str(report_source["snapshot_error"]),
+        })
+
+    if not objectives.get("all_values") and source_type != "none":
+        warnings.append({
+            "severity": "warning",
+            "code": "empty_objective_values",
+            "message": "Objective evaluation returned no all_values.",
+        })
+
+    return warnings
+
+
 def citylearn_v3_training_report(candidate) -> Dict[str, object]:
     """Return standardized CityLearn v2 KPI reporting for a launcher.
 
@@ -284,22 +667,23 @@ def citylearn_v3_training_report(candidate) -> Dict[str, object]:
     three thesis axes: flexibility, CO2 emissions and costs.
     """
 
-    from citylearn.v3.objectives import evaluate_objectives, objective_manifest
+    from citylearn.v3.objectives import evaluate_objectives
 
+    adapter = _resolve_adapter(candidate)
     objective_env = _resolve_objective_env(candidate)
+    completed_objectives = _adapter_completed_objectives(adapter)
 
-    if objective_env is None:
-        objectives = {
-            "manifest": objective_manifest(),
-            "axes": {},
-            "project_axis_metrics": {},
-            "axis_kpis": {},
-            "supporting_values": {},
-            "all_values": {},
-            "kpi_frame_rows": 0,
-        }
+    if completed_objectives is not None:
+        objectives = completed_objectives
+        source_type = "last_completed_episode_snapshot"
+    elif objective_env is None:
+        objectives = _empty_objectives()
+        source_type = "none"
     else:
         objectives = evaluate_objectives(objective_env)
+        source_type = "current_environment"
+
+    report_source = _report_source_metadata(candidate, adapter, objective_env, source_type)
 
     return {
         "project_axis_metrics": objectives["project_axis_metrics"],
@@ -309,6 +693,8 @@ def citylearn_v3_training_report(candidate) -> Dict[str, object]:
         "all_values": objectives["all_values"],
         "kpi_frame_rows": objectives["kpi_frame_rows"],
         "objective_manifest": objectives["manifest"],
+        "report_source": report_source,
+        "report_warnings": _report_warnings(report_source, objectives),
     }
 
 
@@ -359,9 +745,182 @@ def _episode_summaries(timeseries_rows: Sequence[Mapping[str, object]]) -> List[
             "reward_mean_average": None if not reward_means else float(np.mean(reward_means)),
             "first_global_step": rows[0].get("global_step"),
             "last_global_step": rows[-1].get("global_step"),
+            "last_episode_step": rows[-1].get("episode_step"),
+            "last_time_step": rows[-1].get("time_step"),
+            "last_all_done": rows[-1].get("all_done"),
         })
 
     return summaries
+
+
+def _sum_trace_columns(trace_rows: Sequence[Mapping[str, object]], columns: Sequence[str]) -> Dict[str, float]:
+    totals = {column: 0.0 for column in columns}
+
+    for row in trace_rows:
+        for column in columns:
+            value = _as_float(row.get(column))
+
+            if value is not None:
+                totals[column] += value
+
+    return {column: float(value) for column, value in totals.items()}
+
+
+def _trace_sampling_payload(adapter) -> Dict[str, object]:
+    interval = getattr(adapter, "trace_record_interval", None) if adapter is not None else None
+    detail = getattr(adapter, "trace_detail", None) if adapter is not None else None
+    interval_int = _as_int(interval)
+    sampled = bool(interval_int is not None and interval_int > 1)
+
+    return {
+        "trace_record_interval": interval_int,
+        "trace_detail": detail,
+        "trace_is_sampled": sampled,
+        "trace_weighting_note": (
+            "Trace-derived totals are sampled diagnostics, not full-run energy totals."
+            if sampled
+            else "Trace-derived totals use every recorded environment step."
+        ),
+    }
+
+
+def _artifact_consistency_audit(
+    *,
+    report: Mapping[str, object],
+    timeseries_rows: Sequence[Mapping[str, object]],
+    trace_rows: Sequence[Mapping[str, object]],
+    episode_summaries: Sequence[Mapping[str, object]],
+    expected_episode_time_steps: Optional[int],
+    expected_episodes: Optional[int],
+) -> Dict[str, object]:
+    report_source = dict(report.get("report_source", {}) or {})
+    all_values = dict(report.get("all_values", {}) or {})
+    completed_episode_rows = [
+        row for row in timeseries_rows
+        if bool(row.get("all_done"))
+    ]
+    last_row = dict(timeseries_rows[-1]) if timeseries_rows else {}
+    expected_row_options: List[int] = []
+    expected_rows = None
+
+    if expected_episode_time_steps and expected_episodes:
+        expected_rows = int(expected_episode_time_steps) * int(expected_episodes)
+        expected_row_options = [expected_rows]
+
+    row_delta_vs_expected = None if expected_rows is None else len(timeseries_rows) - expected_rows
+    trace_totals = _sum_trace_columns(
+        trace_rows,
+        [
+            "pv_generation_kwh",
+            "pv_export_kwh",
+            "ev_charge_kwh",
+            "ev_v2g_export_kwh",
+            "grid_import_kwh",
+            "grid_export_kwh",
+        ],
+    )
+    warnings: List[Dict[str, object]] = list(report.get("report_warnings", []) or [])
+
+    if expected_rows is not None and len(timeseries_rows) != expected_rows:
+        warnings.append({
+            "severity": "warning",
+            "code": "unexpected_timeseries_rows",
+            "message": (
+                f"Recorded {len(timeseries_rows)} timeseries rows; "
+                f"expected {expected_rows} from "
+                f"{expected_episodes} episodes x {expected_episode_time_steps} steps."
+            ),
+        })
+
+    episode_step_count_mismatches = []
+    if expected_episode_time_steps:
+        for summary in episode_summaries:
+            steps = _as_int(summary.get("steps"))
+            if steps is None or steps == int(expected_episode_time_steps):
+                continue
+            episode_step_count_mismatches.append({
+                "episode": summary.get("episode"),
+                "steps": steps,
+                "expected_steps": int(expected_episode_time_steps),
+                "last_all_done": summary.get("last_all_done"),
+                "last_global_step": summary.get("last_global_step"),
+                "last_time_step": summary.get("last_time_step"),
+            })
+
+    if episode_step_count_mismatches:
+        warnings.append({
+            "severity": "warning",
+            "code": "episode_step_count_mismatch",
+            "message": (
+                "One or more recorded episodes have a step count different from "
+                f"the configured episode_time_steps={expected_episode_time_steps}."
+            ),
+            "episodes": episode_step_count_mismatches,
+        })
+
+    if expected_episodes is not None and len(completed_episode_rows) < int(expected_episodes):
+        warnings.append({
+            "severity": "warning",
+            "code": "incomplete_completed_episode_count",
+            "message": f"Recorded {len(completed_episode_rows)} completed episodes; expected {expected_episodes}.",
+        })
+
+    if timeseries_rows and last_row.get("all_done") is not True and report_source.get("type") != "last_completed_episode_snapshot":
+        warnings.append({
+            "severity": "warning",
+            "code": "last_row_not_done_without_snapshot",
+            "message": "The last recorded row is not all_done and no completed snapshot was used for KPI reporting.",
+        })
+
+    if _as_float(all_values.get("pv_generation_total")) == 0.0 and trace_totals["pv_generation_kwh"] > 0.0:
+        warnings.append({
+            "severity": "warning",
+            "code": "pv_report_zero_but_trace_positive",
+            "message": "PV generation is positive in the training trace but zero in the objective report.",
+        })
+
+    if _as_float(all_values.get("ev_departure_count")) == 0.0 and (
+        trace_totals["ev_charge_kwh"] > 0.0 or trace_totals["ev_v2g_export_kwh"] > 0.0
+    ):
+        warnings.append({
+            "severity": "warning",
+            "code": "ev_report_zero_but_trace_active",
+            "message": "EV activity is present in the training trace but the objective report has zero departures.",
+        })
+
+    status = "ok"
+    if any(item.get("severity") == "warning" for item in warnings):
+        status = "warning"
+
+    return {
+        "status": status,
+        "warnings": warnings,
+        "report_source": report_source,
+        "expected_episode_time_steps": expected_episode_time_steps,
+        "expected_episodes": expected_episodes,
+        "expected_timeseries_rows": expected_rows,
+        "expected_timeseries_row_options": expected_row_options,
+        "timeseries_rows": len(timeseries_rows),
+        "timeseries_row_delta_vs_expected": row_delta_vs_expected,
+        "trace_rows": len(trace_rows),
+        "completed_episode_count_from_timeseries": len(completed_episode_rows),
+        "episode_summaries": list(episode_summaries),
+        "episode_step_count_mismatches": episode_step_count_mismatches,
+        "last_timeseries_row": last_row,
+        "training_trace_totals": trace_totals,
+        "objective_report_values": {
+            "pv_generation_total": all_values.get("pv_generation_total"),
+            "pv_export_total": all_values.get("pv_export_total"),
+            "ev_charge_total": all_values.get("ev_charge_total"),
+            "ev_departure_count": all_values.get("ev_departure_count"),
+            "ev_departure_success_rate": all_values.get("ev_departure_success_rate"),
+            "grid_import_control": all_values.get("grid_import_control"),
+            "grid_import_baseline": all_values.get("grid_import_baseline"),
+            "electricity_cost": all_values.get("electricity_cost"),
+            "carbon_emissions": all_values.get("carbon_emissions"),
+            "ramping_average": all_values.get("ramping_average"),
+        },
+    }
 
 
 def _objective_kpi_rows(report: Mapping[str, object]) -> List[Dict[str, object]]:
@@ -597,6 +1156,409 @@ def _agent_reward_rows(trace_rows: Sequence[Mapping[str, object]]) -> List[Dict[
         })
 
     return output
+
+
+BUILDING_DETAIL_KPI_COLUMNS: Mapping[str, str] = {
+    "building_energy_grid_total_import_control_kwh": "grid_import_control_kwh",
+    "building_energy_grid_total_import_baseline_kwh": "grid_import_baseline_kwh",
+    "building_energy_grid_total_import_delta_kwh": "grid_import_delta_kwh",
+    "building_energy_grid_daily_average_import_control_kwh": "grid_import_daily_average_control_kwh",
+    "building_energy_grid_daily_average_import_baseline_kwh": "grid_import_daily_average_baseline_kwh",
+    "building_energy_grid_daily_average_import_delta_kwh": "grid_import_daily_average_delta_kwh",
+    "building_energy_grid_total_export_control_kwh": "grid_export_control_kwh",
+    "building_energy_grid_total_export_baseline_kwh": "grid_export_baseline_kwh",
+    "building_energy_grid_total_export_delta_kwh": "grid_export_delta_kwh",
+    "building_energy_grid_daily_average_export_control_kwh": "grid_export_daily_average_control_kwh",
+    "building_energy_grid_daily_average_export_baseline_kwh": "grid_export_daily_average_baseline_kwh",
+    "building_energy_grid_daily_average_export_delta_kwh": "grid_export_daily_average_delta_kwh",
+    "building_energy_grid_total_net_exchange_control_kwh": "net_exchange_control_kwh",
+    "building_energy_grid_total_net_exchange_baseline_kwh": "net_exchange_baseline_kwh",
+    "building_energy_grid_total_net_exchange_delta_kwh": "net_exchange_delta_kwh",
+    "building_energy_grid_ratio_to_baseline_import_total_ratio": "grid_import_ratio_to_baseline",
+    "building_energy_grid_ratio_to_baseline_export_total_ratio": "grid_export_ratio_to_baseline",
+    "building_energy_grid_ratio_to_baseline_net_exchange_total_ratio": "net_exchange_ratio_to_baseline",
+    "building_cost_total_control_eur": "electricity_cost_control_eur",
+    "building_cost_total_baseline_eur": "electricity_cost_baseline_eur",
+    "building_cost_total_delta_eur": "electricity_cost_delta_eur",
+    "building_cost_ratio_to_baseline_total_ratio": "electricity_cost_ratio_to_baseline",
+    "building_emissions_total_control_kgco2": "carbon_emissions_control_kgco2",
+    "building_emissions_total_baseline_kgco2": "carbon_emissions_baseline_kgco2",
+    "building_emissions_total_delta_kgco2": "carbon_emissions_delta_kgco2",
+    "building_emissions_ratio_to_baseline_total_ratio": "carbon_emissions_ratio_to_baseline",
+    "building_solar_self_consumption_total_generation_kwh": "pv_generation_total_kwh",
+    "building_solar_self_consumption_total_export_kwh": "pv_export_total_kwh",
+    "building_solar_self_consumption_daily_average_generation_kwh": "pv_generation_daily_average_kwh",
+    "building_solar_self_consumption_daily_average_export_kwh": "pv_export_daily_average_kwh",
+    "building_solar_self_consumption_ratio_self_consumption_ratio": "pv_self_consumption_ratio",
+    "building_battery_total_charge_kwh": "battery_charge_total_kwh",
+    "building_battery_total_discharge_kwh": "battery_discharge_total_kwh",
+    "building_battery_total_throughput_kwh": "battery_throughput_total_kwh",
+    "building_battery_health_equivalent_full_cycles_count": "battery_equivalent_full_cycles",
+    "building_battery_health_capacity_fade_ratio": "battery_capacity_fade_ratio",
+    "building_ev_events_departure_count": "ev_departure_count",
+    "building_ev_events_departure_met_count": "ev_departure_met_count",
+    "building_ev_events_departure_within_tolerance_count": "ev_departure_within_tolerance_count",
+    "building_ev_performance_departure_success_ratio": "ev_departure_success_rate",
+    "building_ev_performance_departure_within_tolerance_ratio": "ev_departure_within_tolerance_rate",
+    "building_ev_performance_departure_soc_deficit_mean_ratio": "ev_departure_soc_deficit_mean",
+    "building_ev_total_charge_kwh": "ev_charge_total_kwh",
+    "building_ev_total_v2g_export_kwh": "ev_v2g_export_total_kwh",
+    "building_electrical_service_phase_violations_energy_total_kwh": "electrical_service_violation_total_kwh",
+    "building_electrical_service_phase_violations_event_count": "electrical_service_violation_time_step_count",
+    "building_electrical_service_phase_imbalance_phase_average_ratio": "phase_imbalance_ratio_average",
+    "building_equity_benefit_relative_percent": "equity_relative_benefit_percent",
+    # Legacy evaluate() names are accepted so tests and older runs can still be summarized.
+    "electricity_consumption_control_total_kwh": "grid_import_control_kwh",
+    "electricity_consumption_baseline_total_kwh": "grid_import_baseline_kwh",
+    "electricity_consumption_delta_total_kwh": "grid_import_delta_kwh",
+    "electricity_export_control_total_kwh": "grid_export_control_kwh",
+    "electricity_export_baseline_total_kwh": "grid_export_baseline_kwh",
+    "electricity_export_delta_total_kwh": "grid_export_delta_kwh",
+    "zero_net_energy_control_total_kwh": "net_exchange_control_kwh",
+    "zero_net_energy_baseline_total_kwh": "net_exchange_baseline_kwh",
+    "zero_net_energy_delta_total_kwh": "net_exchange_delta_kwh",
+    "cost_control_total_eur": "electricity_cost_control_eur",
+    "cost_baseline_total_eur": "electricity_cost_baseline_eur",
+    "cost_delta_total_eur": "electricity_cost_delta_eur",
+    "carbon_emissions_control_total_kgco2": "carbon_emissions_control_kgco2",
+    "carbon_emissions_baseline_total_kgco2": "carbon_emissions_baseline_kgco2",
+    "carbon_emissions_delta_total_kgco2": "carbon_emissions_delta_kgco2",
+    "pv_generation_total_kwh": "pv_generation_total_kwh",
+    "pv_export_total_kwh": "pv_export_total_kwh",
+    "pv_self_consumption_ratio": "pv_self_consumption_ratio",
+    "bess_charge_total_kwh": "battery_charge_total_kwh",
+    "bess_discharge_total_kwh": "battery_discharge_total_kwh",
+    "bess_throughput_total_kwh": "battery_throughput_total_kwh",
+    "bess_equivalent_full_cycles": "battery_equivalent_full_cycles",
+    "bess_capacity_fade_ratio": "battery_capacity_fade_ratio",
+    "ev_charge_total_kwh": "ev_charge_total_kwh",
+    "ev_v2g_export_total_kwh": "ev_v2g_export_total_kwh",
+}
+
+KEY_OBSERVATION_NAMES = {
+    "net_electricity_consumption",
+    "solar_generation",
+    "electricity_pricing",
+    "carbon_intensity",
+    "electrical_storage_soc",
+    "cooling_storage_soc",
+    "heating_storage_soc",
+    "dhw_storage_soc",
+    "cooling_demand",
+    "heating_demand",
+    "dhw_demand",
+    "non_shiftable_load",
+    "outdoor_dry_bulb_temperature",
+    "occupant_count",
+}
+
+
+def _sort_agent_key(agent: object) -> Tuple[str, int, str]:
+    text = str(agent)
+    suffix = text.rsplit("_", 1)[-1]
+
+    try:
+        number = int(suffix)
+    except ValueError:
+        number = 0
+
+    prefix = text[: -len(suffix)] if suffix else text
+    return prefix, number, text
+
+
+def _slug_name(name: object) -> str:
+    text = str(name).strip().lower()
+    output = "".join(character if character.isalnum() else "_" for character in text)
+    output = "_".join(part for part in output.split("_") if part)
+    return output or "value"
+
+
+def _space_bound(space, attribute: str, index: int) -> Optional[float]:
+    try:
+        values = np.asarray(getattr(space, attribute), dtype=float).reshape(-1)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+    if index >= values.size:
+        return None
+
+    return _as_float(values[index])
+
+
+def _dataframe_like_rows(frame) -> List[Dict[str, object]]:
+    if frame is None:
+        return []
+
+    if hasattr(frame, "to_dict"):
+        try:
+            return [dict(row) for row in frame.to_dict(orient="records")]
+        except TypeError:
+            pass
+
+    if isinstance(frame, Sequence) and not isinstance(frame, (str, bytes)):
+        rows = []
+        for row in frame:
+            if isinstance(row, Mapping):
+                rows.append(dict(row))
+        return rows
+
+    return []
+
+
+def _citylearn_kpi_frame_rows(candidate) -> List[Dict[str, object]]:
+    adapter = _resolve_adapter(candidate)
+    snapshot_rows = getattr(adapter, "last_completed_kpi_frame_rows", None) if adapter is not None else None
+
+    if snapshot_rows:
+        return [dict(row) for row in snapshot_rows]
+
+    objective_env = _resolve_objective_env(candidate)
+
+    if objective_env is None:
+        return []
+
+    frame = None
+
+    if hasattr(objective_env, "get_kpi_frame"):
+        frame = objective_env.get_kpi_frame()
+    elif hasattr(objective_env, "evaluate_v2"):
+        frame = objective_env.evaluate_v2()
+    elif hasattr(objective_env, "env") and hasattr(objective_env.env, "evaluate_v2"):
+        frame = objective_env.env.evaluate_v2()
+
+    return _dataframe_like_rows(frame)
+
+
+def _core_citylearn_env(candidate):
+    objective_env = _resolve_objective_env(candidate)
+
+    if objective_env is None:
+        return None
+
+    core = getattr(objective_env, "env", objective_env)
+    return getattr(core, "unwrapped", core)
+
+
+def _building_schema_rows(candidate, adapter=None) -> List[Dict[str, object]]:
+    objective_env = _resolve_objective_env(candidate)
+    core_env = _core_citylearn_env(candidate)
+
+    if objective_env is None or core_env is None:
+        return []
+
+    agents = list(getattr(adapter, "agents", [])) or list(getattr(objective_env, "possible_agents", []))
+    action_names = getattr(core_env, "action_names", []) or []
+    observation_names = getattr(core_env, "observation_names", []) or []
+    rows: List[Dict[str, object]] = []
+
+    for agent_index, agent in enumerate(agents):
+        for variable_type, all_names, space_getter in [
+            ("action", action_names, getattr(objective_env, "action_space", None)),
+            ("observation", observation_names, getattr(objective_env, "observation_space", None)),
+        ]:
+            names = list(all_names[agent_index]) if agent_index < len(all_names) else []
+
+            if not names:
+                dim = int(getattr(adapter, f"{variable_type}_dims", {}).get(agent, 0)) if adapter is not None else 0
+                names = [f"{variable_type}_{idx}" for idx in range(dim)]
+
+            space = space_getter(agent) if callable(space_getter) else None
+
+            for variable_index, variable_name in enumerate(names):
+                rows.append({
+                    "agent": agent,
+                    "agent_index": agent_index,
+                    "variable_type": variable_type,
+                    "variable_index": variable_index,
+                    "variable_name": variable_name,
+                    "csv_column": f"{variable_type}__{_slug_name(variable_name)}",
+                    "space_low": _space_bound(space, "low", variable_index) if space is not None else None,
+                    "space_high": _space_bound(space, "high", variable_index) if space is not None else None,
+                })
+
+    return rows
+
+
+def _trace_agent_summary_rows(trace_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
+    grouped: Dict[str, List[Mapping[str, object]]] = {}
+
+    for row in trace_rows:
+        agent = row.get("agent")
+
+        if agent is None:
+            continue
+
+        grouped.setdefault(str(agent), []).append(row)
+
+    output: List[Dict[str, object]] = []
+
+    for agent, rows in sorted(grouped.items(), key=lambda item: _sort_agent_key(item[0])):
+        summary: Dict[str, object] = {
+            "agent": agent,
+            "agent_steps": len(rows),
+            "agent_index": rows[0].get("agent_index"),
+        }
+
+        for source_key, prefix in [
+            ("reward", "team_reward"),
+            ("individual_reward", "individual_reward"),
+            ("action_l2", "action_l2"),
+            ("action_mean", "action_mean"),
+            ("observation_l2", "observation_l2"),
+            ("observation_mean", "observation_mean"),
+            ("grid_import_kwh", "grid_import"),
+            ("grid_export_kwh", "grid_export"),
+            ("net_electricity_consumption_kwh", "net_electricity_consumption"),
+            ("net_electricity_consumption_cost", "electricity_cost"),
+            ("net_electricity_consumption_emission", "carbon_emissions"),
+        ]:
+            values = [_as_float(row.get(source_key)) for row in rows]
+            values = [value for value in values if value is not None]
+
+            if not values:
+                continue
+
+            summary[f"{prefix}_mean"] = float(np.mean(values))
+            summary[f"{prefix}_min"] = float(np.min(values))
+            summary[f"{prefix}_max"] = float(np.max(values))
+            summary[f"{prefix}_total"] = float(np.sum(values))
+
+        output.append(summary)
+
+    return output
+
+
+def _building_kpi_summary_rows(kpi_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
+    output_by_building: Dict[str, Dict[str, object]] = {}
+
+    for row in kpi_rows:
+        level = str(row.get("level", "")).lower()
+
+        if level != "building":
+            continue
+
+        building = str(row.get("name", ""))
+
+        if not building:
+            continue
+
+        cost_function = str(row.get("cost_function", ""))
+        column = BUILDING_DETAIL_KPI_COLUMNS.get(cost_function)
+
+        if column is None:
+            continue
+
+        output_by_building.setdefault(building, {"agent": building})[column] = _as_float(row.get("value"))
+
+    for building, row in output_by_building.items():
+        grid_import = _as_float(row.get("grid_import_control_kwh"))
+        grid_export = _as_float(row.get("grid_export_control_kwh"))
+
+        if grid_import is not None and grid_export is not None:
+            row["grid_import_minus_export_control_kwh"] = grid_import - grid_export
+
+            if grid_import > grid_export + 1.0e-9:
+                row["grid_role_control"] = "net_importer"
+            elif grid_export > grid_import + 1.0e-9:
+                row["grid_role_control"] = "net_exporter"
+            else:
+                row["grid_role_control"] = "balanced"
+
+    return [
+        output_by_building[name]
+        for name in sorted(output_by_building, key=_sort_agent_key)
+    ]
+
+
+def _building_behavior_summary_rows(
+    *,
+    trace_rows: Sequence[Mapping[str, object]],
+    kpi_rows: Sequence[Mapping[str, object]],
+    schema_rows: Sequence[Mapping[str, object]],
+) -> List[Dict[str, object]]:
+    output: Dict[str, Dict[str, object]] = {}
+
+    for row in _building_kpi_summary_rows(kpi_rows):
+        output[str(row["agent"])] = dict(row)
+
+    for row in _trace_agent_summary_rows(trace_rows):
+        agent = str(row["agent"])
+        target = output.setdefault(agent, {"agent": agent})
+        target.update(row)
+
+    for row in schema_rows:
+        agent = str(row.get("agent", ""))
+
+        if not agent:
+            continue
+
+        target = output.setdefault(agent, {"agent": agent})
+        variable_type = str(row.get("variable_type"))
+        count_key = f"{variable_type}_dim"
+        target[count_key] = int(target.get(count_key, 0)) + 1
+        target.setdefault("agent_index", row.get("agent_index"))
+
+    return [
+        output[name]
+        for name in sorted(output, key=_sort_agent_key)
+    ]
+
+
+def _schema_action_names(schema_rows: Sequence[Mapping[str, object]]) -> Dict[str, Dict[int, str]]:
+    output: Dict[str, Dict[int, str]] = {}
+
+    for row in schema_rows:
+        if row.get("variable_type") != "action":
+            continue
+
+        agent = str(row.get("agent"))
+        index = row.get("variable_index")
+
+        if index is None:
+            continue
+
+        output.setdefault(agent, {})[int(index)] = str(row.get("variable_name"))
+
+    return output
+
+
+def _building_trace_sample_rows(
+    trace_rows: Sequence[Mapping[str, object]],
+    schema_rows: Sequence[Mapping[str, object]],
+    *,
+    max_rows: int = 120,
+) -> List[Dict[str, object]]:
+    if not trace_rows:
+        return []
+
+    if len(trace_rows) <= max_rows:
+        selected = list(trace_rows)
+    else:
+        head_count = max_rows // 2
+        tail_count = max_rows - head_count
+        selected = list(trace_rows[:head_count]) + list(trace_rows[-tail_count:])
+
+    action_names = _schema_action_names(schema_rows)
+    rows: List[Dict[str, object]] = []
+
+    for row in selected:
+        agent = str(row.get("agent"))
+        output = dict(row)
+
+        for index, action_name in action_names.get(agent, {}).items():
+            value = row.get(f"action_{index}")
+
+            if value is None:
+                continue
+
+            column = f"action__{_slug_name(action_name)}"
+            if column in output:
+                column = f"{column}_{index}"
+            output[column] = value
+
+        rows.append(output)
+
+    return rows
 
 
 def _safe_ratio(numerator: Optional[float], denominator: Optional[float]) -> Optional[float]:
@@ -1051,6 +2013,7 @@ def _write_training_figures_and_tables(
     trace_rows: Sequence[Mapping[str, object]],
     episode_summaries: Sequence[Mapping[str, object]],
     checkpoints: Sequence[Mapping[str, object]],
+    extra_tables: Optional[Mapping[str, Sequence[Mapping[str, object]]]] = None,
 ) -> Dict[str, object]:
     figures_dir = dirs["figures"]
     tables_dir = dirs["tables"]
@@ -1073,6 +2036,7 @@ def _write_training_figures_and_tables(
         ("agent_reward_summary", agent_rows),
         ("checkpoint_inventory", list(checkpoints)),
     ]
+    table_specs.extend((name, list(rows)) for name, rows in (extra_tables or {}).items())
 
     for table_name, rows in table_specs:
         csv_path = tables_dir / f"{table_name}.csv"
@@ -1124,6 +2088,50 @@ def _write_training_figures_and_tables(
     return manifest
 
 
+def _write_statistical_comparison_artifacts(
+    output_dir: Path,
+    algorithm: str,
+    scenario: str,
+    results_path: Path,
+    timeseries_path: Path,
+    trace_path: Path,
+    include_trace: bool = True,
+) -> Path:
+    """Copy key run artifacts to OutputRoot/statistical_comparison/ with standardized names.
+
+    Produces result_{algo}_{scenario}.json, timeseries_{algo}_{scenario}.csv and
+    trace_{algo}_{scenario}.csv for direct use in cross-algorithm statistical tests.
+    """
+    algo_tag = f"{algorithm.lower()}_{scenario}"
+    comparison_dir = output_dir.parent.parent / "statistical_comparison"
+    comparison_dir.mkdir(parents=True, exist_ok=True)
+    artifact_pairs = [
+        (results_path, f"result_{algo_tag}.json"),
+        (timeseries_path, f"timeseries_{algo_tag}.csv"),
+    ]
+    if include_trace:
+        artifact_pairs.append((trace_path, f"trace_{algo_tag}.csv"))
+
+    for src, dest_name in artifact_pairs:
+        if src is None or not src.exists():
+            continue
+
+        shutil.copyfile(src, comparison_dir / dest_name)
+
+    return comparison_dir
+
+
+def _remove_completed_live_progress(output_dir: Path) -> bool:
+    """Remove transient live progress state once final artifacts are durable."""
+
+    live_progress_path = output_dir / "live_progress.json"
+    try:
+        live_progress_path.unlink(missing_ok=True)
+        return True
+    except PermissionError:
+        return False
+
+
 def write_training_artifacts(
     *,
     output_dir: Path,
@@ -1140,18 +2148,81 @@ def write_training_artifacts(
     dirs = ensure_artifact_layout(output_dir)
     data_dir = dirs["data"]
     adapter = _resolve_adapter(candidate)
+    trace_sampling = _trace_sampling_payload(adapter)
+    artifact_profile = str(getattr(args, "artifact_profile", "full") or "full").strip().lower()
+    if artifact_profile not in {"full", "efficient", "minimal"}:
+        artifact_profile = "full"
+
+    legacy_root_artifacts = bool(getattr(args, "legacy_root_artifacts", False))
+    export_statistical_comparison = bool(getattr(args, "statistical_comparison_artifacts", False))
+    write_root_timeseries = legacy_root_artifacts
+    write_root_trace = legacy_root_artifacts and artifact_profile == "full"
+    write_root_detail_tables = legacy_root_artifacts and artifact_profile == "full"
+    include_statistical_trace = export_statistical_comparison and artifact_profile == "full"
+
     timeseries_rows = list(getattr(adapter, "timeseries_records", [])) if adapter is not None else []
     trace_rows = list(getattr(adapter, "trace_records", [])) if adapter is not None else []
     episode_summaries = _episode_summaries(timeseries_rows)
+    citylearn_kpi_frame_rows = _citylearn_kpi_frame_rows(candidate)
+    expected_episode_time_steps = _as_int(getattr(args, "episode_time_steps", None))
+    expected_episodes = _as_int((hyperparameters or {}).get("episodes"))
+    artifact_audit = _artifact_consistency_audit(
+        report=report,
+        timeseries_rows=timeseries_rows,
+        trace_rows=trace_rows,
+        episode_summaries=episode_summaries,
+        expected_episode_time_steps=expected_episode_time_steps,
+        expected_episodes=expected_episodes,
+    )
+    building_schema_rows = _building_schema_rows(candidate, adapter=adapter)
+    building_summary_rows = _building_behavior_summary_rows(
+        trace_rows=trace_rows,
+        kpi_rows=citylearn_kpi_frame_rows,
+        schema_rows=building_schema_rows,
+    )
+    building_trace_sample_rows = _building_trace_sample_rows(trace_rows, building_schema_rows)
+    building_detail_tables = {
+        "building_behavior_summary": building_summary_rows,
+        "building_kpis": [
+            row for row in citylearn_kpi_frame_rows
+            if str(row.get("level", "")).lower() == "building"
+        ],
+        "building_observation_action_schema": building_schema_rows,
+        "building_trace_sample": building_trace_sample_rows,
+    }
 
     timeseries_path = data_dir / "timeseries.csv"
     trace_path = data_dir / "trace.csv"
     root_timeseries_path = output_dir / "timeseries.csv"
     root_trace_path = output_dir / "trace.csv"
-    _write_csv_mirrors([timeseries_path, root_timeseries_path], timeseries_rows)
-    _write_csv_mirrors([trace_path, root_trace_path], trace_rows)
+    timeseries_outputs = [timeseries_path]
+    trace_outputs = [trace_path]
+    if write_root_timeseries:
+        timeseries_outputs.append(root_timeseries_path)
+    if write_root_trace:
+        trace_outputs.append(root_trace_path)
+
+    _write_csv_mirrors(timeseries_outputs, timeseries_rows)
+    _write_csv_mirrors(trace_outputs, trace_rows)
+
+    building_detail_paths: Dict[str, Dict[str, object]] = {}
+    for table_name, rows in building_detail_tables.items():
+        data_path = data_dir / f"{table_name}.csv"
+        root_path = output_dir / f"{table_name}.csv"
+        detail_outputs = [data_path]
+        if write_root_detail_tables:
+            detail_outputs.append(root_path)
+        _write_csv_mirrors(detail_outputs, rows)
+        path_payload = {
+            "rows": len(rows),
+            "csv": str(data_path),
+        }
+        if write_root_detail_tables:
+            path_payload["csv_root"] = str(root_path)
+        building_detail_paths[table_name] = path_payload
 
     checkpoints = _checkpoint_files(output_dir, dirs["checkpoints"])
+    normalization = dict(getattr(adapter, "normalization_metadata", {}) or {})
     checkpoint_manifest = {
         "algorithm": algorithm,
         "backend": backend,
@@ -1159,10 +2230,20 @@ def write_training_artifacts(
         "checkpoint_count": len(checkpoints),
         "checkpoints": checkpoints,
         "hyperparameters": dict(hyperparameters or {}),
+        "normalization": normalization,
     }
     checkpoint_manifest_path = data_dir / "checkpoint_manifest.json"
     root_checkpoint_manifest_path = output_dir / "checkpoint_manifest.json"
-    _write_json_mirrors([checkpoint_manifest_path, root_checkpoint_manifest_path], checkpoint_manifest)
+    checkpoint_manifest_outputs = [checkpoint_manifest_path]
+    if legacy_root_artifacts:
+        checkpoint_manifest_outputs.append(root_checkpoint_manifest_path)
+    _write_json_mirrors(checkpoint_manifest_outputs, checkpoint_manifest)
+    artifact_audit_path = data_dir / "artifact_audit.json"
+    root_artifact_audit_path = output_dir / "artifact_audit.json"
+    artifact_audit_outputs = [artifact_audit_path]
+    if legacy_root_artifacts:
+        artifact_audit_outputs.append(root_artifact_audit_path)
+    _write_json_mirrors(artifact_audit_outputs, artifact_audit)
     figures_manifest = _write_training_figures_and_tables(
         dirs=dirs,
         report=report,
@@ -1170,6 +2251,7 @@ def write_training_artifacts(
         trace_rows=trace_rows,
         episode_summaries=episode_summaries,
         checkpoints=checkpoints,
+        extra_tables=building_detail_tables,
     )
 
     results = {
@@ -1180,18 +2262,43 @@ def write_training_artifacts(
         "episode_time_steps": args.episode_time_steps,
         "output_dir": str(output_dir),
         "artifact_layout": _artifact_layout_payload(dirs),
+        "artifact_profile": artifact_profile,
+        "artifact_write_policy": {
+            "root_timeseries_csv": write_root_timeseries,
+            "root_trace_csv": write_root_trace,
+            "root_building_detail_csv": write_root_detail_tables,
+            "legacy_root_artifacts": legacy_root_artifacts,
+            "statistical_comparison_artifacts": export_statistical_comparison,
+            "statistical_comparison_trace_csv": include_statistical_trace,
+            **trace_sampling,
+        },
         "episodes_recorded": len(episode_summaries),
         "timeseries_rows": len(timeseries_rows),
         "trace_rows": len(trace_rows),
+        "traceability": {
+            "status": artifact_audit.get("status"),
+            "planned_environment_steps": artifact_audit.get("expected_timeseries_rows"),
+            "recorded_environment_steps": len(timeseries_rows),
+            "environment_step_delta_vs_plan": artifact_audit.get("timeseries_row_delta_vs_expected"),
+            "completed_episode_count": artifact_audit.get("completed_episode_count_from_timeseries"),
+            "expected_episode_count": artifact_audit.get("expected_episodes"),
+            "warnings": artifact_audit.get("warnings", []),
+        },
         "timeseries_csv": str(timeseries_path),
-        "timeseries_csv_root": str(root_timeseries_path),
+        "timeseries_csv_root": str(root_timeseries_path) if write_root_timeseries else None,
         "trace_csv": str(trace_path),
-        "trace_csv_root": str(root_trace_path),
+        "trace_csv_root": str(root_trace_path) if write_root_trace else None,
         "checkpoint_manifest": str(checkpoint_manifest_path),
-        "checkpoint_manifest_root": str(root_checkpoint_manifest_path),
+        "checkpoint_manifest_root": str(root_checkpoint_manifest_path) if legacy_root_artifacts else None,
         "checkpoint_count": len(checkpoints),
+        "building_detail": building_detail_paths,
+        "building_count": len(building_summary_rows),
         "episode_summaries": episode_summaries,
         "hyperparameters": dict(hyperparameters or {}),
+        "normalization": normalization,
+        "artifact_audit": artifact_audit,
+        "artifact_audit_json": str(artifact_audit_path),
+        "artifact_audit_json_root": str(root_artifact_audit_path) if legacy_root_artifacts else None,
         "figures_manifest": str(dirs["figures"] / "figures_manifest.json"),
         "figures": figures_manifest,
         "project_axis_metrics": report["project_axis_metrics"],
@@ -1203,17 +2310,38 @@ def write_training_artifacts(
 
     results_path = data_dir / "results.json"
     root_results_path = output_dir / "results.json"
-    _write_json_mirrors([results_path, root_results_path], results)
+    results_outputs = [results_path]
+    if legacy_root_artifacts:
+        results_outputs.append(root_results_path)
+    _write_json_mirrors(results_outputs, results)
+    comparison_dir = None
+    if export_statistical_comparison:
+        comparison_dir = _write_statistical_comparison_artifacts(
+            output_dir=output_dir,
+            algorithm=algorithm,
+            scenario=str(getattr(args, "scenario", "unknown")),
+            results_path=results_path,
+            timeseries_path=timeseries_path,
+            trace_path=trace_path,
+            include_trace=include_statistical_trace,
+        )
+    live_progress_removed = _remove_completed_live_progress(output_dir)
     return {
         "artifact_layout": _artifact_layout_payload(dirs),
+        "artifact_profile": artifact_profile,
+        "artifact_write_policy": results["artifact_write_policy"],
         "results_json": str(results_path),
-        "results_json_root": str(root_results_path),
+        "results_json_root": str(root_results_path) if legacy_root_artifacts else None,
         "timeseries_csv": str(timeseries_path),
-        "timeseries_csv_root": str(root_timeseries_path),
+        "timeseries_csv_root": str(root_timeseries_path) if write_root_timeseries else None,
         "trace_csv": str(trace_path),
-        "trace_csv_root": str(root_trace_path),
+        "trace_csv_root": str(root_trace_path) if write_root_trace else None,
+        "building_detail": building_detail_paths,
         "checkpoint_manifest": str(checkpoint_manifest_path),
-        "checkpoint_manifest_root": str(root_checkpoint_manifest_path),
+        "checkpoint_manifest_root": str(root_checkpoint_manifest_path) if legacy_root_artifacts else None,
+        "artifact_audit": artifact_audit,
+        "artifact_audit_json": str(artifact_audit_path),
+        "artifact_audit_json_root": str(root_artifact_audit_path) if legacy_root_artifacts else None,
         "figures_manifest": str(dirs["figures"] / "figures_manifest.json"),
         "figures_dir": str(dirs["figures"]),
         "tables_dir": str(dirs["tables"]),
@@ -1222,19 +2350,40 @@ def write_training_artifacts(
         "checkpoint_count": len(checkpoints),
         "timeseries_rows": len(timeseries_rows),
         "trace_rows": len(trace_rows),
+        "statistical_comparison_dir": str(comparison_dir) if comparison_dir is not None else None,
+        "completed_live_progress_removed": live_progress_removed,
     }
 
 
-def write_training_summary(output_dir: Path, summary: Mapping[str, object]) -> Dict[str, str]:
+def write_training_summary(
+    output_dir: Path,
+    summary: Mapping[str, object],
+    *,
+    write_root: Optional[bool] = None,
+) -> Dict[str, Optional[str]]:
     dirs = ensure_artifact_layout(output_dir)
     payload = dict(summary)
     payload.setdefault("artifact_layout", _artifact_layout_payload(dirs))
     root_path = output_dir / "training_summary.json"
     data_path = dirs["data"] / "training_summary.json"
-    _write_json_mirrors([data_path, root_path], payload)
+    if write_root is None:
+        artifacts = payload.get("artifacts")
+        if isinstance(artifacts, Mapping):
+            policy = artifacts.get("artifact_write_policy")
+            if isinstance(policy, Mapping):
+                write_root = bool(policy.get("legacy_root_artifacts", False))
+            else:
+                write_root = bool(artifacts.get("legacy_root_artifacts", False))
+        else:
+            write_root = False
+
+    outputs = [data_path]
+    if write_root:
+        outputs.append(root_path)
+    _write_json_mirrors(outputs, payload)
     return {
         "training_summary_json": str(data_path),
-        "training_summary_json_root": str(root_path),
+        "training_summary_json_root": str(root_path) if write_root else None,
     }
 
 
@@ -1243,6 +2392,232 @@ def _pad(values: Sequence[float], target_dim: int) -> np.ndarray:
     output = np.zeros(target_dim, dtype=np.float32)
     output[: values.size] = values
     return output
+
+
+def build_discrete_action_table(
+    *,
+    action_bins: int,
+    action_dim: int,
+    mode: str = "axis",
+) -> Tuple[np.ndarray, Dict[str, object]]:
+    """Build a backend-compatible discrete action table for CityLearn actions.
+
+    ``cartesian`` enumerates every simultaneous actuator combination and grows as
+    action_bins ** action_dim. ``axis`` keeps one no-op action plus one-axis
+    actuator moves, which grows linearly and is suitable for discrete MADRL
+    backends that require a single Discrete action id per agent.
+    """
+
+    action_bins = int(action_bins)
+    action_dim = int(action_dim)
+    mode = str(mode or "axis").strip().lower()
+
+    if action_bins < 2:
+        raise ValueError("action_bins must be >= 2 for discrete CityLearn actions.")
+
+    if action_dim < 1:
+        table = np.zeros((1, 0), dtype=np.float32)
+        return table, {
+            "mode": mode,
+            "action_bins": action_bins,
+            "max_action_dim": action_dim,
+            "n_discrete_actions": 1,
+            "cartesian_action_count": 1,
+        }
+
+    action_values = np.linspace(-1.0, 1.0, action_bins, dtype=np.float32)
+    cartesian_action_count = int(action_bins ** action_dim)
+
+    if mode in {"cartesian", "full"}:
+        table = np.asarray(
+            list(itertools.product(action_values, repeat=action_dim)),
+            dtype=np.float32,
+        )
+        canonical_mode = "cartesian"
+    elif mode in {"axis", "axiswise", "compact", "linear"}:
+        rows = [np.zeros(action_dim, dtype=np.float32)]
+
+        for dim in range(action_dim):
+            for value in action_values:
+                if np.isclose(float(value), 0.0):
+                    continue
+
+                row = np.zeros(action_dim, dtype=np.float32)
+                row[dim] = value
+                rows.append(row)
+
+        table = np.asarray(rows, dtype=np.float32)
+        canonical_mode = "axis"
+    elif mode in {"shared", "scalar"}:
+        rows = [np.full(action_dim, value, dtype=np.float32) for value in action_values]
+
+        if not any(np.allclose(row, 0.0) for row in rows):
+            rows.insert(0, np.zeros(action_dim, dtype=np.float32))
+
+        table = np.asarray(rows, dtype=np.float32)
+        canonical_mode = "shared"
+    else:
+        raise ValueError(
+            "Unsupported discrete_action_mode: "
+            f"{mode}. Use axis, shared or cartesian."
+        )
+
+    metadata = {
+        "mode": canonical_mode,
+        "action_bins": action_bins,
+        "max_action_dim": action_dim,
+        "n_discrete_actions": int(table.shape[0]),
+        "cartesian_action_count": cartesian_action_count,
+        "growth": "linear" if canonical_mode == "axis" else ("constant" if canonical_mode == "shared" else "exponential"),
+        "note": (
+            "Axis mode avoids the cartesian explosion from MultiDiscrete-style "
+            "joint actuator combinations while preserving a single Discrete "
+            "action id required by the external MASAC/MAAC backends."
+        )
+        if canonical_mode == "axis"
+        else "",
+    }
+    return table, metadata
+
+
+@contextlib.contextmanager
+def _csv_read_cache(schema_path: Optional[str]):
+    """Monkey-patch pd.read_csv with a two-level cache during CityLearnEnv init.
+
+    CityLearn's loading.py reads weather.csv, carbon_intensity.csv and pricing.csv
+    once per building (17 times each). This context manager intercepts pd.read_csv,
+    serves repeated reads from an in-process dict, and persists the full cache to a
+    pickle keyed by schema SHA256 so that subsequent training runs skip all CSV I/O.
+    Cache TTL is 24 hours; any schema change (new SHA256) invalidates the cache.
+    """
+    import pandas as pd
+
+    cache_key = None
+    mem_cache: dict = {}
+
+    if schema_path:
+        try:
+            schema_bytes = Path(schema_path).read_bytes()
+            cache_key = hashlib.sha256(schema_bytes).hexdigest()[:20]
+            cache_file = _CSV_CACHE_DIR / f"citylearn_csv_{cache_key}.pkl"
+            meta_file = cache_file.with_suffix(".meta.json")
+            if cache_file.exists() and meta_file.exists():
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(meta.get("ts", "1970-01-01T00:00:00+00:00"))).total_seconds() / 3600
+                if meta.get("key") == cache_key and age_h <= 24:
+                    with cache_file.open("rb") as fh:
+                        mem_cache = pickle.load(fh)
+        except Exception:
+            cache_key = None
+            mem_cache = {}
+
+    original_read_csv = pd.read_csv
+
+    def _cached(filepath_or_buffer, *args, **kwargs):
+        fp = str(filepath_or_buffer) if isinstance(filepath_or_buffer, (str, Path)) else None
+        if fp and fp in mem_cache:
+            return mem_cache[fp].copy()
+        df = original_read_csv(filepath_or_buffer, *args, **kwargs)
+        if fp:
+            mem_cache[fp] = df
+        return df
+
+    pd.read_csv = _cached
+    try:
+        yield
+    finally:
+        pd.read_csv = original_read_csv
+        if cache_key and mem_cache:
+            try:
+                cache_file = _CSV_CACHE_DIR / f"citylearn_csv_{cache_key}.pkl"
+                meta_file = cache_file.with_suffix(".meta.json")
+                _CSV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                with cache_file.open("wb") as fh:
+                    pickle.dump(mem_cache, fh, protocol=pickle.HIGHEST_PROTOCOL)
+                meta_file.write_text(
+                    json.dumps({"key": cache_key, "ts": datetime.now(timezone.utc).isoformat()}),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+
+
+def _build_ev_sim_index(core) -> Dict[str, Dict[int, Tuple[float, float]]]:
+    """Build {ev_id: {t: (state, soc_arrival)}} from all charger simulations.
+
+    Replaces the O(n_evs × n_buildings × n_chargers) nested scan in
+    CityLearn's ``simulate_unconnected_ev_soc`` with a one-time O(T × C)
+    build and O(1) per-step per-EV lookup.  Only call after env init.
+    """
+    ev_presence: Dict[str, Dict[int, Tuple[float, float]]] = {}
+    _nan = float("nan")
+    for building in getattr(core, "buildings", []):
+        for charger in getattr(building, "electric_vehicle_chargers", None) or []:
+            sim = charger.charger_simulation
+            ev_id_arr = sim.electric_vehicle_id
+            state_arr = sim.electric_vehicle_charger_state
+            soc_arr = sim.electric_vehicle_estimated_soc_arrival
+            n_ev = len(ev_id_arr)
+            n_st = len(state_arr)
+            n_soc = len(soc_arr)
+            for t_c in range(n_ev):
+                ev_id = ev_id_arr[t_c]
+                if not isinstance(ev_id, str) or not ev_id or ev_id == "NONE":
+                    continue
+                state_v = float(state_arr[t_c]) if t_c < n_st else _nan
+                soc_v = float(soc_arr[t_c]) if t_c < n_soc else _nan
+                if ev_id not in ev_presence:
+                    ev_presence[ev_id] = {}
+                ev_presence[ev_id][t_c] = (state_v, soc_v)
+    return ev_presence
+
+
+def _install_ev_sim_fast_patch(core) -> bool:
+    """Monkey-patch runtime_service.simulate_unconnected_ev_soc with O(1) version.
+
+    Returns True if patch was installed, False if env has no EV runtime to patch.
+    """
+    runtime = getattr(core, "_runtime_service", None)
+    if runtime is None or not hasattr(runtime, "simulate_unconnected_ev_soc"):
+        return False
+    ev_index = _build_ev_sim_index(core)
+    _nan = float("nan")
+
+    def _fast_simulate_unconnected_ev_soc(self):
+        env = self.env
+        rs = getattr(env, "_ev_drift_random_state", None)
+        if rs is None:
+            episode_idx = int(getattr(getattr(env, "episode_tracker", None), "episode", 0))
+            rs = np.random.RandomState(int(env.random_seed) + episode_idx)
+            env._ev_drift_random_state = rs
+        t = env.time_step
+        if t + 1 >= env.episode_tracker.episode_time_steps:
+            return
+        drift_std = self._ev_unconnected_drift_std(env.seconds_per_time_step)
+        for ev in env.electric_vehicles:
+            ev_id = ev.name
+            ev_idx = ev_index.get(ev_id)
+            found = False
+            if ev_idx is not None:
+                curr = ev_idx.get(t)
+                nxt = ev_idx.get(t + 1)
+                if curr is not None and curr[0] == 1:
+                    found = True
+                elif nxt is not None and nxt[0] == 1:
+                    curr_state = curr[0] if curr is not None else _nan
+                    if curr_state != 1:
+                        found = True
+                        is_incoming = curr is not None and curr[0] == 2
+                        soc = curr[1] if is_incoming else nxt[1]
+                        if np.isfinite(soc) and 0.0 <= soc <= 1.0:
+                            ev.battery.force_set_soc(soc)
+            if not found and t > 0:
+                last_soc = float(ev.battery.soc[t - 1])
+                variability = float(np.clip(rs.normal(1.0, drift_std), 0.6, 1.4))
+                ev.battery.force_set_soc(float(np.clip(last_soc * variability, 0.0, 1.0)))
+
+    runtime.simulate_unconnected_ev_soc = types.MethodType(_fast_simulate_unconnected_ev_soc, runtime)
+    return True
 
 
 class CityLearnV3BackendAdapter:
@@ -1256,72 +2631,138 @@ class CityLearnV3BackendAdapter:
         seed: int = 0,
         episode_time_steps: int = 4,
         action_bins: int = 3,
+        discrete_action_mode: str = "axis",
         algorithm: str = "MADRL",
         live_progress_path: Optional[str] = None,
         live_progress_interval: int = 100,
+        trace_record_interval: int = 1,
+        trace_detail: str = "full",
+        normalize_observations: bool = True,
     ):
         ensure_project_paths()
         from citylearn.v3 import make_citylearn_v3_env, make_citylearn_v3_project_env
 
-        if schema_path:
-            self.env = make_citylearn_v3_env(
-                schema_path=schema_path,
-                scenario=scenario,
-                seed=seed,
-                episode_time_steps=episode_time_steps,
-                madrl_algorithm=algorithm,
-            )
-        else:
-            self.env = make_citylearn_v3_project_env(
-                scenario=scenario,
-                seed=seed,
-                episode_time_steps=episode_time_steps,
-                madrl_algorithm=algorithm,
-            )
+        self.normalize_observations = bool(normalize_observations)
+
+        _resolved_schema = schema_path
+        if not _resolved_schema:
+            from citylearn.dec_pomdp import DEFAULT_17_BUILDING_EV_SCHEMA
+            _resolved_schema = str(DEFAULT_17_BUILDING_EV_SCHEMA)
+
+        with _csv_read_cache(_resolved_schema):
+            if schema_path:
+                self.env = make_citylearn_v3_env(
+                    schema_path=schema_path,
+                    scenario=scenario,
+                    seed=seed,
+                    episode_time_steps=episode_time_steps,
+                    madrl_algorithm=algorithm,
+                    normalize_observations=self.normalize_observations,
+                )
+            else:
+                self.env = make_citylearn_v3_project_env(
+                    scenario=scenario,
+                    seed=seed,
+                    episode_time_steps=episode_time_steps,
+                    madrl_algorithm=algorithm,
+                    normalize_observations=self.normalize_observations,
+                )
+
+        # Cache stable env traversal — identity never changes after init; avoids wrapper
+        # traversal in every step-level hot path (_record_step, _write_live_progress, etc.)
+        _obj = getattr(self.env, "env", getattr(self.env, "unwrapped", self.env))
+        self._cached_objective_env = _obj
+        self._cached_core_env = getattr(_obj, "unwrapped", _obj)
 
         self.scenario = scenario
         self.algorithm = str(algorithm).upper()
         self.seed_value = seed
         self.episode_time_steps = int(episode_time_steps)
         self.agents = list(self.env.possible_agents)
+        self._agent_index_map: Dict[str, int] = {a: i for i, a in enumerate(self.agents)}
         self.n_agents = len(self.agents)
         self.num_agents = self.n_agents
         self.action_bins = int(action_bins)
+        self.discrete_action_mode = str(discrete_action_mode or "axis").strip().lower()
         self.live_progress_path = Path(live_progress_path) if live_progress_path else None
         self.live_progress_interval = max(1, int(live_progress_interval))
+        self.trace_record_interval = max(0, int(trace_record_interval))
+        self.trace_detail = str(trace_detail or "full").strip().lower()
+        if self.trace_detail not in {"full", "compact"}:
+            self.trace_detail = "full"
 
         self._obs_spaces = {agent: self.env.observation_space(agent) for agent in self.agents}
         self._act_spaces = {agent: self.env.action_space(agent) for agent in self.agents}
-        self.observation_dims = {
+
+        # Static EV-type code observations appended after CityLearn's own observations.
+        # Encoding (already normalized [0,1]): moto_lineal=1/3, mototaxi=2/3, v2g=1.0
+        # One value per charger socket in the building, read from schema hardware.ev_type.
+        self._ev_type_codes_per_agent: Dict[str, np.ndarray] = {}
+        try:
+            import json as _json_mod
+            _EV_TYPE_NORM: Dict[str, float] = {'moto_lineal': 1/3, 'mototaxi': 2/3, 'v2g': 1.0, 'camioneta': 1.0}
+            _schema_data = _json_mod.loads(Path(_resolved_schema).read_text(encoding="utf-8"))
+            for _agent in self.agents:
+                _bdata = _schema_data.get("buildings", {}).get(_agent, {})
+                _chargers = _bdata.get("chargers", {})
+                _codes = [
+                    _EV_TYPE_NORM.get(
+                        _chargers[_k].get("hardware", {}).get("ev_type", "moto_lineal"), 1/3
+                    )
+                    for _k in _chargers.keys()
+                ]
+                self._ev_type_codes_per_agent[_agent] = np.array(_codes, dtype=np.float32)
+        except Exception:
+            for _agent in self.agents:
+                self._ev_type_codes_per_agent[_agent] = np.zeros(0, dtype=np.float32)
+
+        # CityLearn's own dims (before appending type codes)
+        self._citylearn_observation_dims = {
             agent: int(space.shape[0])
             for agent, space in self._obs_spaces.items()
+        }
+        self.observation_dims = {
+            agent: self._citylearn_observation_dims[agent] + len(self._ev_type_codes_per_agent.get(agent, []))
+            for agent in self.agents
         }
         self.action_dims = {
             agent: int(space.shape[0])
             for agent, space in self._act_spaces.items()
         }
+        self.observation_names_by_agent = self._variable_names_by_agent(
+            "observation_names",
+            self.observation_dims,
+            "observation",
+        )
+        self.action_names_by_agent = self._variable_names_by_agent(
+            "action_names",
+            self.action_dims,
+            "action",
+        )
         self.max_observation_dim = max(self.observation_dims.values())
         self.max_action_dim = max(self.action_dims.values())
         self.state_dim = int(self.env.state_space.shape[0])
         self.padded_joint_observation_dim = self.n_agents * self.max_observation_dim
 
+        obs_low = 0.0 if self.normalize_observations else -SPACE_BOUND
+        obs_high = 1.0 if self.normalize_observations else SPACE_BOUND
         self.continuous_observation_space = [
             spaces.Box(
-                low=-SPACE_BOUND,
-                high=SPACE_BOUND,
+                low=obs_low,
+                high=obs_high,
                 shape=(self.max_observation_dim,),
                 dtype=np.float32,
             )
             for _ in self.agents
         ]
         self.ctde_share_observation_space = [
-            spaces.Box(low=-SPACE_BOUND, high=SPACE_BOUND, shape=(self.state_dim,), dtype=np.float32)
+            spaces.Box(low=obs_low, high=obs_high, shape=(self.state_dim,), dtype=np.float32)
             for _ in self.agents
         ]
         self.padded_share_observation_space = [
             spaces.Box(
-                low=-SPACE_BOUND,
-                high=SPACE_BOUND,
+                low=obs_low,
+                high=obs_high,
                 shape=(self.padded_joint_observation_dim,),
                 dtype=np.float32,
             )
@@ -1337,24 +2778,35 @@ class CityLearnV3BackendAdapter:
             for _ in self.agents
         ]
 
-        action_values = np.linspace(-1.0, 1.0, self.action_bins, dtype=np.float32)
-        self.discrete_action_table = np.asarray(
-            list(itertools.product(action_values, repeat=self.max_action_dim)),
-            dtype=np.float32,
+        self.discrete_action_table, self.discrete_action_metadata = build_discrete_action_table(
+            action_bins=self.action_bins,
+            action_dim=self.max_action_dim,
+            mode=self.discrete_action_mode,
         )
         self.n_discrete_actions = int(self.discrete_action_table.shape[0])
         self.discrete_action_space = [
             spaces.Discrete(self.n_discrete_actions)
             for _ in self.agents
         ]
+        self._live_progress_lock = threading.Lock()
 
         self._last_observations: Dict[str, np.ndarray] = {}
         self.global_step = 0
         self.reset_count = 0
         self.trace_records: List[Dict[str, object]] = []
         self.timeseries_records: List[Dict[str, object]] = []
+        self.completed_episode_count = 0
+        self.last_completed_episode: Optional[int] = None
+        self.last_completed_global_step: Optional[int] = None
+        self.last_completed_time_step: Optional[int] = None
+        self.last_completed_objectives: Optional[Dict[str, object]] = None
+        self.last_completed_kpi_frame_rows: List[Dict[str, object]] = []
+        self.last_completed_snapshot_error: Optional[str] = None
         self._reset_reward_accumulators()
         self.reward_metadata = self._reward_metadata()
+        self.normalization_metadata = self._normalization_metadata()
+        # Install O(1) EV simulation lookup (replaces O(n_evs×n_buildings×n_chargers) scan)
+        _install_ev_sim_fast_patch(self._cached_core_env)
 
     def seed(self, seed: int) -> None:
         self.seed_value = int(seed)
@@ -1364,6 +2816,13 @@ class CityLearnV3BackendAdapter:
         self.reset_count = 0
         self.trace_records = []
         self.timeseries_records = []
+        self.completed_episode_count = 0
+        self.last_completed_episode = None
+        self.last_completed_global_step = None
+        self.last_completed_time_step = None
+        self.last_completed_objectives = None
+        self.last_completed_kpi_frame_rows = []
+        self.last_completed_snapshot_error = None
         self._reset_reward_accumulators()
 
     def _reset_reward_accumulators(self) -> None:
@@ -1400,7 +2859,7 @@ class CityLearnV3BackendAdapter:
         observations, _infos = self.env.reset(seed=self.seed_value)
         self.reset_count += 1
         self._last_observations = {
-            agent: np.asarray(observation, dtype=np.float32)
+            agent: self._observation_array_for_agent(agent, observation)
             for agent, observation in observations.items()
         }
         return self.padded_observations(self._last_observations)
@@ -1409,7 +2868,7 @@ class CityLearnV3BackendAdapter:
         self.env.close()
 
     def _reward_metadata(self) -> Dict[str, object]:
-        reward_function = getattr(getattr(self.env, "env", None), "reward_function", None)
+        reward_function = getattr(self._core_env(), "reward_function", None)
         metadata = getattr(reward_function, "metadata", None)
 
         if isinstance(metadata, Mapping):
@@ -1421,14 +2880,72 @@ class CityLearnV3BackendAdapter:
             "scenario": self.scenario,
         }
 
+    def _normalization_metadata(self) -> Dict[str, object]:
+        return {
+            "normalize_observations": self.normalize_observations,
+            "observation_method": (
+                "CityLearn NormalizedObservationWrapper plus adapter clipping to [0, 1]."
+                if self.normalize_observations
+                else "Raw CityLearn observations in physical/source units."
+            ),
+            "normalize_actions": False,
+            "action_note": "CityLearn storage/EV actions already use the native control-space bounds exposed by action_space.",
+        }
+
+    def _variable_names_by_agent(
+        self,
+        attribute_name: str,
+        dimensions: Mapping[str, int],
+        fallback_prefix: str,
+    ) -> Dict[str, List[str]]:
+        objective_env = self._objective_env()
+        core_env = self._core_env()
+        source_env = objective_env if attribute_name == "observation_names" else core_env
+        all_names = getattr(source_env, attribute_name, []) or getattr(core_env, attribute_name, []) or []
+        output: Dict[str, List[str]] = {}
+
+        for index, agent in enumerate(self.agents):
+            names = list(all_names[index]) if index < len(all_names) else []
+            dimension = int(dimensions.get(agent, len(names)))
+
+            if len(names) < dimension:
+                names.extend(f"{fallback_prefix}_{idx}" for idx in range(len(names), dimension))
+
+            output[agent] = names[:dimension]
+
+        return output
+
+    def _observation_array_for_agent(self, agent: str, observation) -> np.ndarray:
+        cl_dim = self._citylearn_observation_dims[agent]
+        array = np.asarray(observation, dtype=np.float32).reshape(-1)[:cl_dim]
+
+        if self.normalize_observations:
+            array = np.nan_to_num(array, nan=0.0, posinf=1.0, neginf=0.0)
+            array = np.clip(array, 0.0, 1.0)
+
+        type_codes = self._ev_type_codes_per_agent.get(agent)
+        if type_codes is not None and len(type_codes) > 0:
+            array = np.concatenate([array, type_codes])
+
+        return array.astype(np.float32)
+
+    def _state_array(self) -> np.ndarray:
+        state = np.asarray(self.env.state(), dtype=np.float32).reshape(-1)
+
+        if self.normalize_observations:
+            state = np.nan_to_num(state, nan=0.0, posinf=1.0, neginf=0.0)
+            state = np.clip(state, 0.0, 1.0)
+
+        return state.astype(np.float32)
+
     def padded_observations(self, observations: Mapping[str, np.ndarray]) -> List[np.ndarray]:
         return [
-            _pad(observations[agent], self.max_observation_dim)
+            _pad(self._observation_array_for_agent(agent, observations[agent]), self.max_observation_dim)
             for agent in self.agents
         ]
 
     def ctde_state(self) -> np.ndarray:
-        return np.asarray(self.env.state(), dtype=np.float32).reshape(-1)
+        return self._state_array()
 
     def repeated_ctde_state(self) -> List[np.ndarray]:
         state = self.ctde_state()
@@ -1474,9 +2991,10 @@ class CityLearnV3BackendAdapter:
         return self._step(action_dict)
 
     def _step(self, action_dict: Mapping[str, np.ndarray]):
+        self._clear_current_step_device_consumption()
         observations, rewards, terminations, truncations, infos = self.env.step(action_dict)
         self._last_observations = {
-            agent: np.asarray(observations[agent], dtype=np.float32)
+            agent: self._observation_array_for_agent(agent, observations[agent])
             for agent in self.agents
         }
         dones = {
@@ -1486,8 +3004,125 @@ class CityLearnV3BackendAdapter:
         self._record_step(action_dict, observations, rewards, dones, infos)
         return self._last_observations, rewards, dones, infos
 
+    def _clear_current_step_device_consumption(self) -> None:
+        citylearn_env = self._core_env()
+
+        for building in getattr(citylearn_env, "buildings", []) or []:
+            for attribute in (
+                "cooling_device",
+                "heating_device",
+                "dhw_device",
+                "non_shiftable_load_device",
+                "electrical_storage",
+            ):
+                self._set_device_electricity_consumption(getattr(building, attribute, None), 0.0)
+
+            for charger in getattr(building, "electric_vehicle_chargers", []) or []:
+                self._set_device_electricity_consumption(charger, 0.0)
+
+            for washing_machine in getattr(building, "washing_machines", []) or []:
+                self._set_device_electricity_consumption(washing_machine, 0.0)
+
+    @staticmethod
+    def _set_device_electricity_consumption(device, value: float) -> None:
+        setter = getattr(device, "set_electricity_consumption", None)
+
+        if setter is None:
+            return
+
+        try:
+            setter(value, enforce_polarity=False)
+        except TypeError:
+            setter(value)
+
+    def _objective_env(self):
+        return self._cached_objective_env
+
     def _core_env(self):
-        return getattr(self.env, "env", getattr(self.env, "unwrapped", self.env))
+        return self._cached_core_env
+
+    def _building_for_agent(self, citylearn_env, agent: str):
+        buildings = list(getattr(citylearn_env, "buildings", []) or [])
+        agent_index = self._agent_index_map.get(agent, 0)
+        return buildings[agent_index] if agent_index < len(buildings) else None
+
+    def _building_step_metrics(self, building, time_step: int) -> Dict[str, object]:
+        if building is None:
+            return {}
+
+        net = _series_value(building, "net_electricity_consumption", time_step)
+        net_without_storage = _series_value(building, "net_electricity_consumption_without_storage", time_step)
+        solar = _series_value(building, "solar_generation", time_step)
+        storage = getattr(building, "electrical_storage", None)
+        ev_consumption = 0.0
+        ev_has_value = False
+
+        for charger in getattr(building, "electric_vehicle_chargers", []) or []:
+            value = _series_value(charger, "electricity_consumption", time_step)
+
+            if value is not None:
+                ev_has_value = True
+                ev_consumption += value
+
+        metrics = {
+            "net_electricity_consumption_kwh": net,
+            "grid_import_kwh": None if net is None else max(net, 0.0),
+            "grid_export_kwh": None if net is None else max(-net, 0.0),
+            "net_electricity_consumption_without_storage_kwh": net_without_storage,
+            "net_electricity_consumption_cost": _series_value(building, "net_electricity_consumption_cost", time_step),
+            "net_electricity_consumption_emission": _series_value(building, "net_electricity_consumption_emission", time_step),
+            "solar_generation_raw_kwh": solar,
+            "pv_generation_kwh": None if solar is None else max(-solar, 0.0),
+            "pv_export_kwh": None if net is None or solar is None else min(max(-solar, 0.0), max(-net, 0.0)),
+            "electrical_storage_soc": _series_value(storage, "soc", time_step) if storage is not None else None,
+            "electrical_storage_energy_balance_kwh": _series_value(storage, "energy_balance", time_step) if storage is not None else None,
+            "electrical_storage_electricity_consumption_kwh": _series_value(building, "electrical_storage_electricity_consumption", time_step),
+            "ev_electricity_consumption_kwh": ev_consumption if ev_has_value else None,
+            "ev_charge_kwh": max(ev_consumption, 0.0) if ev_has_value else None,
+            "ev_v2g_export_kwh": max(-ev_consumption, 0.0) if ev_has_value else None,
+            "electricity_price": _series_value(getattr(building, "pricing", None), "electricity_pricing", time_step),
+            "carbon_intensity": _series_value(getattr(building, "carbon_intensity", None), "carbon_intensity", time_step),
+        }
+        return metrics
+
+    def _named_action_values(self, agent: str, action: np.ndarray) -> Dict[str, object]:
+        output: Dict[str, object] = {}
+
+        for index, value in enumerate(action):
+            if index >= len(self.action_names_by_agent.get(agent, [])):
+                continue
+
+            name = self.action_names_by_agent[agent][index]
+            column = f"action__{_slug_name(name)}"
+            if column in output:
+                column = f"{column}_{index}"
+            output[column] = _as_float(value)
+
+        return output
+
+    def _selected_observation_values(self, agent: str, observation: np.ndarray) -> Dict[str, object]:
+        output: Dict[str, object] = {}
+        names = self.observation_names_by_agent.get(agent, [])
+
+        for index, value in enumerate(observation):
+            if index >= len(names):
+                continue
+
+            name = names[index]
+            normalized_name = str(name)
+            if (
+                normalized_name not in KEY_OBSERVATION_NAMES
+                and "electric_vehicle" not in normalized_name
+                and not normalized_name.startswith("charging_")
+            ):
+                continue
+
+            column = f"observation__{_slug_name(normalized_name)}"
+            if column in output:
+                column = f"{column}_{index}"
+            output[column] = _as_float(value)
+
+        return output
 
     def _record_step(self, action_dict, observations, rewards, dones, infos) -> None:
         episode_length = max(int(self.episode_time_steps), 1)
@@ -1497,6 +3132,7 @@ class CityLearnV3BackendAdapter:
         time_step = int(getattr(citylearn_env, "time_step", self.global_step))
         reward_values = [_as_float(rewards.get(agent)) for agent in self.agents]
         reward_values = [value for value in reward_values if value is not None]
+        all_done = bool(all(dones.values())) if dones else False
         timeseries_row = {
             "global_step": self.global_step,
             "episode": episode,
@@ -1512,11 +3148,11 @@ class CityLearnV3BackendAdapter:
             "reward_axis_weights": self.reward_metadata.get("axis_weights"),
             "reward_sum": None if not reward_values else float(np.sum(reward_values)),
             "reward_mean": None if not reward_values else float(np.mean(reward_values)),
-            "all_done": bool(all(dones.values())) if dones else False,
-            "district_net_electricity_consumption": _series_value(citylearn_env, "net_electricity_consumption", time_step),
-            "district_net_electricity_consumption_without_storage": _series_value(citylearn_env, "net_electricity_consumption_without_storage", time_step),
-            "district_net_electricity_consumption_cost": _series_value(citylearn_env, "net_electricity_consumption_cost", time_step),
-            "district_net_electricity_consumption_emission": _series_value(citylearn_env, "net_electricity_consumption_emission", time_step),
+            "all_done": all_done,
+            "district_net_electricity_consumption": _district_current_scalar(citylearn_env, "net_electricity_consumption", time_step),
+            "district_net_electricity_consumption_without_storage": _district_current_scalar(citylearn_env, "net_electricity_consumption_without_storage", time_step),
+            "district_net_electricity_consumption_cost": _district_current_scalar(citylearn_env, "net_electricity_consumption_cost", time_step),
+            "district_net_electricity_consumption_emission": _district_current_scalar(citylearn_env, "net_electricity_consumption_emission", time_step),
             "electricity_price_mean": _mean_current_building_signal(citylearn_env, "pricing", "electricity_pricing", time_step),
             "carbon_intensity_mean": _mean_current_building_signal(citylearn_env, "carbon_intensity", "carbon_intensity", time_step),
         }
@@ -1524,46 +3160,93 @@ class CityLearnV3BackendAdapter:
         self._update_reward_accumulators(episode, timeseries_row)
         self._write_live_progress(timeseries_row)
 
-        for agent in self.agents:
-            action = np.asarray(action_dict.get(agent, []), dtype=float).reshape(-1)
-            observation = np.asarray(observations.get(agent, []), dtype=float).reshape(-1)
-            action_stats = _compact_array_stats(action)
-            observation_stats = _compact_array_stats(observation)
-            row = {
-                "global_step": self.global_step,
-                "episode": episode,
-                "episode_step": episode_step,
-                "time_step": time_step,
-                "scenario": self.scenario,
-                "algorithm": self.algorithm,
-                "reward_function": self.reward_metadata.get("function"),
-                "reward_profile": timeseries_row.get("reward_profile"),
-                "agent": agent,
-                "agent_index": self.agents.index(agent),
-                "reward": _as_float(rewards.get(agent)),
-                "done": bool(dones.get(agent, False)),
-                "action_dim": int(action.size),
-                "action_mean": action_stats["mean"],
-                "action_min": action_stats["min"],
-                "action_max": action_stats["max"],
-                "action_l2": action_stats["l2"],
-                "observation_dim": int(observation.size),
-                "observation_mean": observation_stats["mean"],
-                "observation_min": observation_stats["min"],
-                "observation_max": observation_stats["max"],
-                "observation_l2": observation_stats["l2"],
-            }
+        record_trace = (
+            self.trace_record_interval > 0
+            and (self.global_step % self.trace_record_interval == 0 or all_done)
+        )
 
-            for idx, value in enumerate(action[: self.max_action_dim]):
-                row[f"action_{idx}"] = _as_float(value)
+        if record_trace:
+            state_stats = _compact_array_stats(self.ctde_state())
+            for agent in self.agents:
+                action = np.asarray(action_dict.get(agent, []), dtype=float).reshape(-1)
+                observation = np.asarray(observations.get(agent, []), dtype=float).reshape(-1)
+                action_stats = _compact_array_stats(action)
+                observation_stats = _compact_array_stats(observation)
+                row = {
+                    "global_step": self.global_step,
+                    "episode": episode,
+                    "episode_step": episode_step,
+                    "time_step": time_step,
+                    "scenario": self.scenario,
+                    "algorithm": self.algorithm,
+                    "reward_function": self.reward_metadata.get("function"),
+                    "reward_profile": timeseries_row.get("reward_profile"),
+                    "agent": agent,
+                    "agent_index": self._agent_index_map[agent],
+                    "state_dim": int(self.state_dim),
+                    "state_mean": state_stats["mean"],
+                    "state_min": state_stats["min"],
+                    "state_max": state_stats["max"],
+                    "state_l2": state_stats["l2"],
+                    "reward": _as_float(rewards.get(agent)),
+                    "done": bool(dones.get(agent, False)),
+                    "action_dim": int(action.size),
+                    "action_mean": action_stats["mean"],
+                    "action_min": action_stats["min"],
+                    "action_max": action_stats["max"],
+                    "action_l2": action_stats["l2"],
+                    "observation_dim": int(observation.size),
+                    "observation_mean": observation_stats["mean"],
+                    "observation_min": observation_stats["min"],
+                    "observation_max": observation_stats["max"],
+                    "observation_l2": observation_stats["l2"],
+                }
+                row.update(self._building_step_metrics(self._building_for_agent(citylearn_env, agent), time_step))
 
-            info = dict(infos.get(agent, {})) if isinstance(infos, Mapping) else {}
-            if "individual_reward" in info:
-                row["individual_reward"] = _as_float(info["individual_reward"])
+                if self.trace_detail == "full":
+                    row.update(self._named_action_values(agent, action))
+                    row.update(self._selected_observation_values(agent, observation))
 
-            self.trace_records.append(row)
+                    for idx, value in enumerate(action[: self.max_action_dim]):
+                        row[f"action_{idx}"] = _as_float(value)
+
+                info = dict(infos.get(agent, {})) if isinstance(infos, Mapping) else {}
+                if "individual_reward" in info:
+                    row["individual_reward"] = _as_float(info["individual_reward"])
+
+                self.trace_records.append(row)
+
+        if timeseries_row.get("all_done") is True:
+            self._capture_completed_episode_snapshot(timeseries_row)
 
         self.global_step += 1
+
+    def _capture_completed_episode_snapshot(self, timeseries_row: Mapping[str, object]) -> None:
+        """Snapshot official KPIs before backend wrappers reset the environment."""
+
+        self.completed_episode_count += 1
+        self.last_completed_episode = _as_int(timeseries_row.get("episode"))
+        self.last_completed_global_step = _as_int(timeseries_row.get("global_step"))
+        self.last_completed_time_step = _as_int(timeseries_row.get("time_step"))
+
+        try:
+            from citylearn.v3.objectives import evaluate_objectives
+
+            objective_env = self._objective_env()
+            self.last_completed_objectives = dict(evaluate_objectives(objective_env))
+
+            frame = None
+            if hasattr(objective_env, "get_kpi_frame"):
+                frame = objective_env.get_kpi_frame()
+            elif hasattr(objective_env, "evaluate_v2"):
+                frame = objective_env.evaluate_v2()
+            elif hasattr(objective_env, "env") and hasattr(objective_env.env, "evaluate_v2"):
+                frame = objective_env.env.evaluate_v2()
+
+            self.last_completed_kpi_frame_rows = _dataframe_like_rows(frame)
+            self.last_completed_snapshot_error = None
+        except Exception as exc:  # pragma: no cover - defensive reporting fallback
+            self.last_completed_snapshot_error = str(exc)
 
     def _write_live_progress(self, timeseries_row: Mapping[str, object]) -> None:
         if self.live_progress_path is None:
@@ -1587,6 +3270,16 @@ class CityLearnV3BackendAdapter:
             if self._total_reward_mean_count == 0
             else float(self._total_reward_mean_sum / self._total_reward_mean_count)
         )
+
+        _reward_fn = getattr(self._core_env(), "reward_function", None)
+        _breakdown = getattr(_reward_fn, "_last_component_breakdown", {})
+        _comps = _breakdown.get("components") or []
+        _cstats: Dict[str, object] = {}
+        if _comps:
+            for _k in ("flex", "carbon", "cost", "ev"):
+                _vals = [c.get(_k, 0.0) for c in _comps if _k in c]
+                if _vals:
+                    _cstats[f"reward_component_{_k}_mean"] = float(np.mean(_vals))
 
         payload = {
             "global_step": int(timeseries_row["global_step"]),
@@ -1615,11 +3308,87 @@ class CityLearnV3BackendAdapter:
             "district_net_electricity_consumption_emission": timeseries_row.get("district_net_electricity_consumption_emission"),
             "electricity_price_mean": timeseries_row.get("electricity_price_mean"),
             "carbon_intensity_mean": timeseries_row.get("carbon_intensity_mean"),
+            "reward_component_flex_mean": _cstats.get("reward_component_flex_mean"),
+            "reward_component_carbon_mean": _cstats.get("reward_component_carbon_mean"),
+            "reward_component_cost_mean": _cstats.get("reward_component_cost_mean"),
+            "reward_component_ev_mean": _cstats.get("reward_component_ev_mean"),
+            "reward_team_reward": _breakdown.get("team_reward"),
+            "reward_district_import_kwh": _breakdown.get("district_import"),
+            "live_status": "env_step",
+            "live_status_updated_at": datetime.now(timezone.utc).isoformat(),
+            "backend_training_active": False,
+            "live_progress_semantics": (
+                "global_step changes only when CityLearn advances the environment; "
+                "heartbeat fields change while an external backend is updating neural networks."
+            ),
         }
+        self._atomic_write_live_payload(payload)
+
+    def write_live_heartbeat(self, *, stage: str, note: Optional[str] = None) -> None:
+        """Refresh live_progress.json while external backends train between env steps."""
+
+        if self.live_progress_path is None:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._live_progress_lock:
+            payload: Dict[str, object] = {}
+
+            if self.live_progress_path.exists():
+                try:
+                    payload = json.loads(self.live_progress_path.read_text(encoding="utf-8"))
+                except Exception:
+                    payload = {}
+
+            if not payload:
+                episode_length = max(int(self.episode_time_steps), 1)
+                last_recorded_step = max(int(self.global_step) - 1, 0)
+                payload = {
+                    "global_step": last_recorded_step,
+                    "episode": int(last_recorded_step // episode_length),
+                    "episode_step": int(last_recorded_step % episode_length),
+                    "time_step": int(last_recorded_step % episode_length),
+                    "scenario": self.scenario,
+                    "algorithm": self.algorithm,
+                    "reward_function": self.reward_metadata.get("function"),
+                    "reward_profile": self.reward_metadata.get("profile", {}).get("profile_name")
+                    if isinstance(self.reward_metadata.get("profile"), Mapping)
+                    else self.reward_metadata.get("profile"),
+                    "reward_axis_weights": self.reward_metadata.get("axis_weights"),
+                }
+
+            payload["live_status"] = str(stage)
+            payload["live_status_updated_at"] = now
+            payload["backend_training_active"] = True
+            payload["backend_training_heartbeat_count"] = int(payload.get("backend_training_heartbeat_count") or 0) + 1
+            payload["live_progress_semantics"] = (
+                "global_step changes only when CityLearn advances the environment; "
+                "heartbeat fields change while an external backend is updating neural networks."
+            )
+            if note:
+                payload["live_status_note"] = str(note)
+
+            self._write_live_payload_locked(payload)
+
+    def _atomic_write_live_payload(self, payload: Mapping[str, object]) -> None:
+        with self._live_progress_lock:
+            self._write_live_payload_locked(payload)
+
+    def _write_live_payload_locked(self, payload: Mapping[str, object]) -> None:
         self.live_progress_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.live_progress_path.with_suffix(".tmp")
+        tmp_path = self.live_progress_path.with_name(
+            f"{self.live_progress_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
         tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
-        tmp_path.replace(self.live_progress_path)
+
+        try:
+            tmp_path.replace(self.live_progress_path)
+        except PermissionError:
+            try:
+                self.live_progress_path.unlink(missing_ok=True)
+                tmp_path.replace(self.live_progress_path)
+            except PermissionError:
+                tmp_path.unlink(missing_ok=True)
 
     def kpi_summary(self) -> Dict[str, object]:
         return {
@@ -1703,7 +3472,7 @@ class CityLearnSMACDiscreteEnv:
         observations, rewards, dones, infos = self.adapter.step_discrete(actions)
         self._last_obs = self.adapter.padded_observations(observations)
         reward = float(np.mean([rewards[agent] for agent in self.adapter.agents]))
-        terminated = bool(any(dones.values()))
+        terminated = bool(all(dones.values())) if dones else False
         info = {"battle_won": False, "citylearn_infos": infos}
         return reward, terminated, info
 
@@ -1789,3 +3558,212 @@ class NoOpLogger:
 
     def close(self):
         return None
+
+
+class FiniteTensorBoardWriter:
+    """SummaryWriter guard that skips non-finite scalar values and audits them."""
+
+    def __init__(self, writer, audit_path: Optional[Path] = None):
+        self.writer = writer
+        self.audit_path = Path(audit_path) if audit_path is not None else None
+        self.skipped_count = 0
+        if self.audit_path is not None:
+            self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _scalar(self, value):
+        if isinstance(value, np.ndarray):
+            if value.size != 1:
+                return None
+            value = value.reshape(-1)[0]
+        elif hasattr(value, "detach"):
+            try:
+                detached = value.detach()
+                if hasattr(detached, "numel") and detached.numel() != 1:
+                    return None
+                value = detached.cpu().item()
+            except Exception:
+                return None
+
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+
+        return numeric if np.isfinite(numeric) else None
+
+    def _audit_skip(self, tag: str, global_step, value) -> None:
+        self.skipped_count += 1
+        if self.audit_path is None:
+            return
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tag": str(tag),
+            "global_step": global_step,
+            "value_repr": repr(value),
+            "reason": "non_finite_tensorboard_scalar",
+        }
+        with self.audit_path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def add_scalar(self, tag, scalar_value, global_step=None, *args, **kwargs):
+        clean_value = self._scalar(scalar_value)
+        if clean_value is None:
+            self._audit_skip(str(tag), global_step, scalar_value)
+            return None
+        return self.writer.add_scalar(tag, clean_value, global_step, *args, **kwargs)
+
+    def add_scalars(self, main_tag, tag_scalar_dict, global_step=None, *args, **kwargs):
+        clean_values = {}
+        for key, value in dict(tag_scalar_dict or {}).items():
+            clean_value = self._scalar(value)
+            tag = f"{main_tag}/{key}"
+            if clean_value is None:
+                self._audit_skip(tag, global_step, value)
+            else:
+                clean_values[key] = clean_value
+        if not clean_values:
+            return None
+        return self.writer.add_scalars(main_tag, clean_values, global_step, *args, **kwargs)
+
+    def export_scalars_to_json(self, *args, **kwargs):
+        return self.writer.export_scalars_to_json(*args, **kwargs)
+
+    def close(self):
+        return self.writer.close()
+
+
+def install_finite_optimizer_step_guard(
+    optimizer_specs: Sequence[Mapping[str, object]],
+    audit_path: Optional[Path] = None,
+) -> Dict[str, object]:
+    """Skip optimizer steps whose gradients contain NaN or Inf values."""
+
+    import torch
+
+    path = Path(audit_path) if audit_path is not None else None
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    installed = 0
+    installed_owners: List[str] = []
+    seen_optimizers = set()
+
+    def iter_named_parameters(spec: Mapping[str, object]):
+        module = spec.get("module")
+        if module is not None and hasattr(module, "named_parameters"):
+            yield from module.named_parameters()
+            return
+
+        parameters = spec.get("parameters")
+        if parameters is None:
+            return
+        for index, parameter in enumerate(list(parameters)):
+            yield f"parameter_{index}", parameter
+
+    def audit_skip(owner: str, bad_gradients: Sequence[str]) -> None:
+        if path is None:
+            return
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "owner": owner,
+            "bad_gradients": list(bad_gradients),
+            "reason": "non_finite_gradient_optimizer_step_skipped",
+        }
+        with path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    for spec in optimizer_specs:
+        optimizer = spec.get("optimizer")
+        if optimizer is None:
+            continue
+
+        optimizer_id = id(optimizer)
+        if optimizer_id in seen_optimizers or getattr(optimizer, "_citylearn_finite_guard_installed", False):
+            continue
+
+        owner = str(spec.get("owner") or f"optimizer_{installed}")
+        parameters = list(iter_named_parameters(spec))
+        if not parameters:
+            continue
+
+        seen_optimizers.add(optimizer_id)
+        original_step = optimizer.step
+
+        def guarded_step(
+            *args,
+            _owner=owner,
+            _parameters=parameters,
+            _optimizer=optimizer,
+            _original_step=original_step,
+            **kwargs,
+        ):
+            bad_gradients = []
+            for name, parameter in _parameters:
+                gradient = getattr(parameter, "grad", None)
+                if gradient is None:
+                    continue
+                try:
+                    is_finite = bool(torch.isfinite(gradient.detach()).all().item())
+                except Exception as exc:
+                    bad_gradients.append(f"{name}:finite_check_error={exc!r}")
+                    continue
+                if not is_finite:
+                    bad_gradients.append(str(name))
+
+            if bad_gradients:
+                try:
+                    _optimizer.zero_grad(set_to_none=True)
+                except TypeError:
+                    _optimizer.zero_grad()
+                audit_skip(_owner, bad_gradients)
+                return None
+
+            return _original_step(*args, **kwargs)
+
+        optimizer.step = guarded_step
+        optimizer._citylearn_finite_guard_installed = True
+        installed += 1
+        installed_owners.append(owner)
+
+    if path is not None:
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": "finite_optimizer_step_guard_installed",
+            "installed_optimizers": installed,
+            "owners": installed_owners,
+            "reason": "optimizer_step_guard_audit_initialized",
+        }
+        with path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    return {
+        "installed_optimizers": installed,
+        "audit_path": str(path) if path is not None else None,
+        "audit_file_exists": bool(path is not None and path.is_file()),
+        "audit_initialized": bool(path is not None),
+    }
+
+
+def install_harl_finite_optimizer_step_guard(runner, audit_path: Optional[Path] = None) -> Dict[str, object]:
+    """Skip HARL optimizer steps that contain non-finite gradients."""
+
+    specs = []
+    for agent_index, actor_policy in enumerate(getattr(runner, "actor", []) or []):
+        specs.append(
+            {
+                "owner": f"actor_agent{agent_index}",
+                "module": getattr(actor_policy, "actor", None),
+                "optimizer": getattr(actor_policy, "actor_optimizer", None),
+            }
+        )
+
+    critic_policy = getattr(runner, "critic", None)
+    specs.append(
+        {
+            "owner": "critic",
+            "module": getattr(critic_policy, "critic", None),
+            "optimizer": getattr(critic_policy, "critic_optimizer", None),
+        }
+    )
+
+    return install_finite_optimizer_step_guard(specs, audit_path)

@@ -576,9 +576,14 @@ class CityLearnKPIService:
 
         env = self.env
 
-        get_net_electricity_consumption = lambda x, c: getattr(x, f'net_electricity_consumption{c.value}')
-        get_net_electricity_consumption_cost = lambda x, c: getattr(x, f'net_electricity_consumption_cost{c.value}')
-        get_net_electricity_consumption_emission = lambda x, c: getattr(x, f'net_electricity_consumption_emission{c.value}')
+        def get_net_electricity_consumption(x, c):
+            return getattr(x, f'net_electricity_consumption{c.value}')
+
+        def get_net_electricity_consumption_cost(x, c):
+            return getattr(x, f'net_electricity_consumption_cost{c.value}')
+
+        def get_net_electricity_consumption_emission(x, c):
+            return getattr(x, f'net_electricity_consumption_emission{c.value}')
 
         comfort_band = EnergySimulation.DEFUALT_COMFORT_BAND if comfort_band is None else comfort_band
         daily_steps = self._window_steps(24.0 * 3600.0, env.seconds_per_time_step)
