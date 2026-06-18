@@ -1,4 +1,5 @@
 import sys
+import warnings
 from pathlib import Path
 
 
@@ -13,6 +14,7 @@ from generate_thesis_objective_evidence import (  # noqa: E402
     pairwise_statistical_rows,
     statistical_omnibus_rows,
     vargha_delaney_a12,
+    wilcoxon_pairwise_rows,
 )
 
 
@@ -85,3 +87,23 @@ def test_effect_size_helpers_match_expected_limits():
     assert vargha_delaney_a12([3.0, 4.0], [1.0, 2.0]) == 1.0
     assert cliffs_delta([1.0, 2.0], [3.0, 4.0]) == -1.0
     assert vargha_delaney_a12([1.0, 2.0], [3.0, 4.0]) == 0.0
+
+
+def test_wilcoxon_known_small_sample_warnings_are_suppressed():
+    score_rows = algorithm_kpi_score_rows([
+        _objective_row("HAPPO", "kpi_1", 90.0),
+        _objective_row("HAPPO", "kpi_2", 95.0),
+        _objective_row("HAPPO", "kpi_3", 100.0),
+        _objective_row("MAAC", "kpi_1", 90.0),
+        _objective_row("MAAC", "kpi_2", 96.0),
+        _objective_row("MAAC", "kpi_3", 99.0),
+    ])
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        rows = wilcoxon_pairwise_rows(score_rows)
+
+    assert rows
+    warning_messages = [str(item.message) for item in caught]
+    assert not any("Exact p-value calculation does not work if there are zeros" in msg for msg in warning_messages)
+    assert not any("Sample size too small for normal approximation" in msg for msg in warning_messages)

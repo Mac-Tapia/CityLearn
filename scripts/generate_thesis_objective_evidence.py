@@ -16,6 +16,7 @@ import json
 import math
 import random
 import sys
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
@@ -1141,6 +1142,18 @@ def mann_whitney_pairwise_rows(
     return rows
 
 
+def pairwise_statistical_rows(
+    score_rows: Sequence[Mapping[str, Any]],
+    *,
+    bootstrap_iterations: int = BOOTSTRAP_ITERATIONS,
+) -> List[Dict[str, Any]]:
+    """Backward-compatible alias for independent pairwise comparisons."""
+    return mann_whitney_pairwise_rows(
+        score_rows,
+        bootstrap_iterations=bootstrap_iterations,
+    )
+
+
 def wilcoxon_pairwise_rows(
     score_rows: Sequence[Mapping[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -1175,10 +1188,25 @@ def wilcoxon_pairwise_rows(
             if n_paired >= 1 and stats is not None:
                 if n_nonzero > 0:
                     try:
-                        wc_result = stats.wilcoxon(paired_a, paired_b, alternative="two-sided")
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings(
+                                "ignore",
+                                message="Exact p-value calculation does not work if there are zeros.*",
+                                category=UserWarning,
+                            )
+                            warnings.filterwarnings(
+                                "ignore",
+                                message="Sample size too small for normal approximation.*",
+                                category=UserWarning,
+                            )
+                            wc_result = stats.wilcoxon(paired_a, paired_b, alternative="two-sided")
                         wc_statistic = float(wc_result.statistic)
                         wc_p_value = float(wc_result.pvalue)
                         wc_status = f"ok_n_paired={n_paired}_n_nonzero={n_nonzero}"
+                        if n_nonzero < n_paired:
+                            wc_status += "_zero_differences_normal_approximation"
+                        if n_nonzero < 10:
+                            wc_status += "_small_sample_exploratory"
                     except Exception as exc:
                         wc_status = f"not_calculable: {exc}"
                 else:
