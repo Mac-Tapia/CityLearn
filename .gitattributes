@@ -1,0 +1,8 @@
+# Notebooks: keep LF in repo, no CRLF conversion on Windows checkout
+*.ipynb text eol=lf
+
+# Python source files: same
+*.py text eol=lf
+
+# Everything else: auto-detect
+* text=auto
