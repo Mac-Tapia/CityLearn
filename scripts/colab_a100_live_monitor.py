@@ -93,6 +93,8 @@ def job_state(status: Mapping[str, object], algorithm: str, scenario: str, root:
     ]
     if jobs:
         job = jobs[-1]
+        if job.get("planned_only"):
+            return "planned"
         if job.get("completed_at") is None:
             return "running"
         if job.get("exit_code") == 0:
@@ -302,8 +304,11 @@ def print_logs(status: Mapping[str, object], log_tail: int) -> None:
     print("")
     print("Logs recientes")
     for job in jobs[-4:]:
-        log = Path(str(job.get("log") or ""))
-        if not log.exists():
+        log_value = str(job.get("log") or "").strip()
+        if not log_value:
+            continue
+        log = Path(log_value)
+        if not log.exists() or not log.is_file():
             continue
         print(f"--- {log.name} ---")
         lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()
