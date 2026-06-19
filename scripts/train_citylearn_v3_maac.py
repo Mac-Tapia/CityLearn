@@ -65,11 +65,16 @@ def main() -> int:
     args = parse_args()
     ensure_project_paths()
     add_external_path("MAAC")
-    # The MAAC repo has a top-level ``utils`` package name. Remove any earlier
-    # module with that name so imports resolve to external/MAAC/utils.
+    # The MAAC repo has top-level ``utils`` and ``algorithms`` names. Remove
+    # earlier modules with those names so imports resolve to external/MAAC.
     import sys
 
     sys.modules.pop("utils", None)
+    sys.modules.pop("algorithms", None)
+    sys.path[:] = [
+        entry for entry in sys.path
+        if not entry.replace("\\", "/").rstrip("/").endswith("/uc3m")
+    ]
     from algorithms.attention_sac import AttentionSAC
     from utils.buffer import ReplayBuffer
 
