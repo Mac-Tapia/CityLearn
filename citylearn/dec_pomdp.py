@@ -12,7 +12,10 @@ from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 import numpy as np
 from gymnasium import spaces
-from pettingzoo import ParallelEnv
+try:
+    from pettingzoo.utils.env import ParallelEnv
+except ImportError:  # PettingZoo <=1.12 exposed ParallelEnv at package root.
+    from pettingzoo import ParallelEnv
 
 from citylearn.citylearn import CityLearnEnv
 from citylearn.madrl_kpis import (
