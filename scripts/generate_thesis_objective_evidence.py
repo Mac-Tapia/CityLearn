@@ -685,7 +685,7 @@ def compute_objective_compliance(
         scenario = definition["scenario"]
         focus_runs = [
             run for run in run_inventory
-            if run.get("scenario") == scenario and run.get("output_profile") in {"official_local_5ep", "colab_pro_50ep"}
+            if run.get("scenario") == scenario
         ]
         usable_runs = [run for run in focus_runs if run_is_usable_for_results(run)]
         focus_objectives = [
