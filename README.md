@@ -5,6 +5,8 @@ CityLearn is an open source Farama Foundation Gymnasium environment for the impl
 
 This fork includes a CityLearn v3 experimental layer for cooperative MADRL training over the CityLearn v2 simulator. The active thesis workflow uses the `citylearn_challenge_2022_phase_all_plus_evs` dataset, 17 buildings with EVs, Dec-POMDP/CTDE wrappers, and four official backends: HAPPO, MASAC, MATD3 and MAAC.
 
+**Python 3.9 is mandatory** for the MADRL stack (PyTorch 2.8.0+cu126, numpy 1.23.5, gymnasium 0.28.1). The Colab tutorial notebook (`examples/madrl_citylearn_v3_tutorial.ipynb`) creates and validates a `.venv39-citylearn-v3` Python 3.9 environment automatically. Cell `0.verify` reports the Python 3.9 binary; all training cells invoke `PROJECT_PYTHON` which points to Python 3.9.
+
 The official local launcher is:
 
 ```powershell
