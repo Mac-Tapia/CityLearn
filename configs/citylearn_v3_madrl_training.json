@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "name": "citylearn_v3_madrl_training",
-  "updated_date": "2026-06-14",
+  "updated_date": "2026-06-20",
   "purpose": "Canonical CityLearn v3 MADRL training overlay for the thesis project.",
   "version_layer": "citylearn-v3-madrl",
   "simulator": "citylearn-v2",
@@ -55,8 +55,8 @@
     ],
     "seed": 0,
     "episode_time_steps": 8760,
-    "episodes": 5,
-    "num_env_steps": 43800,
+    "episodes": 75,
+    "num_env_steps": 657000,
     "execution": "sequential",
     "cuda": true,
     "torch_build": "torch 2.8.0+cu126",
@@ -70,7 +70,38 @@
     },
     "output_root": "outputs/latest_visible_training_output_root.txt",
     "launcher": "CityLearn/scripts/launch_citylearn_v3_official_training.ps1",
-    "monitor": "CityLearn/scripts/monitor_citylearn_v3_official_training.ps1"
+    "monitor": "CityLearn/scripts/monitor_citylearn_v3_official_training.ps1",
+    "primary_algorithms": [
+      "happo",
+      "masac",
+      "matd3",
+      "maac"
+    ],
+    "primary_training_runs": 12,
+    "best_selection_required_line": "Mejor algoritmo MADRL seleccionado: [HAPPO / MASAC / MATD3 / MAAC]",
+    "baseline_comparison": {
+      "mode": "project_local_citylearn_v2",
+      "internal_citylearn_v2_baseline": "evaluate_v2 written by every MADRL training run into objective_kpis/axis_baseline_comparison/baseline_gain_by_kpi",
+      "benchmark_script": "CityLearn/scripts/benchmark_citylearn_v2_agents.py",
+      "benchmark_agents_default": [
+        "baseline",
+        "hour_rbc"
+      ],
+      "comparator": "CityLearn/scripts/compare_citylearn_v2_vs_v3_madrl.py",
+      "rule": "PPO/SAC/A2C are implemented only as CityLearn v2 central-agent Stable-Baselines3 comparison baselines on the same local Iquitos schema, not as MADRL v3 agents.",
+      "sb3_comparison_agents": [
+        "ppo",
+        "sac",
+        "a2c"
+      ],
+      "sb3_comparison_scripts": {
+        "ppo": "CityLearn/scripts/benchmark_citylearn_v2_ppo.py",
+        "sac": "CityLearn/scripts/benchmark_citylearn_v2_sac.py",
+        "a2c": "CityLearn/scripts/benchmark_citylearn_v2_a2c.py"
+      },
+      "sb3_train_episodes": 75,
+      "schema_path": "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json"
+    }
   },
   "reward": {
     "function": "citylearn.reward_function.CityLearnV3MADRLRewardFunction",
@@ -235,7 +266,7 @@
       "action_type": "continuous",
       "reward_profile": "HAPPO",
       "cli": {
-        "num_env_steps": 43800,
+        "num_env_steps": 657000,
         "hidden_size": 384,
         "torch_threads": 12,
         "n_rollout_threads": 1,
@@ -245,7 +276,7 @@
         "cuda": true
       },
       "hyperparameters": {
-        "episodes": 5,
+        "episodes": 75,
         "episode_length": 8760,
         "n_rollout_threads": 1,
         "hidden_sizes": [
@@ -289,8 +320,8 @@
         "cuda": true
       },
       "hyperparameters": {
-        "episodes": 5,
-        "n_epoch": 5,
+        "episodes": 75,
+        "n_epoch": 75,
         "n_episodes_per_epoch": 1,
         "episode_limit": 8760,
         "action_bins": 3,
@@ -317,7 +348,7 @@
       "action_type": "continuous",
       "reward_profile": "MATD3",
       "cli": {
-        "num_env_steps": 43800,
+        "num_env_steps": 657000,
         "batch_size": 512,
         "buffer_size": 50000,
         "hidden_size": 384,
@@ -327,9 +358,9 @@
         "cuda": true
       },
       "hyperparameters": {
-        "episodes": 5,
+        "episodes": 75,
         "episode_length": 8760,
-        "num_env_steps": 43800,
+        "num_env_steps": 657000,
         "batch_size": 512,
         "buffer_size": 50000,
         "hidden_size": 384,
@@ -373,7 +404,7 @@
         "cuda": true
       },
       "hyperparameters": {
-        "episodes": 5,
+        "episodes": 75,
         "episode_length": 8760,
         "action_bins": 3,
         "discrete_action_mode": "axis",
@@ -422,5 +453,37 @@
       "OE2_co2_kpis.png",
       "OE3_cost_kpis.png"
     ]
+  },
+  "selection": {
+    "candidate_algorithms": [
+      "HAPPO",
+      "MASAC",
+      "MATD3",
+      "MAAC"
+    ],
+    "required_report_line": "Mejor algoritmo MADRL seleccionado: [HAPPO / MASAC / MATD3 / MAAC]",
+    "baseline_comparison": {
+      "mode": "project_local_citylearn_v2",
+      "internal_citylearn_v2_baseline": "evaluate_v2 written by every MADRL training run into objective_kpis/axis_baseline_comparison/baseline_gain_by_kpi",
+      "benchmark_script": "CityLearn/scripts/benchmark_citylearn_v2_agents.py",
+      "benchmark_agents_default": [
+        "baseline",
+        "hour_rbc"
+      ],
+      "comparator": "CityLearn/scripts/compare_citylearn_v2_vs_v3_madrl.py",
+      "rule": "PPO/SAC/A2C are implemented only as CityLearn v2 central-agent Stable-Baselines3 comparison baselines on the same local Iquitos schema, not as MADRL v3 agents.",
+      "sb3_comparison_agents": [
+        "ppo",
+        "sac",
+        "a2c"
+      ],
+      "sb3_comparison_scripts": {
+        "ppo": "CityLearn/scripts/benchmark_citylearn_v2_ppo.py",
+        "sac": "CityLearn/scripts/benchmark_citylearn_v2_sac.py",
+        "a2c": "CityLearn/scripts/benchmark_citylearn_v2_a2c.py"
+      },
+      "sb3_train_episodes": 75,
+      "schema_path": "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json"
+    }
   }
 }

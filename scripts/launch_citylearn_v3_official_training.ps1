@@ -2,16 +2,18 @@ param(
     [string]$Scenario = "ALL",
     [int]$Seed = 0,
     [int]$EpisodeTimeSteps = 8760,
-    [int]$Episodes = 5,
+    [int]$Episodes = 75,
     [string]$OutputRoot = "outputs\citylearn_v3_madrl_iquitos_official_full_cuda_v1",
     [string]$SchemaPath = "CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json",
     [int]$TorchThreads = 12,
     [int]$LiveProgressInterval = 250,
     # -StartFromAlgorithm: skip all algorithm stages before this one.
-    # Valid values: happo (default, run all), masac, matd3, maac.
+    # Valid values: happo (default, run all primary MADRL), masac, matd3, maac.
     # Use to resume after a partial failure without re-running completed algorithms.
     [ValidateSet("happo", "masac", "matd3", "maac")]
     [string]$StartFromAlgorithm = "happo",
+    [ValidateSet("happo", "masac", "matd3", "maac")]
+    [string]$EndAtAlgorithm = "maac",
     [ValidateSet("full", "efficient", "minimal")]
     [string]$ArtifactProfile = "efficient",
     [int]$TraceRecordInterval = 10,
@@ -342,6 +344,21 @@ foreach ($scenarioName in $ScenarioList) {
     }
 }
 
+$PrimaryAlgorithmOrder = @("happo", "masac", "matd3", "maac")
+$AlgorithmOrder = @($PrimaryAlgorithmOrder)
+
+$StartAlgorithmIndex = $AlgorithmOrder.IndexOf($StartFromAlgorithm.ToLowerInvariant())
+$EndAlgorithmIndex = $AlgorithmOrder.IndexOf($EndAtAlgorithm.ToLowerInvariant())
+if ($StartAlgorithmIndex -lt 0) {
+    throw "StartFromAlgorithm=$StartFromAlgorithm is outside the active algorithm order."
+}
+if ($EndAlgorithmIndex -lt 0) {
+    throw "EndAtAlgorithm=$EndAtAlgorithm is outside the active algorithm order."
+}
+if ($EndAlgorithmIndex -lt $StartAlgorithmIndex) {
+    throw "EndAtAlgorithm=$EndAtAlgorithm must not come before StartFromAlgorithm=$StartFromAlgorithm."
+}
+
 $MaxConcurrentScenarioJobs = [Math]::Max(1, [int]$MaxConcurrentScenarioJobs)
 $MaxConcurrentHeavyJobs = [Math]::Max(1, [int]$MaxConcurrentHeavyJobs)
 $EffectiveParallelScenarios = [bool]$ParallelScenarios -and (-not [bool]$LiveOutput) -and ($ScenarioList.Count -gt 1)
@@ -565,16 +582,28 @@ $manifest = [ordered]@{
     }
     output_root = $OutputRoot
     start_from_algorithm = $StartFromAlgorithm
-    algorithm_order = @("happo", "masac", "matd3", "maac")
+    end_at_algorithm = $EndAtAlgorithm
+    primary_algorithms = $PrimaryAlgorithmOrder
+    algorithm_order = $AlgorithmOrder
     jobs = @()
 }
 
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $ManifestPath -Encoding UTF8
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $StatusPath -Encoding UTF8
 
+function Test-AlgorithmInSelectedRange {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AlgorithmName
+    )
+
+    $algorithmIndex = $AlgorithmOrder.IndexOf($AlgorithmName.ToLowerInvariant())
+    return ($algorithmIndex -ge $StartAlgorithmIndex -and $algorithmIndex -le $EndAlgorithmIndex)
+}
+
 if ($DryRun) {
     $manifest.jobs = @()
-    foreach ($job in $jobs) {
+    foreach ($job in @($jobs | Where-Object { Test-AlgorithmInSelectedRange -AlgorithmName $_.name })) {
         $commandArgs = @("-B", $job.script) + $job.args
         $manifest.jobs += [ordered]@{
             name = $job.name
@@ -895,14 +924,19 @@ function Invoke-ParallelScenarioStage {
 if ($EffectiveParallelScenarios) {
     Write-Host ""
     Write-Host "Running optimized parallel-scenario schedule. Use -LiveOutput for sequential rich display." -ForegroundColor Green
-    $algorithmOrder = @("happo", "masac", "matd3", "maac")
-    $startIdx = $algorithmOrder.IndexOf($StartFromAlgorithm.ToLower())
-    foreach ($algorithmName in $algorithmOrder) {
-        $thisIdx = $algorithmOrder.IndexOf($algorithmName)
-        if ($thisIdx -lt $startIdx) {
+    foreach ($algorithmName in $AlgorithmOrder) {
+        $thisIdx = $AlgorithmOrder.IndexOf($algorithmName)
+        if ($thisIdx -lt $StartAlgorithmIndex) {
             Write-Host "  SKIP  $($algorithmName.ToUpper()) (StartFromAlgorithm=$StartFromAlgorithm)" -ForegroundColor DarkGray
             foreach ($skippedJob in @($jobs | Where-Object { $_.name -eq $algorithmName })) {
                 Add-SkippedTrainingJobRecord -Job $skippedJob -Reason "start_from_algorithm"
+            }
+            continue
+        }
+        if ($thisIdx -gt $EndAlgorithmIndex) {
+            Write-Host "  SKIP  $($algorithmName.ToUpper()) (EndAtAlgorithm=$EndAtAlgorithm)" -ForegroundColor DarkGray
+            foreach ($skippedJob in @($jobs | Where-Object { $_.name -eq $algorithmName })) {
+                Add-SkippedTrainingJobRecord -Job $skippedJob -Reason "end_at_algorithm"
             }
             continue
         }
@@ -924,6 +958,18 @@ if ($EffectiveParallelScenarios) {
 }
 
 foreach ($job in $jobs) {
+    $jobAlgorithmIndex = $AlgorithmOrder.IndexOf($job.name.ToLowerInvariant())
+    if ($jobAlgorithmIndex -lt $StartAlgorithmIndex) {
+        Write-Host "=== SKIP (StartFromAlgorithm=$StartFromAlgorithm): $($job.name.ToUpper()) | $($job.scenario) ===" -ForegroundColor DarkGray
+        Add-SkippedTrainingJobRecord -Job $job -Reason "start_from_algorithm"
+        continue
+    }
+    if ($jobAlgorithmIndex -gt $EndAlgorithmIndex) {
+        Write-Host "=== SKIP (EndAtAlgorithm=$EndAtAlgorithm): $($job.name.ToUpper()) | $($job.scenario) ===" -ForegroundColor DarkGray
+        Add-SkippedTrainingJobRecord -Job $job -Reason "end_at_algorithm"
+        continue
+    }
+
     # ── Skip if already completed ─────────────────────────────────────────────
     if ($SkipCompleted) {
         $jobOutputDir = Join-Path $OutputRoot "$($job.name)\$($job.scenario)_seed_$Seed"
@@ -1019,7 +1065,7 @@ foreach ($job in $jobs) {
                 Write-Host "  [CADENA DE CORRIDAS]" -ForegroundColor Magenta
                 $allJobs = @()
                 foreach ($sc in $ScenarioList) {
-                    foreach ($alg in @("happo","masac","matd3","maac")) {
+                    foreach ($alg in $AlgorithmOrder) {
                         $allJobs += "$($alg.ToUpper())/$sc"
                     }
                 }

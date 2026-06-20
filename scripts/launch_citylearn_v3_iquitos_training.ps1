@@ -2,7 +2,7 @@ param(
     [string]$Scenario = "ALL",
     [int]$Seed = 0,
     [int]$EpisodeTimeSteps = 8760,
-    [int]$Episodes = 5,
+    [int]$Episodes = 75,
     [string]$OutputRoot = "outputs\citylearn_v3_madrl_iquitos",
     [int]$TorchThreads = 12,
     [int]$LiveProgressInterval = 250,

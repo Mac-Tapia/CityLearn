@@ -23,6 +23,9 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 
 ALGORITHMS = ("happo", "masac", "matd3", "maac")
+# MAPPO and MADDPG are local comparison baselines enabled via --include-baselines.
+BASELINE_ALGORITHMS = ("mappo", "maddpg")
+ALL_ALGORITHMS = ALGORITHMS + BASELINE_ALGORITHMS
 SCENARIOS = ("E1", "E2", "E3")
 HEAVY_ALGORITHMS = {"masac", "maac"}
 DEFAULT_SCHEMA = "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json"
@@ -543,8 +546,74 @@ def build_jobs(args: argparse.Namespace, root: Path, output_root: Path, schema_a
             }
         )
 
-    start_idx = ALGORITHMS.index(args.start_from_algorithm)
-    return [job for job in jobs if ALGORITHMS.index(str(job["name"])) >= start_idx]
+    if args.include_baselines:
+        for scenario in scenarios:
+            jobs.append(
+                {
+                    "name": "mappo",
+                    "scenario": scenario,
+                    "script": "CityLearn/scripts/train_citylearn_v3_mappo.py",
+                    "args": common_args(args, schema_arg=schema_arg, output_root=output_root, algorithm="mappo", scenario=scenario)
+                    + [
+                        "--episodes",
+                        str(args.episodes),
+                        "--num-env-steps",
+                        str(num_env_steps),
+                        "--hidden-size",
+                        str(args.mappo_hidden_size),
+                        "--n-rollout-threads",
+                        "1",
+                        "--log-interval",
+                        "1",
+                        "--eval-interval",
+                        "1",
+                        "--actor-lr",
+                        "1e-4",
+                        "--critic-lr",
+                        "5e-4",
+                        "--max-grad-norm",
+                        "1.0",
+                        "--gamma",
+                        "0.9999",
+                        "--action-aggregation",
+                        "mean",
+                    ],
+                }
+            )
+            jobs.append(
+                {
+                    "name": "maddpg",
+                    "scenario": scenario,
+                    "script": "CityLearn/scripts/train_citylearn_v3_maddpg.py",
+                    "args": common_args(args, schema_arg=schema_arg, output_root=output_root, algorithm="maddpg", scenario=scenario)
+                    + [
+                        "--episodes",
+                        str(args.episodes),
+                        "--num-env-steps",
+                        str(num_env_steps),
+                        "--batch-size",
+                        str(args.maddpg_batch_size),
+                        "--buffer-size",
+                        str(args.maddpg_buffer_size),
+                        "--hidden-size",
+                        str(args.maddpg_hidden_size),
+                        "--lr",
+                        "3e-4",
+                        "--max-grad-norm",
+                        "1.0",
+                        "--gamma",
+                        "0.9999",
+                        "--train-interval",
+                        str(args.maddpg_train_interval),
+                        "--num-random-episodes",
+                        "1",
+                    ],
+                }
+            )
+
+    algo_order = ALL_ALGORITHMS if args.include_baselines else ALGORITHMS
+    start_idx = algo_order.index(args.start_from_algorithm)
+    return [job for job in jobs if algo_order.index(str(job["name"])) >= start_idx]
 
 
 def command_for_job(job: Mapping[str, object]) -> List[str]:
@@ -586,6 +655,9 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
     elif name == "maac":
         args = replace_arg(args, "--batch-size", "256")
         args = replace_arg(args, "--buffer-length", "50000")
+    elif name == "maddpg":
+        args = replace_arg(args, "--batch-size", "256")
+        args = replace_arg(args, "--buffer-size", "4096")
     else:
         return None
 
@@ -875,6 +947,10 @@ def make_manifest(
             "maac_batch_size": args.maac_batch_size,
             "maac_buffer_length": args.maac_buffer_length,
             "oom_retry": bool(args.oom_retry),
+            "include_baselines": bool(args.include_baselines),
+            "mappo_hidden_size": args.mappo_hidden_size,
+            "maddpg_batch_size": args.maddpg_batch_size,
+            "maddpg_buffer_size": args.maddpg_buffer_size,
         },
         "artifact_optimization": {
             "profile": args.artifact_profile,
@@ -895,7 +971,8 @@ def make_manifest(
         },
         "output_root": path_for_status(root, output_root),
         "start_from_algorithm": args.start_from_algorithm,
-        "algorithm_order": list(ALGORITHMS),
+        "include_baselines": bool(args.include_baselines),
+        "algorithm_order": list(ALL_ALGORITHMS if args.include_baselines else ALGORITHMS),
         "references": REFERENCE_SOURCES,
         "jobs": [],
     }
@@ -923,11 +1000,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--smoke-imports", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-completed", action="store_true")
-    parser.add_argument("--start-from-algorithm", default="happo", choices=ALGORITHMS)
+    parser.add_argument("--start-from-algorithm", default="happo", choices=ALL_ALGORITHMS)
     parser.add_argument("--live-monitor", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--monitor-interval", default=30, type=int)
     parser.add_argument("--log-tail", default=12, type=int)
     parser.add_argument("--oom-retry", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--include-baselines",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Also train MAPPO and MADDPG as local comparison baselines after the 4 main algorithms.",
+    )
 
     parser.add_argument("--happo-hidden-size", default=384, type=int)
     parser.add_argument("--masac-max-replay-buffer-gib", default=20.0, type=float)
@@ -948,6 +1031,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--maac-hidden-size", default=256, type=int)
     parser.add_argument("--maac-steps-per-update", default=250, type=int)
     parser.add_argument("--maac-num-updates", default=8, type=int)
+    # Baseline algorithm resource limits
+    parser.add_argument("--mappo-hidden-size", default=256, type=int)
+    parser.add_argument("--maddpg-batch-size", default=512, type=int)
+    parser.add_argument("--maddpg-buffer-size", default=6000, type=int)
+    parser.add_argument("--maddpg-hidden-size", default=256, type=int)
+    parser.add_argument("--maddpg-train-interval", default=1, type=int)
     return parser.parse_args(argv)
 
 

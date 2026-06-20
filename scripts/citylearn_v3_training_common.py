@@ -683,7 +683,7 @@ def citylearn_v3_training_report(candidate) -> Dict[str, object]:
 
 
 def _checkpoint_files(output_dir: Path, checkpoint_dir: Optional[Path] = None) -> List[Dict[str, object]]:
-    checkpoint_extensions = {".pt", ".pkl", ".pth", ".ckpt"}
+    checkpoint_extensions = {".pt", ".pkl", ".pth", ".ckpt", ".zip"}
     output = []
     checkpoint_dir = checkpoint_dir if checkpoint_dir is not None else output_dir
     search_root = checkpoint_dir if checkpoint_dir.exists() else output_dir

@@ -289,6 +289,7 @@ def _write_benchmark_artifacts(
     *,
     output_dir: Path,
     agent_key: str,
+    backend: str = "citylearn.agents",
     scenario: str,
     seed: int,
     episode_time_steps: int,
@@ -307,7 +308,7 @@ def _write_benchmark_artifacts(
     checkpoints = _checkpoint_files(output_dir, dirs["checkpoints"])
     checkpoint_manifest = {
         "algorithm": agent_key,
-        "backend": "citylearn_v2_original",
+        "backend": backend,
         "checkpoint_dir": str(dirs["checkpoints"]),
         "checkpoint_count": len(checkpoints),
         "checkpoints": checkpoints,
@@ -328,7 +329,7 @@ def _write_benchmark_artifacts(
     results = {
         "algorithm": agent_key,
         "family": "citylearn_v2_original",
-        "backend": "citylearn.agents",
+        "backend": backend,
         "scenario": scenario,
         "seed": seed,
         "episode_time_steps": episode_time_steps,
