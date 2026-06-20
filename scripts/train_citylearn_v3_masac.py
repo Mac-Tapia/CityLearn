@@ -281,6 +281,10 @@ def main() -> int:
             note="MASAC backend is updating critic/actor networks between CityLearn environment steps.",
         )
         runner.run(args.seed)
+        final_train_step = max(1, int(configured_episodes) * max(1, int(backend_args.critic_train_steps)))
+        if learner is not None and hasattr(learner, "save_model"):
+            learner.save_model(final_train_step)
+            hyperparameters["final_checkpoint_save_step"] = final_train_step
         try:
             env.adapter.write_live_heartbeat(
                 stage="masac_backend_finished",
