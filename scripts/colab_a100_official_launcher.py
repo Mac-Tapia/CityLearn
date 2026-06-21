@@ -1040,8 +1040,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--maac-steps-per-update", default=250, type=int)
     parser.add_argument("--maac-num-updates", default=8, type=int)
     parser.add_argument(
-        "--max-parallel", default=4, type=int,
-        help="Max jobs to run concurrently (default 4 for A100 80GB; use 1 for sequential).",
+        "--max-parallel", default=12, type=int,
+        help=(
+            "Max jobs to run concurrently. Default 12 = all 4 MADRL x 3 scenarios "
+            "simultaneously on A100-SXM4-80GB. Use 1 for sequential."
+        ),
     )
     return parser.parse_args(argv)
 

@@ -312,18 +312,27 @@ def print_logs(status: Mapping[str, object], log_tail: int) -> None:
     jobs = list(status.get("jobs", []))
     if not jobs:
         return
+
+    # In parallel mode show running jobs; in sequential mode show last 4.
+    running = [j for j in jobs if j.get("completed_at") is None and not j.get("planned_only")]
+    targets = running if running else jobs[-4:]
+    # Cap lines per job when many are running simultaneously
+    lines_per_job = max(4, log_tail // max(1, len(targets))) if len(targets) > 1 else log_tail
+
     print("")
     print("Logs recientes")
-    for job in jobs[-4:]:
+    for job in targets:
         log_value = str(job.get("log") or "").strip()
         if not log_value:
             continue
         log = Path(log_value)
         if not log.exists() or not log.is_file():
             continue
-        print(f"--- {log.name} ---")
+        name = str(job.get("name", "?")).upper()
+        scenario = str(job.get("scenario", "?"))
+        print(f"--- {name}/{scenario} ({log.name}) ---")
         lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()
-        for line in lines[-log_tail:]:
+        for line in lines[-lines_per_job:]:
             if line.strip():
                 print(f"  {line[:220]}")
 
