@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""
+Pre-commit hook: validate Python syntax of every staged .ipynb file.
+Blocks the commit if any code cell has a syntax error.
+
+Install once:
+    python scripts/hooks/install.py
+"""
+import subprocess
+import sys
+from pathlib import Path
+
+# Staged .ipynb files
+result = subprocess.run(
+    ['git', 'diff', '--cached', '--name-only', '--diff-filter=ACM'],
+    capture_output=True, text=True,
+)
+staged = [Path(p) for p in result.stdout.splitlines() if p.endswith('.ipynb')]
+
+if not staged:
+    sys.exit(0)
+
+repo_root = Path(subprocess.run(
+    ['git', 'rev-parse', '--show-toplevel'],
+    capture_output=True, text=True,
+).stdout.strip())
+
+validator = repo_root / 'scripts' / 'validate_notebook_syntax.py'
+if not validator.exists():
+    print(f'[pre-commit] WARNING: {validator} not found — skipping notebook check.')
+    sys.exit(0)
+
+print('[pre-commit] Validando sintaxis de notebooks...')
+rc = subprocess.run(
+    [sys.executable, str(validator)] + [str(repo_root / p) for p in staged],
+).returncode
+
+if rc != 0:
+    print('\n[pre-commit] BLOQUEADO: corrige los errores de sintaxis antes de commitear.')
+    sys.exit(1)
+
+sys.exit(0)
