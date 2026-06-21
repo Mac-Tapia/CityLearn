@@ -295,7 +295,7 @@ foreach ($scenarioName in $ScenarioList) {
             "--max-discrete-actions", "512",
             "--batch-size", "$MaacBatchSize",
             "--buffer-length", "$MaacBufferLength",
-            "--steps-per-update", "250",
+            "--steps-per-update", "100",
             "--num-updates", "$MaacNumUpdates",
             "--hidden-size", "$MaacHiddenSize",
             "--attend-heads", "4",

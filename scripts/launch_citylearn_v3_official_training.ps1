@@ -52,7 +52,7 @@ param(
     [int]$MaacBatchSize = 256,
     [int]$MaacBufferLength = 50000,
     [int]$MaacHiddenSize = 256,
-    [int]$MaacStepsPerUpdate = 250,
+    [int]$MaacStepsPerUpdate = 100,
     [int]$MaacNumUpdates = 8,
     [int]$MaacLiveHeartbeatSeconds = 30,
     [switch]$Cuda = $true,

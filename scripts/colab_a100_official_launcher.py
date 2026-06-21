@@ -963,11 +963,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     # RAM budget (167 GiB): MASAC buffer 3x40=120 GiB, MATD3 buffer 3x14=42 GiB.
     parser.add_argument("--happo-hidden-size", default=512, type=int,
                         help="A100-80GB HAPPO speed profile: [512,512] targets ~11 FPS with 3 parallel scenarios.")
-    parser.add_argument("--happo-n-rollout-threads", default=1, type=int,
-                        help="Keep HAPPO at 1 rollout thread per scenario; ShareDummyVecEnv is sequential.")
     parser.add_argument("--happo-n-rollout-threads", default=4, type=int,
                         help="Parallel env subprocesses per HAPPO job (ShareSubprocVecEnv). "
-                             "A100-80GB + 3 parallel scenarios: 4 threads × 3 = 12 procs → ~4× FPS. "
+                             "A100-80GB + 3 parallel scenarios: 4 threads x 3 = 12 procs → ~4x FPS. "
                              "Set to 1 for DummyVecEnv (debug).")
     parser.add_argument("--masac-max-replay-buffer-gib", default=40.0, type=float)
     parser.add_argument("--masac-buffer-size", default=40, type=int,
