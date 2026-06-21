@@ -658,11 +658,13 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
         self._last_district_import = None
         self._last_component_breakdown = {}
         self._last_bess_socs: dict = {}
+        self._last_ev_sub_breakdown: dict = {}
 
     def reset(self):
         self._last_district_import = None
         self._last_component_breakdown = {}
         self._last_bess_socs = {}
+        self._last_ev_sub_breakdown = {}
 
     @property
     def metadata(self) -> Mapping[str, Any]:
@@ -808,11 +810,23 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
         def mean_or_zero(values: List[float]) -> float:
             return 0.0 if not values else float(np.mean(values))
 
+        dep_mean = mean_or_zero(departure_terms)
+        urg_mean = mean_or_zero(urgency_terms)
+        idle_mean = mean_or_zero(idle_terms)
         penalty = (
-            departure_weight * mean_or_zero(departure_terms)
-            + urgency_weight * mean_or_zero(urgency_terms)
-            + idle_weight * mean_or_zero(idle_terms)
+            departure_weight * dep_mean
+            + urgency_weight * urg_mean
+            + idle_weight * idle_mean
         )
+        self._last_ev_sub_breakdown = {
+            "ev_departure_penalty": -departure_weight * dep_mean,
+            "ev_urgency_penalty": -urgency_weight * urg_mean,
+            "ev_idle_penalty": -idle_weight * idle_mean,
+            "ev_chargers_evaluated": len(ev_chargers),
+            "ev_departure_events": len(departure_terms),
+            "ev_urgency_events": len(urgency_terms),
+            "ev_idle_events": len(idle_terms),
+        }
         return -float(np.clip(penalty, 0.0, 1.0))
 
     def calculate(self, observations: List[Mapping[str, Union[int, float, dict]]]) -> List[float]:
@@ -904,6 +918,7 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
             "district_ramp": district_ramp,
             "team_reward": team_reward,
             "components": components,
+            "ev_sub_breakdown": dict(self._last_ev_sub_breakdown),
         }
 
         if self.central_agent:

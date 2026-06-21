@@ -251,14 +251,27 @@ def print_progress(status: Mapping[str, object], root: Path) -> None:
             )
         )
         print(
-            "  reward_components: flex={} carbon={} cost={} ev={} team={}".format(
+            "  reward_components: flex={} carbon={} cost={} ev={} bess_cycle={} team={}".format(
                 progress.get("reward_component_flex_mean"),
                 progress.get("reward_component_carbon_mean"),
                 progress.get("reward_component_cost_mean"),
                 progress.get("reward_component_ev_mean"),
+                progress.get("reward_component_bess_cycle_mean"),
                 progress.get("reward_team_reward"),
             )
         )
+        ev_dep = progress.get("ev_departure_penalty_mean")
+        ev_urg = progress.get("ev_urgency_penalty_mean")
+        ev_idle = progress.get("ev_idle_penalty_mean")
+        if any(v is not None for v in (ev_dep, ev_urg, ev_idle)):
+            print(
+                "  ev_penalties: departure={} urgency={} idle={} events(dep/urg/idle)={}/{}/{}".format(
+                    ev_dep, ev_urg, ev_idle,
+                    progress.get("ev_departure_events"),
+                    progress.get("ev_urgency_events"),
+                    progress.get("ev_idle_events"),
+                )
+            )
         print(
             "  energia_inst: cost={} co2={} net_load={} import_reward={}".format(
                 progress.get("district_net_electricity_consumption_cost"),

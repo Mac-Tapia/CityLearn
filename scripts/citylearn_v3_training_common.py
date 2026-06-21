@@ -3133,6 +3133,16 @@ class CityLearnV3BackendAdapter:
         reward_values = [_as_float(rewards.get(agent)) for agent in self.agents]
         reward_values = [value for value in reward_values if value is not None]
         all_done = bool(all(dones.values())) if dones else False
+        _ts_reward_fn = getattr(citylearn_env, "reward_function", None)
+        _ts_bd = getattr(_ts_reward_fn, "_last_component_breakdown", {})
+        _ts_comps = _ts_bd.get("components") or []
+        _ts_ev_sub = _ts_bd.get("ev_sub_breakdown") or {}
+        _ts_cstats: Dict[str, object] = {}
+        if _ts_comps:
+            for _k in ("flex", "carbon", "cost", "ev", "bess_cycle"):
+                _vals = [c.get(_k, 0.0) for c in _ts_comps if _k in c]
+                if _vals:
+                    _ts_cstats[f"reward_component_{_k}_mean"] = float(np.mean(_vals))
         timeseries_row = {
             "global_step": self.global_step,
             "episode": episode,
@@ -3148,6 +3158,21 @@ class CityLearnV3BackendAdapter:
             "reward_axis_weights": self.reward_metadata.get("axis_weights"),
             "reward_sum": None if not reward_values else float(np.sum(reward_values)),
             "reward_mean": None if not reward_values else float(np.mean(reward_values)),
+            "reward_component_flex_mean": _ts_cstats.get("reward_component_flex_mean"),
+            "reward_component_carbon_mean": _ts_cstats.get("reward_component_carbon_mean"),
+            "reward_component_cost_mean": _ts_cstats.get("reward_component_cost_mean"),
+            "reward_component_ev_mean": _ts_cstats.get("reward_component_ev_mean"),
+            "reward_component_bess_cycle_mean": _ts_cstats.get("reward_component_bess_cycle_mean"),
+            "reward_team_reward": _ts_bd.get("team_reward"),
+            "reward_district_import_kwh": _ts_bd.get("district_import"),
+            "reward_district_ramp_kwh": _ts_bd.get("district_ramp"),
+            "ev_departure_penalty_mean": _ts_ev_sub.get("ev_departure_penalty"),
+            "ev_urgency_penalty_mean": _ts_ev_sub.get("ev_urgency_penalty"),
+            "ev_idle_penalty_mean": _ts_ev_sub.get("ev_idle_penalty"),
+            "ev_chargers_evaluated": _ts_ev_sub.get("ev_chargers_evaluated"),
+            "ev_departure_events": _ts_ev_sub.get("ev_departure_events"),
+            "ev_urgency_events": _ts_ev_sub.get("ev_urgency_events"),
+            "ev_idle_events": _ts_ev_sub.get("ev_idle_events"),
             "all_done": all_done,
             "district_net_electricity_consumption": _district_current_scalar(citylearn_env, "net_electricity_consumption", time_step),
             "district_net_electricity_consumption_without_storage": _district_current_scalar(citylearn_env, "net_electricity_consumption_without_storage", time_step),
@@ -3274,9 +3299,10 @@ class CityLearnV3BackendAdapter:
         _reward_fn = getattr(self._core_env(), "reward_function", None)
         _breakdown = getattr(_reward_fn, "_last_component_breakdown", {})
         _comps = _breakdown.get("components") or []
+        _ev_sub = _breakdown.get("ev_sub_breakdown") or {}
         _cstats: Dict[str, object] = {}
         if _comps:
-            for _k in ("flex", "carbon", "cost", "ev"):
+            for _k in ("flex", "carbon", "cost", "ev", "bess_cycle", "net"):
                 _vals = [c.get(_k, 0.0) for c in _comps if _k in c]
                 if _vals:
                     _cstats[f"reward_component_{_k}_mean"] = float(np.mean(_vals))
@@ -3312,8 +3338,17 @@ class CityLearnV3BackendAdapter:
             "reward_component_carbon_mean": _cstats.get("reward_component_carbon_mean"),
             "reward_component_cost_mean": _cstats.get("reward_component_cost_mean"),
             "reward_component_ev_mean": _cstats.get("reward_component_ev_mean"),
+            "reward_component_bess_cycle_mean": _cstats.get("reward_component_bess_cycle_mean"),
             "reward_team_reward": _breakdown.get("team_reward"),
             "reward_district_import_kwh": _breakdown.get("district_import"),
+            "reward_district_ramp_kwh": _breakdown.get("district_ramp"),
+            "ev_departure_penalty_mean": _ev_sub.get("ev_departure_penalty"),
+            "ev_urgency_penalty_mean": _ev_sub.get("ev_urgency_penalty"),
+            "ev_idle_penalty_mean": _ev_sub.get("ev_idle_penalty"),
+            "ev_chargers_evaluated": _ev_sub.get("ev_chargers_evaluated"),
+            "ev_departure_events": _ev_sub.get("ev_departure_events"),
+            "ev_urgency_events": _ev_sub.get("ev_urgency_events"),
+            "ev_idle_events": _ev_sub.get("ev_idle_events"),
             "live_status": "env_step",
             "live_status_updated_at": datetime.now(timezone.utc).isoformat(),
             "backend_training_active": False,
