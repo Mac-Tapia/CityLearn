@@ -414,7 +414,7 @@ def build_jobs(args: argparse.Namespace, root: Path, output_root: Path, schema_a
                     "--hidden-size",
                     str(args.happo_hidden_size),
                     "--n-rollout-threads",
-                    "1",
+                    str(args.happo_n_rollout_threads),
                     "--log-interval",
                     "1",
                     "--eval-interval",
@@ -937,10 +937,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--parallel-scenarios", default=3, type=int,
                         help="Number of scenarios to run concurrently per algorithm. "
                              "Set to 1 for sequential. A100-80GB: 3 is safe (MASAC uses CPU buffer).")
-    parser.add_argument("--live-progress-interval", default=1000, type=int)
-    parser.add_argument("--live-heartbeat-seconds", default=30, type=int)
+    parser.add_argument("--live-progress-interval", default=5000, type=int)
+    parser.add_argument("--live-heartbeat-seconds", default=120, type=int)
     parser.add_argument("--artifact-profile", default="efficient", choices=("full", "efficient", "minimal"))
-    parser.add_argument("--trace-record-interval", default=24, type=int)
+    parser.add_argument("--trace-record-interval", default=8760, type=int)
     parser.add_argument("--trace-detail", default="compact", choices=("full", "compact"))
     parser.add_argument("--gpu-profile", default="aws", choices=("auto", "local4060_fast", "local4060", "balanced", "conservative", "aws"))
     parser.add_argument("--cuda", action=argparse.BooleanOptionalAction, default=True)
@@ -952,8 +952,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--skip-completed", action="store_true")
     parser.add_argument("--start-from-algorithm", default="happo", choices=ALGORITHMS)
     parser.add_argument("--live-monitor", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--monitor-interval", default=30, type=int)
-    parser.add_argument("--log-tail", default=12, type=int)
+    parser.add_argument("--monitor-interval", default=120, type=int)
+    parser.add_argument("--log-tail", default=4, type=int)
     parser.add_argument("--oom-retry", action=argparse.BooleanOptionalAction, default=True)
 
     # ── A100-SXM4-80GB hyperparameters ───────────────────────────────────────
@@ -963,6 +963,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     # RAM budget (167 GiB): MASAC buffer 3x40=120 GiB, MATD3 buffer 3x14=42 GiB.
     parser.add_argument("--happo-hidden-size", default=512, type=int,
                         help="A100-80GB HAPPO speed profile: [512,512] targets ~11 FPS with 3 parallel scenarios.")
+    parser.add_argument("--happo-n-rollout-threads", default=1, type=int,
+                        help="Keep HAPPO at 1 rollout thread per scenario; ShareDummyVecEnv is sequential.")
+    parser.add_argument("--happo-n-rollout-threads", default=4, type=int,
+                        help="Parallel env subprocesses per HAPPO job (ShareSubprocVecEnv). "
+                             "A100-80GB + 3 parallel scenarios: 4 threads × 3 = 12 procs → ~4× FPS. "
+                             "Set to 1 for DummyVecEnv (debug).")
     parser.add_argument("--masac-max-replay-buffer-gib", default=40.0, type=float)
     parser.add_argument("--masac-buffer-size", default=40, type=int,
                         help="Episodes in replay buffer. 40 ep = 350400 steps per instance.")

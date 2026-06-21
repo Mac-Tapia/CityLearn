@@ -54,7 +54,7 @@ def main() -> int:
     ensure_project_paths()
     add_external_path("HARL")
 
-    from harl.envs.env_wrappers import ShareDummyVecEnv
+    from harl.envs.env_wrappers import ShareDummyVecEnv, ShareSubprocVecEnv
     import harl.runners.on_policy_base_runner as base_runner
     from harl.runners import RUNNER_REGISTRY
     from harl.utils.configs_tools import get_defaults_yaml_args
@@ -89,7 +89,15 @@ def main() -> int:
 
             return init_env
 
-        return ShareDummyVecEnv([make_env(rank) for rank in range(n_threads)])
+        # SubprocVecEnv: cada env corre en proceso separado (bypass GIL, ~n_threads× FPS).
+        # DummyVecEnv solo como fallback si hay error de spawn (ej. entorno Windows/local).
+        env_fns = [make_env(rank) for rank in range(n_threads)]
+        if n_threads > 1:
+            try:
+                return ShareSubprocVecEnv(env_fns)
+            except Exception as _e:
+                print(f"[happo] ShareSubprocVecEnv falló ({_e}), usando DummyVecEnv.", flush=True)
+        return ShareDummyVecEnv(env_fns)
 
     base_runner.make_train_env = make_citylearn_train_env
 
