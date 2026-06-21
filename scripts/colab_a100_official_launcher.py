@@ -16,7 +16,9 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
@@ -672,10 +674,17 @@ def append_job_record(
     manifest: Dict[str, object],
     status_path: Path,
     record: Dict[str, object],
+    lock: Optional[threading.Lock] = None,
 ) -> None:
-    manifest.setdefault("jobs", [])
-    manifest["jobs"].append(record)
-    atomic_write_json(status_path, manifest)
+    if lock:
+        with lock:
+            manifest.setdefault("jobs", [])
+            manifest["jobs"].append(record)
+            atomic_write_json(status_path, manifest)
+    else:
+        manifest.setdefault("jobs", [])
+        manifest["jobs"].append(record)
+        atomic_write_json(status_path, manifest)
 
 
 def complete_job_record(
@@ -684,11 +693,16 @@ def complete_job_record(
     record: Dict[str, object],
     exit_code: int,
     started_time: float,
+    lock: Optional[threading.Lock] = None,
 ) -> None:
     record["completed_at"] = utc_now()
     record["exit_code"] = int(exit_code)
     record["duration_minutes"] = round((time.time() - started_time) / 60.0, 3)
-    atomic_write_json(status_path, manifest)
+    if lock:
+        with lock:
+            atomic_write_json(status_path, manifest)
+    else:
+        atomic_write_json(status_path, manifest)
 
 
 def run_one_job(
@@ -701,11 +715,14 @@ def run_one_job(
     log_dir: Path,
     args: argparse.Namespace,
     attempt: int = 0,
+    lock: Optional[threading.Lock] = None,
+    live_monitor: Optional[bool] = None,
 ) -> int:
     name = str(job["name"])
     scenario = str(job["scenario"])
     job_run_dir = run_dir(output_root, name, scenario, args.seed)
     job_output_dir = path_for_status(root, job_run_dir)
+    use_monitor = args.live_monitor if live_monitor is None else live_monitor
 
     if args.skip_completed and completed_artifact_exists(root, job_output_dir):
         record = {
@@ -720,7 +737,7 @@ def run_one_job(
             "skip_reason": "already_completed",
             "attempt": attempt,
         }
-        append_job_record(manifest, status_path, record)
+        append_job_record(manifest, status_path, record, lock=lock)
         print(f"SKIP {name.upper()}/{scenario}: existing results.json", flush=True)
         return 0
 
@@ -744,7 +761,7 @@ def run_one_job(
         "attempt": attempt,
         "oom_retry": bool(job.get("oom_retry", False)),
     }
-    append_job_record(manifest, status_path, record)
+    append_job_record(manifest, status_path, record, lock=lock)
 
     print(f"START {name.upper()}/{scenario} attempt={attempt} log={log_path}", flush=True)
     with log_path.open("w", encoding="utf-8") as stdout_f, err_path.open("w", encoding="utf-8") as stderr_f:
@@ -759,14 +776,14 @@ def run_one_job(
 
         last_monitor = 0.0
         while proc.poll() is None:
-            if args.live_monitor and (time.time() - last_monitor) >= max(5, args.monitor_interval):
+            if use_monitor and (time.time() - last_monitor) >= max(5, args.monitor_interval):
                 print_monitor_snapshot(root, status_path, log_tail=args.log_tail)
                 last_monitor = time.time()
             time.sleep(5)
 
         exit_code = int(proc.returncode or 0)
 
-    complete_job_record(manifest, status_path, record, exit_code, started)
+    complete_job_record(manifest, status_path, record, exit_code, started, lock=lock)
     if exit_code == 0:
         print(f"DONE {name.upper()}/{scenario} attempt={attempt}", flush=True)
     else:
@@ -783,6 +800,8 @@ def run_job_with_retry(
     output_root: Path,
     log_dir: Path,
     args: argparse.Namespace,
+    lock: Optional[threading.Lock] = None,
+    live_monitor: Optional[bool] = None,
 ) -> int:
     exit_code = run_one_job(
         root=root,
@@ -793,11 +812,19 @@ def run_job_with_retry(
         log_dir=log_dir,
         args=args,
         attempt=0,
+        lock=lock,
+        live_monitor=live_monitor,
     )
     if exit_code == 0:
         return 0
 
-    last_record = manifest["jobs"][-1]
+    # Find the record for this job (it's the last one we appended for this name/scenario)
+    name, scenario = str(job["name"]), str(job["scenario"])
+    last_record = next(
+        (r for r in reversed(manifest.get("jobs", []))
+         if r.get("name") == name and r.get("scenario") == scenario),
+        {},
+    )
     log_path = Path(str(last_record.get("log") or ""))
     err_path = Path(str(last_record.get("stderr_log") or ""))
     if not args.oom_retry or not is_oom_failure(log_path, err_path):
@@ -817,7 +844,62 @@ def run_job_with_retry(
         log_dir=log_dir,
         args=args,
         attempt=1,
+        lock=lock,
+        live_monitor=live_monitor,
     )
+
+
+def run_parallel_jobs(
+    *,
+    root: Path,
+    manifest: Dict[str, object],
+    status_path: Path,
+    jobs: List[Dict[str, object]],
+    output_root: Path,
+    log_dir: Path,
+    args: argparse.Namespace,
+) -> int:
+    """Run jobs with a bounded thread pool. Returns 0 only if all jobs succeed."""
+    lock = threading.Lock()
+    failures: List[str] = []
+
+    def _run(job: Mapping[str, object]) -> int:
+        return run_job_with_retry(
+            root=root,
+            manifest=manifest,
+            status_path=status_path,
+            job=job,
+            output_root=output_root,
+            log_dir=log_dir,
+            args=args,
+            lock=lock,
+            live_monitor=False,  # outer cell monitor handles display in parallel mode
+        )
+
+    print(
+        f"[launcher] Starting {len(jobs)} jobs with max_parallel={args.max_parallel}",
+        flush=True,
+    )
+    with ThreadPoolExecutor(max_workers=args.max_parallel) as pool:
+        future_to_job = {pool.submit(_run, job): job for job in jobs}
+        for future in as_completed(future_to_job):
+            job = future_to_job[future]
+            label = f"{job['name'].upper()}/{job['scenario']}"
+            try:
+                rc = future.result()
+            except Exception as exc:
+                rc = 1
+                print(f"[launcher] EXCEPTION {label}: {exc}", flush=True)
+            if rc != 0:
+                failures.append(label)
+                print(f"[launcher] FAILED {label} (exit={rc})", flush=True)
+            else:
+                print(f"[launcher] COMPLETED {label}", flush=True)
+
+    if failures:
+        print(f"[launcher] {len(failures)} job(s) failed: {', '.join(failures)}", flush=True)
+        return 1
+    return 0
 
 
 def make_manifest(
@@ -849,11 +931,16 @@ def make_manifest(
         "torch": torch_info.get("torch_version"),
         "cuda": bool(args.cuda),
         "algorithm_family": "MADRL",
-        "execution": "sequential_colab_a100",
+        "execution": "parallel_colab_a100" if args.max_parallel > 1 else "sequential_colab_a100",
         "parallelization": {
-            "requested": False,
-            "effective": False,
-            "reason": "Colab A100 stability profile uses sequential jobs with resumable status.",
+            "requested": args.max_parallel > 1,
+            "effective": args.max_parallel > 1,
+            "max_parallel": args.max_parallel,
+            "reason": (
+                f"Running up to {args.max_parallel} jobs concurrently on A100."
+                if args.max_parallel > 1
+                else "Sequential mode: one job at a time."
+            ),
         },
         "active_project_environment": dict(env_info),
         "gpu_optimization": {
@@ -952,6 +1039,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--maac-hidden-size", default=256, type=int)
     parser.add_argument("--maac-steps-per-update", default=250, type=int)
     parser.add_argument("--maac-num-updates", default=8, type=int)
+    parser.add_argument(
+        "--max-parallel", default=4, type=int,
+        help="Max jobs to run concurrently (default 4 for A100 80GB; use 1 for sequential).",
+    )
     return parser.parse_args(argv)
 
 
@@ -1026,29 +1117,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Dry run completed: {status_path}", flush=True)
         return 0
 
-    for job in jobs:
-        exit_code = run_job_with_retry(
+    if args.max_parallel > 1:
+        overall_rc = run_parallel_jobs(
             root=root,
             manifest=manifest,
             status_path=status_path,
-            job=job,
+            jobs=jobs,
             output_root=output_root,
             log_dir=log_dir,
             args=args,
         )
-        if exit_code != 0:
-            manifest["status"] = "failed"
-            manifest["completed_at"] = utc_now()
-            atomic_write_json(manifest_path, manifest)
-            atomic_write_json(status_path, manifest)
-            return int(exit_code)
+    else:
+        overall_rc = 0
+        for job in jobs:
+            exit_code = run_job_with_retry(
+                root=root,
+                manifest=manifest,
+                status_path=status_path,
+                job=job,
+                output_root=output_root,
+                log_dir=log_dir,
+                args=args,
+            )
+            if exit_code != 0:
+                overall_rc = exit_code
+                break
 
-    manifest["status"] = "completed"
+    manifest["status"] = "completed" if overall_rc == 0 else "failed"
     manifest["completed_at"] = utc_now()
     atomic_write_json(manifest_path, manifest)
     atomic_write_json(status_path, manifest)
-    print(f"Training chain completed: {status_path}", flush=True)
-    return 0
+    if overall_rc == 0:
+        print(f"Training chain completed: {status_path}", flush=True)
+    else:
+        print(f"Training chain FAILED (see above): {status_path}", flush=True)
+    return int(overall_rc)
 
 
 if __name__ == "__main__":
