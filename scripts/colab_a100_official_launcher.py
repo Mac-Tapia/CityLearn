@@ -16,7 +16,10 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
@@ -26,6 +29,8 @@ ALGORITHMS = ("happo", "masac", "matd3", "maac")
 CITYLEARN_V2_BENCHMARKS = ("PPO", "SAC", "A2C")
 SCENARIOS = ("E1", "E2", "E3")
 HEAVY_ALGORITHMS = {"masac", "maac"}
+
+_MANIFEST_LOCK = threading.Lock()
 DEFAULT_SCHEMA = "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json"
 DEFAULT_OUTPUT_ROOT = "outputs/colab_madrl_a100_official"
 REFERENCE_SOURCES = [
@@ -578,16 +583,16 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
     args = [str(item) for item in retry["args"]]
 
     if name == "masac":
-        args = replace_arg(args, "--buffer-size", "10")
-        args = replace_arg(args, "--critic-batch-size", "32")
-        args = replace_arg(args, "--max-replay-buffer-gib", "12")
+        args = replace_arg(args, "--buffer-size", "20")
+        args = replace_arg(args, "--critic-batch-size", "256")
+        args = replace_arg(args, "--max-replay-buffer-gib", "20")
         args = replace_arg(args, "--masac-preload-batch-device", "cpu")
     elif name == "matd3":
-        args = replace_arg(args, "--batch-size", "256")
-        args = replace_arg(args, "--buffer-size", "4096")
+        args = replace_arg(args, "--batch-size", "512")
+        args = replace_arg(args, "--buffer-size", "500000")
     elif name == "maac":
-        args = replace_arg(args, "--batch-size", "256")
-        args = replace_arg(args, "--buffer-length", "50000")
+        args = replace_arg(args, "--batch-size", "512")
+        args = replace_arg(args, "--buffer-length", "250000")
     else:
         return None
 
@@ -602,18 +607,18 @@ def print_monitor_snapshot(root: Path, status_path: Path, log_tail: int = 12) ->
         print(f"[monitor] status not found: {status_path}", flush=True)
         return
 
-    active = None
-    for job in status.get("jobs", []):
-        if job.get("completed_at") is None:
-            active = job
-            break
-    if not active:
+    active_jobs = [job for job in status.get("jobs", []) if job.get("completed_at") is None]
+    if not active_jobs:
         print(f"[monitor] status={status.get('status')} jobs={len(status.get('jobs', []))}", flush=True)
         return
 
+    active = active_jobs[0]
     run_path = resolve_status_path(root, str(active["output_dir"]))
     progress = read_json(run_path / "live_progress.json")
     print("", flush=True)
+    if len(active_jobs) > 1:
+        running = ", ".join(f"{j['name'].upper()}/{j['scenario']}" for j in active_jobs)
+        print(f"[monitor] parallel active ({len(active_jobs)}): {running}", flush=True)
     print(
         f"[monitor] {active['name'].upper()}/{active['scenario']} "
         f"status={status.get('status')} output={active['output_dir']}",
@@ -673,9 +678,10 @@ def append_job_record(
     status_path: Path,
     record: Dict[str, object],
 ) -> None:
-    manifest.setdefault("jobs", [])
-    manifest["jobs"].append(record)
-    atomic_write_json(status_path, manifest)
+    with _MANIFEST_LOCK:
+        manifest.setdefault("jobs", [])
+        manifest["jobs"].append(record)
+        atomic_write_json(status_path, manifest)
 
 
 def complete_job_record(
@@ -685,10 +691,11 @@ def complete_job_record(
     exit_code: int,
     started_time: float,
 ) -> None:
-    record["completed_at"] = utc_now()
-    record["exit_code"] = int(exit_code)
-    record["duration_minutes"] = round((time.time() - started_time) / 60.0, 3)
-    atomic_write_json(status_path, manifest)
+    with _MANIFEST_LOCK:
+        record["completed_at"] = utc_now()
+        record["exit_code"] = int(exit_code)
+        record["duration_minutes"] = round((time.time() - started_time) / 60.0, 3)
+        atomic_write_json(status_path, manifest)
 
 
 def run_one_job(
@@ -849,11 +856,12 @@ def make_manifest(
         "torch": torch_info.get("torch_version"),
         "cuda": bool(args.cuda),
         "algorithm_family": "MADRL",
-        "execution": "sequential_colab_a100",
+        "execution": "parallel_scenarios_colab_a100" if args.parallel_scenarios > 1 else "sequential_colab_a100",
         "parallelization": {
-            "requested": False,
-            "effective": False,
-            "reason": "Colab A100 stability profile uses sequential jobs with resumable status.",
+            "requested": args.parallel_scenarios > 1,
+            "effective": args.parallel_scenarios > 1,
+            "parallel_scenarios": args.parallel_scenarios,
+            "strategy": f"Run {args.parallel_scenarios} scenarios per algorithm concurrently; algorithms are sequential.",
         },
         "active_project_environment": dict(env_info),
         "gpu_optimization": {
@@ -913,7 +921,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--episodes", default=75, type=int)
     parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--schema-path", default=DEFAULT_SCHEMA)
-    parser.add_argument("--torch-threads", default=2, type=int)
+    parser.add_argument("--torch-threads", default=4, type=int)
+    parser.add_argument("--parallel-scenarios", default=3, type=int,
+                        help="Number of scenarios to run concurrently per algorithm. "
+                             "Set to 1 for sequential. A100-80GB: 3 is safe (MASAC uses CPU buffer).")
     parser.add_argument("--live-progress-interval", default=1000, type=int)
     parser.add_argument("--live-heartbeat-seconds", default=30, type=int)
     parser.add_argument("--artifact-profile", default="efficient", choices=("full", "efficient", "minimal"))
@@ -933,24 +944,25 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--log-tail", default=12, type=int)
     parser.add_argument("--oom-retry", action=argparse.BooleanOptionalAction, default=True)
 
-    parser.add_argument("--happo-hidden-size", default=384, type=int)
-    parser.add_argument("--masac-max-replay-buffer-gib", default=20.0, type=float)
-    parser.add_argument("--masac-buffer-size", default=20, type=int)
-    parser.add_argument("--masac-critic-batch-size", default=64, type=int)
+    parser.add_argument("--happo-hidden-size", default=512, type=int)
+    parser.add_argument("--masac-max-replay-buffer-gib", default=40.0, type=float)
+    parser.add_argument("--masac-buffer-size", default=40, type=int)
+    parser.add_argument("--masac-critic-batch-size", default=512, type=int)
     parser.add_argument("--masac-critic-train-steps", default=1, type=int)
     parser.add_argument("--masac-actor-sample-times", default=5, type=int)
-    parser.add_argument("--masac-rnn-hidden-dim", default=256, type=int)
-    parser.add_argument("--masac-qmix-hidden-dim", default=128, type=int)
-    parser.add_argument("--masac-hyper-hidden-dim", default=256, type=int)
-    parser.add_argument("--masac-preload-batch-device", default="auto", choices=("auto", "cuda", "cpu"))
-    parser.add_argument("--matd3-batch-size", default=512, type=int)
-    parser.add_argument("--matd3-buffer-size", default=6000, type=int)
-    parser.add_argument("--matd3-hidden-size", default=256, type=int)
+    parser.add_argument("--masac-rnn-hidden-dim", default=512, type=int)
+    parser.add_argument("--masac-qmix-hidden-dim", default=256, type=int)
+    parser.add_argument("--masac-hyper-hidden-dim", default=512, type=int)
+    parser.add_argument("--masac-preload-batch-device", default="cpu", choices=("auto", "cuda", "cpu"),
+                        help="cpu keeps 40GB buffer in RAM (167GB available), freeing VRAM for parallel scenarios.")
+    parser.add_argument("--matd3-batch-size", default=1024, type=int)
+    parser.add_argument("--matd3-buffer-size", default=1000000, type=int)
+    parser.add_argument("--matd3-hidden-size", default=512, type=int)
     parser.add_argument("--matd3-train-interval", default=100, type=int)
-    parser.add_argument("--maac-batch-size", default=512, type=int)
-    parser.add_argument("--maac-buffer-length", default=100000, type=int)
-    parser.add_argument("--maac-hidden-size", default=256, type=int)
-    parser.add_argument("--maac-steps-per-update", default=250, type=int)
+    parser.add_argument("--maac-batch-size", default=1024, type=int)
+    parser.add_argument("--maac-buffer-length", default=500000, type=int)
+    parser.add_argument("--maac-hidden-size", default=512, type=int)
+    parser.add_argument("--maac-steps-per-update", default=100, type=int)
     parser.add_argument("--maac-num-updates", default=8, type=int)
     return parser.parse_args(argv)
 
@@ -1026,16 +1038,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Dry run completed: {status_path}", flush=True)
         return 0
 
+    # Group jobs by algorithm in canonical order; run N scenarios per algo concurrently.
+    algo_groups: Dict[str, list] = defaultdict(list)
     for job in jobs:
-        exit_code = run_job_with_retry(
-            root=root,
-            manifest=manifest,
-            status_path=status_path,
-            job=job,
-            output_root=output_root,
-            log_dir=log_dir,
-            args=args,
-        )
+        algo_groups[str(job["name"])].append(job)
+
+    max_p = max(1, int(args.parallel_scenarios))
+    if max_p > 1:
+        print(f"[launcher] parallel_scenarios={max_p} — running {max_p} scenarios concurrently per algorithm.", flush=True)
+
+    def _run_group(algo_jobs: list, n_parallel: int) -> int:
+        """Run a list of jobs with up to n_parallel concurrent workers. Returns 0 or first failing exit code."""
+        if n_parallel <= 1:
+            for job in algo_jobs:
+                ec = run_job_with_retry(
+                    root=root, manifest=manifest, status_path=status_path,
+                    job=job, output_root=output_root, log_dir=log_dir, args=args,
+                )
+                if ec != 0:
+                    return int(ec)
+            return 0
+        with ThreadPoolExecutor(max_workers=n_parallel) as pool:
+            futures = {
+                pool.submit(
+                    run_job_with_retry,
+                    root=root, manifest=manifest, status_path=status_path,
+                    job=job, output_root=output_root, log_dir=log_dir, args=args,
+                ): job
+                for job in algo_jobs
+            }
+            for fut in as_completed(futures):
+                ec = fut.result()
+                if ec != 0:
+                    return int(ec)
+        return 0
+
+    for algo in ALGORITHMS:
+        group = algo_groups.get(algo, [])
+        if not group:
+            continue
+        print(f"[launcher] {algo.upper()} — {len(group)} scenario(s) with n_parallel={min(max_p, len(group))}", flush=True)
+        exit_code = _run_group(group, min(max_p, len(group)))
         if exit_code != 0:
             manifest["status"] = "failed"
             manifest["completed_at"] = utc_now()
