@@ -983,9 +983,9 @@ def make_manifest(
             "axes": ["OE1_flexibility", "OE2_carbon", "OE3_cost"],
         },
         "training_config": {
-            "episodes_required": 75,
+            "episodes_required": 50,
             "episode_time_steps_required": 8760,
-            "a100_ready": bool(args.episodes == 75 and args.episode_time_steps == 8760),
+            "a100_ready": bool(args.episodes >= 50 and args.episode_time_steps == 8760),
             "smoke_imports": dict(import_info or {}),
         },
         "output_root": path_for_status(root, output_root),
@@ -1002,7 +1002,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--scenario", default="ALL")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--episode-time-steps", default=8760, type=int)
-    parser.add_argument("--episodes", default=75, type=int)
+    parser.add_argument("--episodes", default=50, type=int)
     parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--schema-path", default=DEFAULT_SCHEMA)
     parser.add_argument("--torch-threads", default=2, type=int)
