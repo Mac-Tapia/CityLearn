@@ -170,101 +170,112 @@ def print_gpu() -> None:
 
 
 def print_progress(status: Mapping[str, object], root: Path) -> None:
-    job = active_job(status, root)
-    if not job:
+    jobs = list(status.get("jobs", []))
+    active = [j for j in jobs if j.get("completed_at") is None and not j.get("planned_only")]
+    if not active:
+        for job in jobs:
+            output_dir = job.get("output_dir")
+            if not output_dir:
+                continue
+            progress_path = path_for_job(root, str(output_dir)) / "live_progress.json"
+            if progress_path.exists():
+                active.append(job)
+
+    if not active:
         print("")
         print("Progreso vivo: sin job activo todavia.")
-        return
-
-    run_dir = path_for_job(root, str(job.get("output_dir")))
-    progress_path = run_dir / "live_progress.json"
-    progress = read_json(progress_path)
-    print("")
-    print("Progreso, metricas y recompensas")
-    print(f"MADRL activo: {str(job.get('name')).upper()} | Escenario: {job.get('scenario')}")
-    print(f"Directorio: {job.get('output_dir')}")
-
-    if not progress:
-        print("Progreso vivo aun no disponible; aparece despues del primer intervalo de pasos.")
         return
 
     total_steps = int(status.get("num_env_steps") or 0)
     episode_steps = int(status.get("episode_time_steps") or 0)
     episodes = int(status.get("episodes") or 0)
-    global_step = int(progress.get("global_step") or 0)
-    episode = int(progress.get("episode") or 0) + 1
-    episode_step = int(progress.get("episode_step") or 0)
-    pct = round(100.0 * global_step / total_steps, 2) if total_steps else 0.0
-    ep_pct = round(100.0 * episode_step / episode_steps, 2) if episode_steps else 0.0
-    weights = progress.get("reward_axis_weights") or {}
 
-    print(
-        "  episodio={}/{} paso_episodio={}/{} ({}%) paso_global={}/{} ({}%)".format(
-            episode,
-            episodes,
-            episode_step,
-            episode_steps,
-            ep_pct,
-            global_step,
-            total_steps,
-            pct,
+    print("")
+    print("Progreso, metricas y recompensas")
+
+    for job in active:
+        name = str(job.get("name", "?")).upper()
+        scenario = str(job.get("scenario", "?"))
+        run_dir = path_for_job(root, str(job.get("output_dir", "")))
+        progress_path = run_dir / "live_progress.json"
+        progress = read_json(progress_path)
+
+        print("")
+        print(f"  ── {name}/{scenario} ─────────────────────────────────────────────")
+
+        if not progress:
+            print("  Progreso vivo aun no disponible; aparece despues del primer intervalo de pasos.")
+            continue
+
+        global_step = int(progress.get("global_step") or 0)
+        episode = int(progress.get("episode") or 0) + 1
+        episode_step = int(progress.get("episode_step") or 0)
+        pct = round(100.0 * global_step / total_steps, 2) if total_steps else 0.0
+        ep_pct = round(100.0 * episode_step / episode_steps, 2) if episode_steps else 0.0
+        weights = progress.get("reward_axis_weights") or {}
+
+        print(
+            "  episodio={}/{} paso_ep={}/{} ({}%) paso_global={}/{} ({}%)".format(
+                episode, episodes,
+                episode_step, episode_steps, ep_pct,
+                global_step, total_steps, pct,
+            )
         )
-    )
-    print(f"  global_step={global_step} time_step={progress.get('time_step')} live_status={progress.get('live_status')}")
-    print(
-        "  pesos: OE1_flex={} OE2_CO2={} OE3_costo={}".format(
-            weights.get("flex"),
-            weights.get("carbon"),
-            weights.get("cost"),
+        print(f"  global_step={global_step} time_step={progress.get('time_step')} live_status={progress.get('live_status')}")
+        print(
+            "  pesos: OE1_flex={} OE2_CO2={} OE3_costo={}".format(
+                weights.get("flex"),
+                weights.get("carbon"),
+                weights.get("cost"),
+            )
         )
-    )
-    print(f"  reward_function={progress.get('reward_function')} profile={progress.get('reward_profile')}")
-    print(
-        "  instant_reward_sum={} instant_reward_mean={}".format(
-            progress.get("instant_reward_sum"),
-            progress.get("instant_reward_mean"),
+        print(f"  reward_function={progress.get('reward_function')} profile={progress.get('reward_profile')}")
+        print(
+            "  instant_reward_sum={} instant_reward_mean={}".format(
+                progress.get("instant_reward_sum"),
+                progress.get("instant_reward_mean"),
+            )
         )
-    )
-    print(
-        "  episode_return_cumulative={} episode_reward_mean_cumulative={} episode_steps={}".format(
-            progress.get("episode_return_cumulative"),
-            progress.get("episode_reward_mean_cumulative"),
-            progress.get("episode_steps_recorded"),
+        print(
+            "  episode_return_cumulative={} episode_reward_mean_cumulative={} episode_steps={}".format(
+                progress.get("episode_return_cumulative"),
+                progress.get("episode_reward_mean_cumulative"),
+                progress.get("episode_steps_recorded"),
+            )
         )
-    )
-    print(
-        "  total_return_cumulative={} total_reward_mean_cumulative={} total_steps={}".format(
-            progress.get("total_return_cumulative"),
-            progress.get("total_reward_mean_cumulative"),
-            progress.get("total_steps_recorded"),
+        print(
+            "  total_return_cumulative={} total_reward_mean_cumulative={} total_steps={}".format(
+                progress.get("total_return_cumulative"),
+                progress.get("total_reward_mean_cumulative"),
+                progress.get("total_steps_recorded"),
+            )
         )
-    )
-    print(
-        "  reward_components: flex={} carbon={} cost={} ev={} team={}".format(
-            progress.get("reward_component_flex_mean"),
-            progress.get("reward_component_carbon_mean"),
-            progress.get("reward_component_cost_mean"),
-            progress.get("reward_component_ev_mean"),
-            progress.get("reward_team_reward"),
+        print(
+            "  reward_components: flex={} carbon={} cost={} ev={} team={}".format(
+                progress.get("reward_component_flex_mean"),
+                progress.get("reward_component_carbon_mean"),
+                progress.get("reward_component_cost_mean"),
+                progress.get("reward_component_ev_mean"),
+                progress.get("reward_team_reward"),
+            )
         )
-    )
-    print(
-        "  energia_inst: cost={} co2={} net_load={} import_reward={}".format(
-            progress.get("district_net_electricity_consumption_cost"),
-            progress.get("district_net_electricity_consumption_emission"),
-            progress.get("district_net_electricity_consumption"),
-            progress.get("reward_district_import_kwh"),
+        print(
+            "  energia_inst: cost={} co2={} net_load={} import_reward={}".format(
+                progress.get("district_net_electricity_consumption_cost"),
+                progress.get("district_net_electricity_consumption_emission"),
+                progress.get("district_net_electricity_consumption"),
+                progress.get("reward_district_import_kwh"),
+            )
         )
-    )
-    print(
-        "  price_mean={} carbon_intensity_mean={}".format(
-            progress.get("electricity_price_mean"),
-            progress.get("carbon_intensity_mean"),
+        print(
+            "  price_mean={} carbon_intensity_mean={}".format(
+                progress.get("electricity_price_mean"),
+                progress.get("carbon_intensity_mean"),
+            )
         )
-    )
-    age = file_age_seconds(progress_path)
-    if age is not None:
-        print(f"  live_progress: hace {age} s")
+        age = file_age_seconds(progress_path)
+        if age is not None:
+            print(f"  live_progress: hace {age} s")
 
 
 def print_artifacts(output_root: Path, limit: int = 12) -> None:
