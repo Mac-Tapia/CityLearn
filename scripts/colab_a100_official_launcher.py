@@ -1026,8 +1026,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--oom-retry", action=argparse.BooleanOptionalAction, default=True)
 
     parser.add_argument("--happo-hidden-size", default=384, type=int)
+    # Iquitos 2023-2025: Building_7 has 42 EV chargers → obs_shape expands to ~370
+    # (7 obs templates × 42 chargers + 31 base + 42 type-codes = ~370 dims).
+    # With buffer_size=20 that allocates ~27.4 GiB per MASAC instance (3 × 27.4 = 82 GiB
+    # total, exhausting system RAM). buffer_size=10 gives ~13.7 GiB each (41 GiB total),
+    # which is safe on an A100-SXM4 Colab with ~83 GiB system RAM.
     parser.add_argument("--masac-max-replay-buffer-gib", default=20.0, type=float)
-    parser.add_argument("--masac-buffer-size", default=20, type=int)
+    parser.add_argument("--masac-buffer-size", default=10, type=int)
     parser.add_argument("--masac-critic-batch-size", default=64, type=int)
     parser.add_argument("--masac-critic-train-steps", default=1, type=int)
     parser.add_argument("--masac-actor-sample-times", default=5, type=int)
