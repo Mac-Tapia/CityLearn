@@ -726,6 +726,7 @@ def _episode_summaries(timeseries_rows: Sequence[Mapping[str, object]]) -> List[
             "episode": episode,
             "steps": len(rows),
             "reward_sum_total": None if not reward_sums else float(np.sum(reward_sums)),
+            "reward_sum_std": None if len(reward_sums) < 2 else float(np.std(reward_sums)),
             "reward_mean_average": None if not reward_means else float(np.mean(reward_means)),
             "first_global_step": rows[0].get("global_step"),
             "last_global_step": rows[-1].get("global_step"),
@@ -1029,22 +1030,64 @@ def _training_efficiency_rows(timeseries_rows: Sequence[Mapping[str, object]]) -
         cost = [value for value in cost if value is not None]
         emissions = [value for value in emissions if value is not None]
         reward_total = float(np.sum(reward)) if reward else None
+        reward_std = float(np.std(reward)) if len(reward) >= 2 else None
         energy_import_total = float(np.sum([max(value, 0.0) for value in net_energy])) if net_energy else None
         abs_energy_total = float(np.sum(np.abs(net_energy))) if net_energy else None
         cost_total = float(np.sum(cost)) if cost else None
         emission_total = float(np.sum(emissions)) if emissions else None
+        n_steps = len(rows)
         output.append({
             "episode": episode,
-            "steps": len(rows),
+            "steps": n_steps,
             "return_total": reward_total,
+            "return_std": reward_std,
+            "return_per_step": _safe_ratio(reward_total, float(n_steps) if n_steps else None),
             "grid_import_total": energy_import_total,
             "absolute_net_energy_total": abs_energy_total,
             "electricity_cost_total": cost_total,
             "carbon_emissions_total": emission_total,
+            "cost_per_step": _safe_ratio(cost_total, float(n_steps) if n_steps else None),
+            "emission_per_step": _safe_ratio(emission_total, float(n_steps) if n_steps else None),
             "return_per_grid_import": _safe_ratio(reward_total, energy_import_total),
             "return_per_cost": _safe_ratio(reward_total, cost_total),
             "return_per_kgco2": _safe_ratio(reward_total, emission_total),
         })
+
+    return output
+
+
+def _learning_convergence_rows(efficiency_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
+    """Per-episode convergence progress: running best return, % of peak, and improvement rate."""
+    valid = [(int(row["episode"]), _as_float(row.get("return_total")))
+             for row in efficiency_rows if row.get("episode") is not None]
+    valid = [(ep, r) for ep, r in valid if r is not None]
+    if not valid:
+        return []
+
+    peak_return = max(r for _, r in valid)
+    trough_return = min(r for _, r in valid)
+    return_range = peak_return - trough_return
+
+    running_best = float("-inf")
+    output: List[Dict[str, object]] = []
+    prev_return: Optional[float] = None
+
+    for i, (episode, ret) in enumerate(valid):
+        is_new_best = ret > running_best
+        running_best = max(running_best, ret)
+        pct_of_peak = round(running_best / peak_return, 6) if peak_return != 0 else None
+        normalized_progress = round((ret - trough_return) / return_range, 6) if return_range != 0 else None
+        step_improvement = round(ret - prev_return, 6) if prev_return is not None else None
+        output.append({
+            "episode": episode,
+            "return_total": ret,
+            "running_best_return": round(running_best, 6),
+            "pct_of_peak_return": pct_of_peak,
+            "normalized_progress": normalized_progress,
+            "is_new_best": is_new_best,
+            "step_improvement_vs_prev": step_improvement,
+        })
+        prev_return = ret
 
     return output
 
@@ -1961,6 +2004,54 @@ def _save_agent_reward_plot(
     return {"path": str(path), "kind": "agent_reward_plot", "name": path.name}
 
 
+def _save_learning_convergence_plot(
+    path: Path,
+    convergence_rows: Sequence[Mapping[str, object]],
+) -> Optional[Dict[str, object]]:
+    """Plot learning convergence: return_total per episode + running best + pct of peak."""
+    rows = [row for row in convergence_rows if _as_float(row.get("return_total")) is not None]
+    if len(rows) < 2:
+        return None
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    episodes = [int(row["episode"]) for row in rows]
+    ret = [_as_float(row.get("return_total")) or 0.0 for row in rows]
+    running_best = [_as_float(row.get("running_best_return")) or 0.0 for row in rows]
+    pct_peak = [_as_float(row.get("pct_of_peak_return")) for row in rows]
+    norm_progress = [_as_float(row.get("normalized_progress")) for row in rows]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+
+    ax1.plot(episodes, ret, color="#406d96", linewidth=1.4, marker="o", markersize=3, label="return_total")
+    ax1.plot(episodes, running_best, color="#c46b40", linewidth=1.8, linestyle="--", label="running_best")
+    ax1.set_ylabel("return")
+    ax1.set_title("Learning convergence by episode")
+    ax1.grid(True, alpha=0.25)
+    ax1.legend()
+
+    if any(v is not None for v in pct_peak):
+        ax2.plot(episodes, [v if v is not None else float("nan") for v in pct_peak],
+                 color="#3b8c6e", linewidth=1.6, label="% of peak return")
+    if any(v is not None for v in norm_progress):
+        ax2.plot(episodes, [v if v is not None else float("nan") for v in norm_progress],
+                 color="#9b59b6", linewidth=1.2, linestyle=":", label="normalized_progress")
+    ax2.axhline(0.9, color="#e74c3c", linewidth=0.8, linestyle="--", label="90% threshold")
+    ax2.set_xlabel("episode")
+    ax2.set_ylabel("fraction of peak")
+    ax2.set_ylim(0, 1.05)
+    ax2.grid(True, alpha=0.25)
+    ax2.legend()
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return {"path": str(path), "kind": "learning_convergence_plot", "name": path.name}
+
+
 def _write_training_figures_and_tables(
     *,
     dirs: Mapping[str, Path],
@@ -1980,6 +2071,7 @@ def _write_training_figures_and_tables(
     axis_rows = _axis_comparison_rows(report)
     core_rows = _core_kpi_rows(report)
     efficiency_rows = _training_efficiency_rows(timeseries_rows)
+    convergence_rows = _learning_convergence_rows(efficiency_rows)
     exploration_rows = _exploration_rows(trace_rows)
     agent_rows = _agent_reward_rows(trace_rows)
     table_specs = [
@@ -1988,6 +2080,7 @@ def _write_training_figures_and_tables(
         ("axis_baseline_comparison", axis_rows),
         ("core_kpis", core_rows),
         ("training_efficiency", efficiency_rows),
+        ("learning_convergence", convergence_rows),
         ("exploration_summary", exploration_rows),
         ("agent_reward_summary", agent_rows),
         ("checkpoint_inventory", list(checkpoints)),
@@ -2009,6 +2102,7 @@ def _write_training_figures_and_tables(
         lambda: _save_convergence_plot(figures_dir / "convergence_returns.png", timeseries_rows),
         lambda: _save_episode_plot(figures_dir / "episode_reward_summary.png", episode_summaries),
         lambda: _save_learning_efficiency_plot(figures_dir / "learning_efficiency.png", efficiency_rows),
+        lambda: _save_learning_convergence_plot(figures_dir / "learning_convergence.png", convergence_rows),
         lambda: _save_citylearn_v2_timeseries_plot(figures_dir / "citylearn_v2_district_timeseries.png", timeseries_rows),
         lambda: _save_exploration_plot(figures_dir / "exploration_action_l2.png", trace_rows),
         lambda: _save_agent_reward_plot(figures_dir / "agent_reward_contribution.png", agent_rows),
