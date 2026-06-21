@@ -884,7 +884,7 @@ def make_manifest(
             "torch_runtime": dict(torch_info),
             "cuda_memory_fraction_requested": args.cuda_memory_fraction,
             "live_progress_interval": args.live_progress_interval,
-            "strategy": "A100 sequential MADRL jobs, TF32-enabled Torch runtime, resumable artifacts, OOM retry fallback.",
+            "strategy": "A100 MADRL jobs with parallel scenarios, TF32-enabled Torch runtime, resumable artifacts, OOM retry fallback.",
         },
         "algorithm_resource_limits": {
             "happo_hidden_size": args.happo_hidden_size,
@@ -911,9 +911,9 @@ def make_manifest(
             "axes": ["OE1_flexibility", "OE2_carbon", "OE3_cost"],
         },
         "training_config": {
-            "episodes_required": 75,
+            "episodes_required": 50,
             "episode_time_steps_required": 8760,
-            "a100_ready": bool(args.episodes == 75 and args.episode_time_steps == 8760),
+            "a100_ready": bool(args.episodes == 50 and args.episode_time_steps == 8760),
             "smoke_imports": dict(import_info or {}),
         },
         "output_root": path_for_status(root, output_root),
@@ -930,7 +930,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--scenario", default="ALL")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--episode-time-steps", default=8760, type=int)
-    parser.add_argument("--episodes", default=75, type=int)
+    parser.add_argument("--episodes", default=50, type=int)
     parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--schema-path", default=DEFAULT_SCHEMA)
     parser.add_argument("--torch-threads", default=4, type=int)
@@ -958,11 +958,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
     # ── A100-SXM4-80GB hyperparameters ───────────────────────────────────────
     # VRAM budget (73.6 GiB usable @ 0.92): 3 parallel scenarios per algo.
-    # HAPPO x3: ~2 GiB each = 6 GiB. MASAC x3: ~1 GiB model + buffer on CPU.
+    # HAPPO x3: lighter [512,512] policy nets target ~11 FPS on A100-class runs.
     # MATD3 x3: ~1.5 GiB each = 4.5 GiB. MAAC x3: ~1.5 GiB each = 4.5 GiB.
     # RAM budget (167 GiB): MASAC buffer 3x40=120 GiB, MATD3 buffer 3x14=42 GiB.
-    parser.add_argument("--happo-hidden-size", default=1024, type=int,
-                        help="A100-80GB: [1024,1024] = 4x params vs 512; VRAM 3x~2GB=6GB << 73.6GB.")
+    parser.add_argument("--happo-hidden-size", default=512, type=int,
+                        help="A100-80GB HAPPO speed profile: [512,512] targets ~11 FPS with 3 parallel scenarios.")
     parser.add_argument("--masac-max-replay-buffer-gib", default=40.0, type=float)
     parser.add_argument("--masac-buffer-size", default=40, type=int,
                         help="Episodes in replay buffer. 40 ep = 350400 steps per instance.")

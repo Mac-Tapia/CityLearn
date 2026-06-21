@@ -48,7 +48,7 @@ def parse_args(algorithm: str, argv: Optional[Sequence[str]] = None) -> argparse
     parser.add_argument("--episode-time-steps", default=8760, type=int)
     parser.add_argument(
         "--train-episodes",
-        default=75,
+        default=50,
         type=int,
         help="Training episodes before the final evaluation rollout. Use 0 for smoke tests.",
     )
