@@ -1036,6 +1036,12 @@ def _training_efficiency_rows(timeseries_rows: Sequence[Mapping[str, object]]) -
         cost_total = float(np.sum(cost)) if cost else None
         emission_total = float(np.sum(emissions)) if emissions else None
         n_steps = len(rows)
+
+        def _comp_mean(key: str) -> Optional[float]:
+            vals = [_as_float(r.get(key)) for r in rows]
+            vals = [v for v in vals if v is not None]
+            return float(np.mean(vals)) if vals else None
+
         output.append({
             "episode": episode,
             "steps": n_steps,
@@ -1051,6 +1057,15 @@ def _training_efficiency_rows(timeseries_rows: Sequence[Mapping[str, object]]) -
             "return_per_grid_import": _safe_ratio(reward_total, energy_import_total),
             "return_per_cost": _safe_ratio(reward_total, cost_total),
             "return_per_kgco2": _safe_ratio(reward_total, emission_total),
+            "reward_component_flex_mean": _comp_mean("reward_component_flex_mean"),
+            "reward_component_carbon_mean": _comp_mean("reward_component_carbon_mean"),
+            "reward_component_cost_mean": _comp_mean("reward_component_cost_mean"),
+            "reward_component_ev_mean": _comp_mean("reward_component_ev_mean"),
+            "reward_component_bess_cycle_mean": _comp_mean("reward_component_bess_cycle_mean"),
+            "ev_departure_penalty_mean": _comp_mean("ev_departure_penalty_mean"),
+            "ev_urgency_penalty_mean": _comp_mean("ev_urgency_penalty_mean"),
+            "ev_idle_penalty_mean": _comp_mean("ev_idle_penalty_mean"),
+            "district_ramp_kwh_mean": _comp_mean("reward_district_ramp_kwh"),
         })
 
     return output
@@ -2004,6 +2019,74 @@ def _save_agent_reward_plot(
     return {"path": str(path), "kind": "agent_reward_plot", "name": path.name}
 
 
+def _save_reward_component_plot(
+    path: Path,
+    efficiency_rows: Sequence[Mapping[str, object]],
+) -> Optional[Dict[str, object]]:
+    """Per-episode stacked reward component breakdown: flex, carbon, cost, ev, bess_cycle."""
+    rows = [row for row in efficiency_rows if _as_float(row.get("return_total")) is not None]
+    if len(rows) < 2:
+        return None
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    episodes = [int(row["episode"]) for row in rows]
+    components = {
+        "flex":       ("#3b82f6", [_as_float(r.get("reward_component_flex_mean")) for r in rows]),
+        "carbon":     ("#16a34a", [_as_float(r.get("reward_component_carbon_mean")) for r in rows]),
+        "cost":       ("#d97706", [_as_float(r.get("reward_component_cost_mean")) for r in rows]),
+        "ev":         ("#a21caf", [_as_float(r.get("reward_component_ev_mean")) for r in rows]),
+        "bess_cycle": ("#dc2626", [_as_float(r.get("reward_component_bess_cycle_mean")) for r in rows]),
+    }
+    ev_penalties = {
+        "ev_departure": ("#7c3aed", [_as_float(r.get("ev_departure_penalty_mean")) for r in rows]),
+        "ev_urgency":   ("#db2777", [_as_float(r.get("ev_urgency_penalty_mean")) for r in rows]),
+        "ev_idle":      ("#f59e0b", [_as_float(r.get("ev_idle_penalty_mean")) for r in rows]),
+    }
+    has_components = any(any(v is not None for v in vals) for _, (_, vals) in components.items())
+    has_ev_penalties = any(any(v is not None for v in vals) for _, (_, vals) in ev_penalties.items())
+
+    n_panels = 1 + (1 if has_ev_penalties else 0)
+    fig, axes = plt.subplots(n_panels, 1, figsize=(10, 4 * n_panels), sharex=True)
+    if n_panels == 1:
+        axes = [axes]
+
+    ax = axes[0]
+    if has_components:
+        for label, (color, vals) in components.items():
+            if any(v is not None for v in vals):
+                ax.plot(episodes, [v if v is not None else float("nan") for v in vals],
+                        linewidth=1.4, label=label, color=color)
+    ax.axhline(0, color="black", linewidth=0.6, linestyle=":")
+    ax.set_ylabel("componente reward (media/paso)")
+    ax.set_title("Desglose de componentes de recompensa por episodio")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=8)
+
+    if has_ev_penalties:
+        ax2 = axes[1]
+        for label, (color, vals) in ev_penalties.items():
+            if any(v is not None for v in vals):
+                ax2.plot(episodes, [v if v is not None else float("nan") for v in vals],
+                         linewidth=1.4, label=label, color=color)
+        ax2.axhline(0, color="black", linewidth=0.6, linestyle=":")
+        ax2.set_xlabel("episode")
+        ax2.set_ylabel("penalidad EV (media/paso)")
+        ax2.set_title("Sub-penalidades EV por episodio")
+        ax2.grid(True, alpha=0.25)
+        ax2.legend(fontsize=8)
+    else:
+        axes[-1].set_xlabel("episode")
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return {"path": str(path), "kind": "reward_component_plot", "name": path.name}
+
+
 def _save_learning_convergence_plot(
     path: Path,
     convergence_rows: Sequence[Mapping[str, object]],
@@ -2102,6 +2185,7 @@ def _write_training_figures_and_tables(
         lambda: _save_convergence_plot(figures_dir / "convergence_returns.png", timeseries_rows),
         lambda: _save_episode_plot(figures_dir / "episode_reward_summary.png", episode_summaries),
         lambda: _save_learning_efficiency_plot(figures_dir / "learning_efficiency.png", efficiency_rows),
+        lambda: _save_reward_component_plot(figures_dir / "reward_component_breakdown.png", efficiency_rows),
         lambda: _save_learning_convergence_plot(figures_dir / "learning_convergence.png", convergence_rows),
         lambda: _save_citylearn_v2_timeseries_plot(figures_dir / "citylearn_v2_district_timeseries.png", timeseries_rows),
         lambda: _save_exploration_plot(figures_dir / "exploration_action_l2.png", trace_rows),
