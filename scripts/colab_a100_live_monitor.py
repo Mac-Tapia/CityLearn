@@ -308,6 +308,41 @@ def print_artifacts(output_root: Path, limit: int = 12) -> None:
         print(f"  {rel} | {path.stat().st_size / 1024.0:.1f} KB | {datetime.fromtimestamp(path.stat().st_mtime):%H:%M:%S}")
 
 
+def print_results_status(status: Mapping[str, object], root: Path) -> None:
+    """Show final artifact existence for every algo/scenario combination."""
+    output_root_value = str(status.get("output_root", "")).strip()
+    if not output_root_value:
+        return
+    resolved_root = path_for_job(root, output_root_value)
+    scenarios = list(status.get("scenarios") or [str(status.get("scenario"))])
+    seed = int(status.get("seed") or 0)
+
+    def _finfo(run_dir: Path, primary: Path, alt: Optional[Path] = None) -> str:
+        if primary.exists():
+            return f"{primary.stat().st_size / 1024:.0f}KB"
+        if alt is not None and alt.exists():
+            return f"data/{alt.stat().st_size / 1024:.0f}KB"
+        return "pendiente" if run_dir.exists() else "--"
+
+    print("")
+    print("Resultados por job  (results.json / timeseries.csv / trace.csv)")
+    col_w = 18
+    print(f"  {'ALGO/ESCENARIO':<{col_w}} {'results.json':>14} {'timeseries.csv':>16} {'trace.csv':>12}")
+    for algo in ALGORITHMS:
+        for scenario in scenarios:
+            run = resolved_root / algo / f"{scenario}_seed_{seed}"
+            r_info = _finfo(run, run / "results.json")
+            ts_info = _finfo(run, run / "timeseries.csv", run / "data" / "timeseries.csv")
+            tr_info = _finfo(run, run / "trace.csv", run / "data" / "trace.csv")
+            label = f"{algo.upper()}/{scenario}"
+            print(f"  {label:<{col_w}} {r_info:>14} {ts_info:>16} {tr_info:>12}")
+    comp_dir = resolved_root / "statistical_comparison"
+    if comp_dir.exists():
+        comp_count = sum(1 for f in comp_dir.iterdir() if f.is_file())
+        if comp_count:
+            print(f"  statistical_comparison/: {comp_count} archivos guardados")
+
+
 def print_logs(status: Mapping[str, object], log_tail: int) -> None:
     jobs = list(status.get("jobs", []))
     if not jobs:
@@ -381,6 +416,7 @@ def render_once(output_root: Path, log_tail: int) -> None:
     print_progress(status, root)
     print_gpu()
     print_artifacts(output_root)
+    print_results_status(status, root)
     print_logs(status, log_tail)
 
 

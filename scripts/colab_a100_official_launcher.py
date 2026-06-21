@@ -1008,7 +1008,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--torch-threads", default=2, type=int)
     parser.add_argument("--live-progress-interval", default=1000, type=int)
     parser.add_argument("--live-heartbeat-seconds", default=30, type=int)
-    parser.add_argument("--artifact-profile", default="efficient", choices=("full", "efficient", "minimal"))
+    parser.add_argument("--artifact-profile", default="full", choices=("full", "efficient", "minimal"))
     parser.add_argument("--trace-record-interval", default=24, type=int)
     parser.add_argument("--trace-detail", default="compact", choices=("full", "compact"))
     parser.add_argument("--gpu-profile", default="aws", choices=("auto", "local4060_fast", "local4060", "balanced", "conservative", "aws"))
