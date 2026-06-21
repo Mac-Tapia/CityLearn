@@ -203,6 +203,11 @@ def configure_environment(root: Path, args: argparse.Namespace) -> Dict[str, obj
     os.environ.setdefault("WANDB_MODE", "disabled")
     os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
     os.environ["PYTHONUNBUFFERED"] = "1"
+    # Force non-interactive Agg backend for all subprocesses that import matplotlib.
+    # Without this, concurrent MASAC/MAAC subprocesses can race on the font-cache
+    # directory (~/.cache/matplotlib) when they all start simultaneously, causing
+    # random ImportError or corrupted-font-cache failures.
+    os.environ.setdefault("MPLBACKEND", "Agg")
 
     path_entries = [
         root,

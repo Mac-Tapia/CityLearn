@@ -315,6 +315,13 @@ def print_logs(status: Mapping[str, object], log_tail: int) -> None:
 
     # In parallel mode show running jobs; in sequential mode show last 4.
     running = [j for j in jobs if j.get("completed_at") is None and not j.get("planned_only")]
+    failed = [
+        j for j in jobs
+        if j.get("completed_at") is not None
+        and j.get("exit_code") not in (None, 0)
+        and not j.get("planned_only")
+        and not j.get("skipped")
+    ]
     targets = running if running else jobs[-4:]
     # Cap lines per job when many are running simultaneously
     lines_per_job = max(4, log_tail // max(1, len(targets))) if len(targets) > 1 else log_tail
@@ -334,6 +341,26 @@ def print_logs(status: Mapping[str, object], log_tail: int) -> None:
         lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()
         for line in lines[-lines_per_job:]:
             if line.strip():
+                print(f"  {line[:220]}")
+
+    # Show stderr tail for failed jobs so the error is immediately visible.
+    if failed:
+        print("")
+        print("Errores — stderr de jobs fallidos")
+        for job in failed[-6:]:
+            stderr_value = str(job.get("stderr_log") or "").strip()
+            if not stderr_value:
+                continue
+            stderr_path = Path(stderr_value)
+            if not stderr_path.exists() or not stderr_path.is_file():
+                continue
+            name = str(job.get("name", "?")).upper()
+            scenario = str(job.get("scenario", "?"))
+            exit_code = job.get("exit_code")
+            print(f"--- STDERR {name}/{scenario} (exit={exit_code}) ---")
+            lines = stderr_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            non_empty = [ln for ln in lines if ln.strip()]
+            for line in non_empty[-25:]:
                 print(f"  {line[:220]}")
 
 

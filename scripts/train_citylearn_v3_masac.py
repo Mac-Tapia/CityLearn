@@ -114,6 +114,12 @@ def main() -> int:
     add_external_path("MARL", "src")
 
     from common.arguments import get_common_args, get_mixer_args
+    # Force non-interactive matplotlib backend before runner_msac imports pyplot.
+    # runner_msac.py does `import matplotlib.pyplot as plt` at module level, and
+    # when multiple MASAC subprocesses start simultaneously the font-cache init
+    # races on ~/.cache/matplotlib; Agg avoids any display/font dependency.
+    import matplotlib
+    matplotlib.use("Agg")
     masac_backend_optimization = install_masac_runtime_optimizations()
     from runner_msac import Runner
 

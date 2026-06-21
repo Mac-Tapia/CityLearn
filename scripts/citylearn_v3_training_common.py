@@ -2432,12 +2432,18 @@ def _csv_read_cache(schema_path: Optional[str]):
                 cache_file = _CSV_CACHE_DIR / f"citylearn_csv_{cache_key}.pkl"
                 meta_file = cache_file.with_suffix(".meta.json")
                 _CSV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                with cache_file.open("wb") as fh:
+                # Write via temp files then atomic rename to avoid other processes
+                # reading a half-written pickle when 12 training jobs start simultaneously.
+                tmp_pkl = cache_file.with_suffix(".tmp.pkl")
+                tmp_meta = meta_file.with_name(meta_file.stem + ".tmp.json")
+                with tmp_pkl.open("wb") as fh:
                     pickle.dump(mem_cache, fh, protocol=pickle.HIGHEST_PROTOCOL)
-                meta_file.write_text(
+                tmp_meta.write_text(
                     json.dumps({"key": cache_key, "ts": datetime.now(timezone.utc).isoformat()}),
                     encoding="utf-8",
                 )
+                tmp_pkl.replace(cache_file)
+                tmp_meta.replace(meta_file)
             except Exception:
                 pass
 
