@@ -1,54 +1,59 @@
 #!/usr/bin/env python3
 """
 Validate that every code cell in a Jupyter notebook is free of Python
-syntax errors, including the specific 'literal newline inside string
-literal' corruption that Jupyter/VSCode autosave can introduce.
+syntax errors AND that the Colab badge URL is correct for the push target.
+
+Checks performed:
+  1. Literal newline inside string literal  (the specific Jupyter/VSCode
+     autosave corruption that causes SyntaxError: unterminated string literal)
+  2. Full ast.parse() on every code cell
+  3. Colab badge URL present and branch matches COLAB_BRANCH
 
 Usage:
     python scripts/validate_notebook_syntax.py [notebook.ipynb ...]
+    python scripts/validate_notebook_syntax.py --branch citylearn-v3-madrl
 
 Exit codes:
-    0  all cells pass
-    1  one or more cells have errors
+    0  all checks pass
+    1  one or more checks fail
 """
 
 import ast
 import json
+import re
+import subprocess
 import sys
 from pathlib import Path
 
+# The GitHub branch that the Colab badge must point to.
+# Must match the branch we push to (see scripts/push.py).
+COLAB_BRANCH   = 'citylearn-v3-madrl'
+COLAB_REPO     = 'Mac-Tapia/CityLearn'
+COLAB_NB_PATH  = 'examples/madrl_citylearn_v3_tutorial.ipynb'
+EXPECTED_BADGE_URL = (
+    f'https://colab.research.google.com/github/{COLAB_REPO}'
+    f'/blob/{COLAB_BRANCH}/{COLAB_NB_PATH}'
+)
+
+_BADGE_RE = re.compile(
+    r'https://colab\.research\.google\.com/github/[^)"\s]+'
+)
+
 
 # ---------------------------------------------------------------------------
-# Checks
+# Check 1 — literal newline inside string literal
 # ---------------------------------------------------------------------------
 
 def _check_literal_newlines(source_list: list[str], cell_id: str) -> list[str]:
-    """
-    Detect source-list entries that contain a raw newline character (chr 10)
-    *inside* a string literal — the specific corruption Jupyter editors cause
-    when they convert the escape sequence \\n to a real newline.
-
-    A source-list entry normally ends with exactly one \\n (its line
-    terminator).  Any \\n that appears before the final character means the
-    entry spans multiple logical lines, which is only valid for multi-line
-    constructs (triple-quoted strings, parenthesised expressions, etc.).
-    We flag entries where such an embedded \\n appears to be inside a
-    single-quoted string.
-    """
     errors = []
     for idx, entry in enumerate(source_list):
-        # Strip the trailing newline (legal line terminator)
         body = entry.rstrip('\n')
-        # Any remaining chr(10) is an embedded newline — suspicious
         if '\n' not in body:
             continue
-        # Quick heuristic: is there an odd number of single-quotes before
-        # the embedded newline?  That signals an open string literal.
         for char_pos, ch in enumerate(body):
             if ch != '\n':
                 continue
             before = body[:char_pos]
-            # Count unescaped single-quotes; odd count → open string
             sq = before.count("'") - before.count("\\'")
             dq = before.count('"') - before.count('\\"')
             if sq % 2 == 1 or dq % 2 == 1:
@@ -61,8 +66,11 @@ def _check_literal_newlines(source_list: list[str], cell_id: str) -> list[str]:
     return errors
 
 
+# ---------------------------------------------------------------------------
+# Check 2 — ast.parse
+# ---------------------------------------------------------------------------
+
 def _check_ast(source: str, cell_id: str, cell_index: int) -> list[str]:
-    """Run ast.parse on the full joined source; return error strings."""
     try:
         ast.parse(source)
         return []
@@ -75,19 +83,67 @@ def _check_ast(source: str, cell_id: str, cell_index: int) -> list[str]:
             for i in range(lo, hi):
                 marker = '>>>' if i + 1 == exc.lineno else '   '
                 context.append(f"    {marker} {i+1:4d} | {lines[i]}")
-        context_str = '\n'.join(context)
         return [
             f"  cell {cell_id!r} (index {cell_index}): "
-            f"SyntaxError line {exc.lineno}: {exc.msg}\n{context_str}"
+            f"SyntaxError line {exc.lineno}: {exc.msg}\n" + '\n'.join(context)
         ]
+
+
+# ---------------------------------------------------------------------------
+# Check 3 — Colab badge URL
+# ---------------------------------------------------------------------------
+
+def _check_badge(nb: dict, path: Path) -> list[str]:
+    errors: list[str] = []
+    found: list[str] = []
+
+    for cell in nb.get('cells', []):
+        if cell.get('cell_type') != 'markdown':
+            continue
+        src = ''.join(cell.get('source', []))
+        for m in _BADGE_RE.findall(src):
+            found.append(m)
+
+    if not found:
+        errors.append(
+            f"  {path.name}: no Colab badge URL found.\n"
+            f"  Expected: {EXPECTED_BADGE_URL}"
+        )
+        return errors
+
+    for url in found:
+        if url == EXPECTED_BADGE_URL:
+            continue
+        # Parse what's actually there
+        m = re.match(
+            r'https://colab\.research\.google\.com/github/([^/]+/[^/]+)'
+            r'/blob/([^/]+)/(.+)', url
+        )
+        if not m:
+            errors.append(f"  badge URL malformed: {url}")
+            continue
+        repo, branch, nb_path = m.group(1), m.group(2), m.group(3)
+        if branch != COLAB_BRANCH:
+            errors.append(
+                f"  badge branch mismatch: found {branch!r}, "
+                f"expected {COLAB_BRANCH!r}\n"
+                f"  URL: {url}\n"
+                f"  Fix: change to {EXPECTED_BADGE_URL}"
+            )
+        if repo != COLAB_REPO:
+            errors.append(
+                f"  badge repo mismatch: found {repo!r}, "
+                f"expected {COLAB_REPO!r}"
+            )
+
+    return errors
 
 
 # ---------------------------------------------------------------------------
 # Per-notebook validation
 # ---------------------------------------------------------------------------
 
-def validate(path: Path) -> bool:
-    """Return True if notebook is clean, False if errors found."""
+def validate(path: Path, check_badge: bool = True) -> bool:
     try:
         nb = json.loads(path.read_text(encoding='utf-8'))
     except Exception as exc:
@@ -99,26 +155,25 @@ def validate(path: Path) -> bool:
     for ci, cell in enumerate(nb.get('cells', [])):
         if cell.get('cell_type') != 'code':
             continue
-        cell_id = cell.get('id', f'cell_{ci}')
-        source_list: list[str] = cell.get('source', [])
-        source: str = ''.join(source_list)
-
+        cell_id   = cell.get('id', f'cell_{ci}')
+        src_list  = cell.get('source', [])
+        source    = ''.join(src_list)
         if not source.strip():
             continue
-
-        # Check 1: literal newlines embedded inside string literals
-        all_errors.extend(_check_literal_newlines(source_list, cell_id))
-
-        # Check 2: full AST parse (catches every syntax error)
+        all_errors.extend(_check_literal_newlines(src_list, cell_id))
         all_errors.extend(_check_ast(source, cell_id, ci))
 
+    if check_badge:
+        all_errors.extend(_check_badge(nb, path))
+
     if all_errors:
-        print(f"[FAIL] {path} — {len(all_errors)} error(s) found:")
+        print(f"[FAIL] {path} — {len(all_errors)} error(s):")
         for e in all_errors:
             print(e)
         return False
 
-    print(f"[OK]   {path} — {sum(1 for c in nb['cells'] if c.get('cell_type')=='code')} code cells, all clean")
+    code_cells = sum(1 for c in nb['cells'] if c.get('cell_type') == 'code')
+    print(f"[OK]   {path} — {code_cells} code cells, badge OK, all clean")
     return True
 
 
@@ -127,10 +182,14 @@ def validate(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    args = sys.argv[1:]
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    no_badge = '--no-badge' in sys.argv[1:]
+
     if not args:
-        # Default: validate the tutorial notebook
-        default = Path(__file__).parent.parent / 'examples' / 'madrl_citylearn_v3_tutorial.ipynb'
+        default = (
+            Path(__file__).parent.parent
+            / 'examples' / 'madrl_citylearn_v3_tutorial.ipynb'
+        )
         paths = [default]
     else:
         paths = [Path(a) for a in args]
@@ -141,7 +200,7 @@ def main() -> int:
             print(f"[ERROR] not found: {p}", file=sys.stderr)
         return 1
 
-    results = [validate(p) for p in paths]
+    results = [validate(p, check_badge=not no_badge) for p in paths]
     return 0 if all(results) else 1
 
 
