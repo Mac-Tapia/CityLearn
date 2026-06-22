@@ -513,7 +513,12 @@ def build_jobs(args: argparse.Namespace, root: Path, output_root: Path, schema_a
                     "--train-interval",
                     str(args.matd3_train_interval),
                     "--num-random-episodes",
-                    "1",
+                    str(args.matd3_num_random_episodes),
+                    # Override global live-progress-interval: MATD3 warmup (8760 random steps
+                    # at ~3-5 FPS) takes ~30-50 min; writing every 300 steps keeps the monitor
+                    # showing updates every ~60-100 s instead of every ~4-5 min.
+                    "--live-progress-interval",
+                    "300",
                 ],
             }
         )
@@ -1347,6 +1352,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--matd3-buffer-size", default=6000, type=int)
     parser.add_argument("--matd3-hidden-size", default=256, type=int)
     parser.add_argument("--matd3-train-interval", default=100, type=int)
+    parser.add_argument("--matd3-num-random-episodes", default=1, type=int,
+                        help="Random warmup episodes before MATD3 training (1 ep = 8760 steps ≈ 40 min at 3 FPS).")
     parser.add_argument("--maac-batch-size", default=512, type=int)
     parser.add_argument("--maac-buffer-length", default=100000, type=int)
     parser.add_argument("--maac-hidden-size", default=256, type=int)
