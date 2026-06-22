@@ -3,17 +3,40 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Optional, Sequence
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 
 ALGORITHMS = ("happo", "masac", "matd3", "maac")
+
+# Two-phase execution grouping (mirrors colab_a100_official_launcher.py constants).
+# Used to insert phase headers in the progress section.
+TWO_PHASE_LIGHT = ("happo", "matd3", "maac")  # Phase 1: 9 jobs simultaneous
+TWO_PHASE_HEAVY = ("masac",)                   # Phase 2: 3 jobs, dedicated GPU
+_SCENARIO_ORDER = ("E1", "E2", "E3")
+
+
+class _Tee:
+    """Write to two streams simultaneously — used to capture monitor output to a file."""
+
+    def __init__(self, primary: io.TextIOBase, secondary: io.StringIO) -> None:
+        self._p = primary
+        self._s = secondary
+
+    def write(self, msg: str) -> None:
+        self._p.write(msg)
+        self._s.write(msg)
+
+    def flush(self) -> None:
+        self._p.flush()
 
 
 def project_root() -> Path:
@@ -169,9 +192,23 @@ def print_gpu() -> None:
         print(apps)
 
 
+def _phase_sort_key(job: Mapping[str, object]) -> tuple:
+    """Sort key: Phase 1 (happo/matd3/maac) before Phase 2 (masac), then by algo order, then scenario."""
+    name = str(job.get("name", "")).lower()
+    phase = 0 if name in TWO_PHASE_LIGHT else 1
+    algo_order = ("happo", "matd3", "maac", "masac")
+    algo_idx = algo_order.index(name) if name in algo_order else 99
+    scenario = str(job.get("scenario", "E1"))
+    scen_idx = _SCENARIO_ORDER.index(scenario) if scenario in _SCENARIO_ORDER else 99
+    return (phase, algo_idx, scen_idx)
+
+
 def print_progress(status: Mapping[str, object], root: Path) -> None:
     jobs = list(status.get("jobs", []))
-    active = [j for j in jobs if j.get("completed_at") is None and not j.get("planned_only")]
+    active: List[Mapping[str, object]] = [
+        j for j in jobs if j.get("completed_at") is None and not j.get("planned_only")
+    ]
+    # Fall back to any job that has a live_progress.json on disk.
     if not active:
         for job in jobs:
             output_dir = job.get("output_dir")
@@ -181,7 +218,23 @@ def print_progress(status: Mapping[str, object], root: Path) -> None:
             if progress_path.exists():
                 active.append(job)
 
-    if not active:
+    # Also include failed jobs so their last-known progress is shown.
+    failed_with_progress: List[Mapping[str, object]] = []
+    for job in jobs:
+        if job.get("completed_at") is None or job.get("planned_only"):
+            continue
+        if job.get("exit_code") in (None, 0) or job.get("skipped"):
+            continue
+        output_dir = job.get("output_dir")
+        if not output_dir:
+            continue
+        progress_path = path_for_job(root, str(output_dir)) / "live_progress.json"
+        if progress_path.exists() and job not in active:
+            failed_with_progress.append(job)
+
+    all_display = active + failed_with_progress
+
+    if not all_display:
         print("")
         print("Progreso vivo: sin job activo todavia.")
         return
@@ -193,15 +246,37 @@ def print_progress(status: Mapping[str, object], root: Path) -> None:
     print("")
     print("Progreso, metricas y recompensas")
 
-    for job in active:
+    # Sort by phase (Phase 1 first) then algorithm then scenario.
+    all_display_sorted = sorted(all_display, key=_phase_sort_key)
+
+    # Print each job with phase headers inserted at phase transitions.
+    current_phase = None
+    for job in all_display_sorted:
+        job_name_lower = str(job.get("name", "")).lower()
+        job_phase = 0 if job_name_lower in TWO_PHASE_LIGHT else 1
+
+        if job_phase != current_phase:
+            current_phase = job_phase
+            print("")
+            if job_phase == 0:
+                phase_label = " + ".join(a.upper() for a in TWO_PHASE_LIGHT)
+                n_jobs = sum(1 for j in all_display_sorted if str(j.get("name", "")).lower() in TWO_PHASE_LIGHT)
+                print(f"  ─── FASE 1: {phase_label} ({n_jobs} jobs) ────────────────────────────────────────")
+            else:
+                phase_label = " + ".join(a.upper() for a in TWO_PHASE_HEAVY)
+                n_jobs = sum(1 for j in all_display_sorted if str(j.get("name", "")).lower() in TWO_PHASE_HEAVY)
+                print(f"  ─── FASE 2: {phase_label} ({n_jobs} jobs, GPU dedicado) ──────────────────────────")
+
         name = str(job.get("name", "?")).upper()
         scenario = str(job.get("scenario", "?"))
         run_dir = path_for_job(root, str(job.get("output_dir", "")))
         progress_path = run_dir / "live_progress.json"
         progress = read_json(progress_path)
 
+        is_failed = job.get("completed_at") is not None and job.get("exit_code") not in (None, 0)
+        status_tag = " [FAILED]" if is_failed else ""
         print("")
-        print(f"  ── {name}/{scenario} ─────────────────────────────────────────────")
+        print(f"  ── {name}/{scenario}{status_tag} ─────────────────────────────────────────────")
 
         if not progress:
             print("  Progreso vivo aun no disponible; aparece despues del primer intervalo de pasos.")
@@ -412,7 +487,8 @@ def print_logs(status: Mapping[str, object], log_tail: int) -> None:
                 print(f"  {line[:220]}")
 
 
-def render_once(output_root: Path, log_tail: int) -> None:
+def _render_inner(output_root: Path, log_tail: int) -> None:
+    """Perform the actual rendering — called from render_once() with stdout captured."""
     root = project_root()
     status_path = output_root / "official_full_status.json"
     status = read_json(status_path)
@@ -431,6 +507,29 @@ def render_once(output_root: Path, log_tail: int) -> None:
     print_artifacts(output_root)
     print_results_status(status, root)
     print_logs(status, log_tail)
+
+
+def render_once(output_root: Path, log_tail: int) -> None:
+    """Render one monitor snapshot, print to stdout, and save to output_root."""
+    buf = io.StringIO()
+    original_stdout = sys.stdout
+    sys.stdout = _Tee(original_stdout, buf)
+    try:
+        _render_inner(output_root, log_tail)
+    finally:
+        sys.stdout = original_stdout
+
+    snapshot = buf.getvalue()
+
+    # Save snapshot: one timestamped file + overwrite monitor_latest.txt.
+    try:
+        snap_dir = output_root / "monitor_snapshots"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        (snap_dir / f"monitor_{ts}.txt").write_text(snapshot, encoding="utf-8")
+        (output_root / "monitor_latest.txt").write_text(snapshot, encoding="utf-8")
+    except OSError:
+        pass  # Read-only or unavailable filesystem — continue without saving.
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:

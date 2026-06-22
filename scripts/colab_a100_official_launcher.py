@@ -597,7 +597,13 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
         args = replace_arg(args, "--buffer-size", "8")
         args = replace_arg(args, "--critic-batch-size", "32")
         args = replace_arg(args, "--max-replay-buffer-gib", "12")
+        # Keep replay buffer in CPU RAM: avoids GPU OOM from 13.72 GiB buffer
+        # competing with model weights when other jobs share the A100.
         args = replace_arg(args, "--masac-preload-batch-device", "cpu")
+        # Cap GPU allocation to 0.26 × 80 GiB = 20.8 GiB per process.
+        # Without this cap, PyTorch's caching allocator may try to claim up to
+        # 73.6 GiB (fraction=0.92 default), racing with other concurrent jobs.
+        args = replace_arg(args, "--cuda-memory-fraction", "0.26")
         # Reduce hidden dims to lower GPU memory pressure when running alongside other jobs.
         args = replace_arg(args, "--rnn-hidden-dim", "128")
         args = replace_arg(args, "--qmix-hidden-dim", "64")
