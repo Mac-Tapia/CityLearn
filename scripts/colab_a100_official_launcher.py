@@ -954,19 +954,23 @@ def run_algo_sequential_jobs(
     - --algo-sequential-torch-threads (default 4) replaces --torch-threads
       during each phase, matching the available vCPUs per process.
     """
-    # Group jobs by algorithm, preserving ALGORITHMS order.
-    algo_groups: Dict[str, List[Dict[str, object]]] = {algo: [] for algo in ALGORITHMS}
+    # Execution order: lightest algorithms first, MASAC last (heaviest/QMIX).
+    # ALGORITHMS constant preserves the original definition order; here we
+    # always run MASAC as the final phase regardless of its position in ALGORITHMS.
+    _PHASE_ORDER = tuple(a for a in ALGORITHMS if a != "masac") + ("masac",)
+
+    algo_groups: Dict[str, List[Dict[str, object]]] = {algo: [] for algo in _PHASE_ORDER}
     for job in jobs:
         name = str(job["name"])
         if name in algo_groups:
             algo_groups[name].append(job)
 
     phase_threads = int(args.algo_sequential_torch_threads)
-    start_idx = ALGORITHMS.index(args.start_from_algorithm)
+    start_idx = _PHASE_ORDER.index(args.start_from_algorithm)
     overall_rc = 0
 
-    for phase_num, algo in enumerate(ALGORITHMS):
-        if ALGORITHMS.index(algo) < start_idx:
+    for phase_num, algo in enumerate(_PHASE_ORDER):
+        if _PHASE_ORDER.index(algo) < start_idx:
             continue
         group = algo_groups.get(algo, [])
         if not group:
@@ -1169,15 +1173,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--execution-mode",
-        default="algo_sequential",
+        default="parallel_all",
         choices=("parallel_all", "algo_sequential"),
         help=(
-            "parallel_all: run all 12 jobs at once (fast wall-clock but each throttled "
-            "to ~2 FPS due to CPU/GPU contention). "
+            "parallel_all (default): run all 12 jobs simultaneously — "
+            "4 MADRL algorithms × 3 scenarios at the same time on the A100. "
             "algo_sequential: run each algorithm's 3 scenarios together in isolation "
             "(HAPPO→MATD3→MAAC→MASAC), giving each algorithm dedicated CPU+GPU → "
-            "~4-5 FPS per job, each at its natural speed. "
-            "Default: algo_sequential."
+            "~4-5 FPS per job but algorithms run one group at a time."
         ),
     )
     parser.add_argument(
