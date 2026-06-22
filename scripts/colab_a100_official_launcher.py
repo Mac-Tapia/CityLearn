@@ -1000,7 +1000,7 @@ def run_algo_sequential_jobs(
         # would try to load its 13.72 GiB replay buffer to GPU (total ~41 GiB).
         # During concurrent QMIX updates the remaining ~39 GiB is tight for 3×
         # model+gradient+optimizer state → race condition OOM.  Keeping the
-        # buffer in CPU RAM (13.72 GiB × 3 = 41 GiB, well within 83 GiB Colab
+        # buffer in CPU RAM (13.72 GiB × 3 = 41 GiB = 24.6% of 167.1 GiB Colab
         # RAM) reduces GPU to ~7 GiB per job (21 GiB total) → zero OOM risk.
         if algo == "masac":
             phase_jobs = [
@@ -1041,26 +1041,34 @@ def run_two_phase_jobs(
     log_dir: Path,
     args: argparse.Namespace,
 ) -> int:
-    """Two-phase execution optimised for NVIDIA A100-SXM4-80GB (80 GiB VRAM).
+    """Two-phase execution optimised for NVIDIA A100-SXM4-80GB (80 GiB VRAM, 167.1 GiB RAM).
+
+    Instance spec: a2-ultragpu-1g — 1× A100-SXM4-80GB, 12 vCPUs, 170 GiB RAM.
 
     Phase 1 — HAPPO×3 + MATD3×3 + MAAC×3  (9 jobs in parallel)
     ─────────────────────────────────────────────────────────────
-    Hardware budget (A100-SXM4-80GB):
+    Hardware budget:
       GPU: ~11.6 GiB / 80 GiB = 14.6%  (HAPPO~1.05 + MATD3~2.14 + MAAC~0.69 per job × 3)
       GPU free: ~68.4 GiB → zero contention, each algo gets full bandwidth for updates.
+      RAM: negligible (no large replay buffers for HAPPO/MATD3/MAAC).
     CPU:  12 vCPUs / 9 jobs = 1.33 vCPU/job.
     Torch threads: --two-phase-light-torch-threads (default 1).
-      Rationale: env sim is single-threaded Python; extra Torch threads compete for
-      the same ~1.3 vCPU → setting 1 thread avoids context-switch overhead.
-    Expected FPS: 2-3 FPS/job  (bottleneck = CityLearn Python env, not GPU).
-    Expected time: 50-73 min/episode.
+      Rationale: env sim is single-threaded Python (GIL). With 9 processes on 12 vCPUs
+      each process gets ~1.33 dedicated core. Setting torch-threads=1 avoids Torch
+      competing with the env sim main thread on the same vCPU.
+    OMP_NUM_THREADS=1 per job (env_overrides): prevents numpy from spawning OMP
+      thread pools (default=cpu_count). Without this: 9 × 4 OMP threads = 36 threads
+      thrashing on 12 vCPUs → env sim stalls. With OMP=1: 9 threads on 12 cores →
+      each has near-dedicated CPU time.
+    Expected FPS: 3-5 FPS/job  (after OMP fix; was 2 FPS with default OMP settings).
+    Expected time: 30-50 min/episode.
 
     Phase 2 — MASAC×3  (3 jobs, dedicated A100-SXM4-80GB)
     ───────────────────────────────────────────────────────
-    Hardware budget (A100-SXM4-80GB):
+    Hardware budget (A100-SXM4-80GB + 167.1 GiB RAM, a2-ultragpu-1g spec):
       GPU: ~62.4 GiB / 80 GiB = 78%  (3 × cuda-fraction × 80 GiB, capped per process).
       GPU free: ~17.6 GiB headroom → prevents OOM from PyTorch caching.
-      RAM: ~41.2 GiB / 83 GiB = 49.6%  (3 × 13.72 GiB replay buffer on CPU).
+      RAM: ~41.2 GiB / 167.1 GiB = 24.6%  (3 × 13.72 GiB replay buffer on CPU).
     CPU: 12 vCPUs / 3 jobs = 4 vCPU/job → 4× more scheduling time than 12-parallel.
     Torch threads: --two-phase-heavy-torch-threads (default 4, matches 4 vCPU/job).
       QMIX batch matrix ops benefit from 4 intra-op threads.
@@ -1070,16 +1078,24 @@ def run_two_phase_jobs(
       Capping at 0.26 × 80 = 20.8 GiB/process → 3 × 20.8 = 62.4 GiB total → safe.
       The actual model+training tensors are <2 GiB; the cap prevents PyTorch
       from caching stale allocations up to the full A100 capacity.
-    Replay buffer: forced to CPU RAM (41 GiB safe).
+    Replay buffer: forced to CPU RAM (41 GiB = 24.6% of 167.1 GiB — very safe).
       With buffer on GPU: 13.72 GiB × 3 + model = ~62+ GiB → exceeds cap, causes OOM.
     Expected FPS: 4-5 FPS/job (4 vCPU/job → consistent OS scheduling).
     Expected time: 30-37 min/episode (vs 73 min in 12-parallel baseline).
 
-    Note on 12 FPS target
-    ─────────────────────
-    12 FPS would require 1 job alone with all 12 vCPUs (env sim is GIL-bound, single
-    Python thread). With 3 MASAC jobs simultaneous, 4-5 FPS is the realistic maximum.
-    The two-phase approach is the best balance of total wall-clock time vs FPS/job.
+    Note on FPS ceiling (a2-ultragpu-1g: 12 vCPUs)
+    ────────────────────────────────────────────────
+    The CityLearn env simulation (17 buildings + 42 EV chargers) is GIL-bound: each
+    process uses exactly 1 Python thread for env.step(). FPS is determined by how
+    consistently that thread gets CPU time, not by GPU usage.
+
+    With 12 vCPUs:
+      Phase 1 (9 jobs):  12/9 = 1.33 vCPU/job → 3-5 FPS/job  (after OMP fix)
+      Phase 2 (3 MASAC): 12/3 = 4.0  vCPU/job → 4-7 FPS/job  (dedicated scheduling)
+      1 job alone:       12/1 = 12   vCPU/job → 8-12 FPS/job (if env natively allows)
+
+    The two-phase split gives MASAC the most vCPU/job (4×) while running 3 scenarios
+    in parallel — the best achievable balance on a 12-vCPU A100 instance.
     """
     phase1_jobs = [j for j in jobs if j["name"] in TWO_PHASE_LIGHT]
     phase2_jobs = [j for j in jobs if j["name"] in TWO_PHASE_HEAVY]
@@ -1303,9 +1319,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--happo-hidden-size", default=384, type=int)
     # Iquitos 2023-2025: Building_7 has 42 EV chargers → obs_shape expands to ~370
     # (7 obs templates × 42 chargers + 31 base + 42 type-codes = ~370 dims).
-    # With buffer_size=20 that allocates ~27.4 GiB per MASAC instance (3 × 27.4 = 82 GiB
-    # total, exhausting system RAM). buffer_size=10 gives ~13.7 GiB each (41 GiB total),
-    # which is safe on an A100-SXM4 Colab with ~83 GiB system RAM.
+    # A100-SXM4 Colab instance: 167.1 GiB system RAM (a2-ultragpu-1g spec).
+    #   buffer_size=10 → 13.7 GiB/job × 3 = 41 GiB  =  24.6% of 167.1 GiB → safe.
+    #   buffer_size=20 → 27.4 GiB/job × 3 = 82 GiB  =  49.1% of 167.1 GiB → safe.
+    #   buffer_size=40 → 54.9 GiB/job × 3 = 165 GiB = 98.7% of 167.1 GiB → too close.
+    # Default 10 preserves thesis experiment consistency. Increase via --masac-buffer-size.
     parser.add_argument("--masac-max-replay-buffer-gib", default=20.0, type=float)
     parser.add_argument("--masac-buffer-size", default=10, type=int)
     parser.add_argument("--masac-critic-batch-size", default=64, type=int)
