@@ -20,6 +20,7 @@ from pathlib import Path
 
 CITYLEARN_REMOTE  = 'mac-tapia'
 CITYLEARN_BRANCH  = 'citylearn-v3-madrl'   # must match badge URL in validate_notebook_syntax.py
+CITYLEARN_DEV_BRANCH = 'fix/platformdirs-colab'  # active development branch — kept in sync
 PARENT_REMOTE     = 'origin'
 PARENT_BRANCH     = 'master'
 
@@ -67,9 +68,10 @@ def main() -> int:
             return 1
         print('[push] Validation passed.')
 
-    # ── Step 2: push CityLearn to citylearn-v3-madrl ─────────────────────────
-    print(f'\n[push] Step 2 — pushing CityLearn to '
-          f'{CITYLEARN_REMOTE}/{CITYLEARN_BRANCH}...')
+    # ── Step 2: push CityLearn to BOTH branches ──────────────────────────────
+    # citylearn-v3-madrl: what the Colab badge opens
+    # fix/platformdirs-colab: active development branch (always kept in sync)
+    print(f'\n[push] Step 2 — pushing CityLearn to both branches...')
 
     # Check for uncommitted changes
     dirty = subprocess.run(
@@ -81,33 +83,23 @@ def main() -> int:
         print('  Commit them first, then re-run push.py.')
         return 1
 
-    rc = run(
-        ['git', 'push', CITYLEARN_REMOTE,
-         f'HEAD:{CITYLEARN_BRANCH}'],
-        cwd=citylearn, dry=dry,
-    )
-    if rc != 0:
-        print('[push] ERROR: git push CityLearn failed.')
-        return rc
+    local_sha = subprocess.run(
+        ['git', 'rev-parse', 'HEAD'],
+        cwd=citylearn, capture_output=True, text=True
+    ).stdout.strip()
 
-    # Verify the remote commit matches local HEAD
+    for target_branch in (CITYLEARN_BRANCH, CITYLEARN_DEV_BRANCH):
+        print(f'  pushing HEAD:{target_branch}')
+        rc = run(
+            ['git', 'push', CITYLEARN_REMOTE, f'HEAD:{target_branch}'],
+            cwd=citylearn, dry=dry,
+        )
+        if rc != 0:
+            print(f'[push] ERROR: git push CityLearn to {target_branch} failed.')
+            return rc
+
     if not dry:
-        local_sha = subprocess.run(
-            ['git', 'rev-parse', 'HEAD'],
-            cwd=citylearn, capture_output=True, text=True
-        ).stdout.strip()
-        remote_sha = subprocess.run(
-            ['git', 'ls-remote', CITYLEARN_REMOTE, CITYLEARN_BRANCH],
-            cwd=citylearn, capture_output=True, text=True
-        ).stdout.split()[0] if subprocess.run(
-            ['git', 'ls-remote', CITYLEARN_REMOTE, CITYLEARN_BRANCH],
-            cwd=citylearn, capture_output=True, text=True
-        ).stdout.strip() else ''
-
-        if remote_sha and local_sha != remote_sha:
-            print(f'[push] ERROR: remote SHA {remote_sha[:12]} != local {local_sha[:12]}')
-            return 1
-        print(f'[push] CityLearn remote up-to-date at {local_sha[:12]}.')
+        print(f'[push] CityLearn both branches up-to-date at {local_sha[:12]}.')
 
     # ── Step 3: bump submodule pointer in parent ──────────────────────────────
     print('\n[push] Step 3 — bumping submodule pointer in parent repo...')
