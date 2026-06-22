@@ -585,10 +585,16 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
     args = [str(item) for item in retry["args"]]
 
     if name == "masac":
-        args = replace_arg(args, "--buffer-size", "10")
+        # buffer_size=10 → 13.72 GiB for Iquitos obs_shape (~370 dims from 42 EV chargers),
+        # which exceeds the 12 GiB limit set below. Drop to 8 → ~10.98 GiB to pass the check.
+        args = replace_arg(args, "--buffer-size", "8")
         args = replace_arg(args, "--critic-batch-size", "32")
         args = replace_arg(args, "--max-replay-buffer-gib", "12")
         args = replace_arg(args, "--masac-preload-batch-device", "cpu")
+        # Reduce hidden dims to lower GPU memory pressure when running alongside other jobs.
+        args = replace_arg(args, "--rnn-hidden-dim", "128")
+        args = replace_arg(args, "--qmix-hidden-dim", "64")
+        args = replace_arg(args, "--hyper-hidden-dim", "128")
     elif name == "matd3":
         args = replace_arg(args, "--batch-size", "256")
         args = replace_arg(args, "--buffer-size", "4096")
