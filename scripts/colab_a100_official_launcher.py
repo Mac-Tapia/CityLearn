@@ -782,6 +782,10 @@ def run_one_job(
     append_job_record(manifest, status_path, record, lock=lock)
 
     print(f"START {name.upper()}/{scenario} attempt={attempt} log={log_path}", flush=True)
+    proc_env = os.environ.copy()
+    # Per-job env overrides (e.g. OMP_NUM_THREADS to prevent numpy thread stealing).
+    if job.get("env_overrides"):
+        proc_env.update(job["env_overrides"])
     with log_path.open("w", encoding="utf-8") as stdout_f, err_path.open("w", encoding="utf-8") as stderr_f:
         proc = subprocess.Popen(
             command,
@@ -789,7 +793,7 @@ def run_one_job(
             stdout=stdout_f,
             stderr=stderr_f,
             text=True,
-            env=os.environ.copy(),
+            env=proc_env,
         )
 
         last_monitor = 0.0
@@ -1084,15 +1088,40 @@ def run_two_phase_jobs(
     heavy_threads = int(args.two_phase_heavy_torch_threads)
     masac_cuda_fraction = float(args.two_phase_masac_cuda_fraction)
 
+    # Detect real vCPU count so FPS expectations are accurate.
+    try:
+        import os as _os
+        vcpu_count = len(_os.sched_getaffinity(0))  # Linux/Colab: actual affinity
+    except AttributeError:
+        vcpu_count = _os.cpu_count() or 12          # fallback (Windows/macOS)
+
+    # Thread environment: prevent numpy/scipy/MKL from spawning extra OMP threads.
+    # Without this, 9 processes × (default 4 OMP threads) = 36 threads competing
+    # for ~12-24 vCPUs → CPU thrashing → env sim stalls waiting for scheduling.
+    # With OMP_NUM_THREADS=1: each process uses exactly 1 core for numpy ops,
+    # leaving the OS free to give each Python main thread consistent CPU time.
+    _single_thread_env = {
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+    }
+
+    vcpu_per_p1 = vcpu_count / max(len(phase1_jobs), 1)
+    vcpu_per_p2 = vcpu_count / max(len(phase2_jobs), 1)
+
     # ── PHASE 1: HAPPO + MATD3 + MAAC (9 jobs) ─────────────────────────────
     algo_labels = " + ".join(a.upper() for a in TWO_PHASE_LIGHT)
     print(
         f"\n[launcher] ═══ PHASE 1/2 ({algo_labels}): "
         f"{len(phase1_jobs)} jobs x {light_threads} torch-thread(s) "
-        f"| GPU ~11.6 GiB / 80 GiB | CPU 1.3 vCPU/job ═══",
+        f"| GPU ~11.6 GiB / 80 GiB "
+        f"| vCPU {vcpu_count}/{len(phase1_jobs)} = {vcpu_per_p1:.1f}/job "
+        f"| OMP_NUM_THREADS=1 ═══",
         flush=True,
     )
     p1_jobs = _patch_torch_threads(phase1_jobs, light_threads)
+    p1_jobs = [{**job, "env_overrides": _single_thread_env} for job in p1_jobs]
     overall_rc = run_parallel_jobs(
         root=root,
         manifest=manifest,
@@ -1111,8 +1140,9 @@ def run_two_phase_jobs(
     print(
         f"\n[launcher] ═══ PHASE 2/2 (MASAC): "
         f"{len(phase2_jobs)} jobs x {heavy_threads} torch-threads "
-        f"| GPU ~{3*gpu_cap_gib:.0f} GiB cap / 80 GiB "
-        f"| CPU 4 vCPU/job | replay-buffer=CPU ═══",
+        f"| GPU ~{len(phase2_jobs)*gpu_cap_gib:.0f} GiB cap / 80 GiB "
+        f"| vCPU {vcpu_count}/{len(phase2_jobs)} = {vcpu_per_p2:.1f}/job "
+        f"| replay-buffer=CPU | OMP_NUM_THREADS=1 ═══",
         flush=True,
     )
     p2_jobs = _patch_torch_threads(phase2_jobs, heavy_threads)
@@ -1126,6 +1156,8 @@ def run_two_phase_jobs(
             {**job, "args": replace_arg([str(a) for a in job["args"]], patch_flag, patch_val)}
             for job in p2_jobs
         ]
+    # Same thread environment: prevent numpy from stealing vCPUs across MASAC processes.
+    p2_jobs = [{**job, "env_overrides": _single_thread_env} for job in p2_jobs]
     rc2 = run_parallel_jobs(
         root=root,
         manifest=manifest,
