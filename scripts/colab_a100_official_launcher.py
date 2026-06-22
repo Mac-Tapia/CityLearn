@@ -869,10 +869,12 @@ def run_parallel_jobs(
     output_root: Path,
     log_dir: Path,
     args: argparse.Namespace,
+    max_parallel_override: Optional[int] = None,
 ) -> int:
     """Run jobs with a bounded thread pool. Returns 0 only if all jobs succeed."""
     lock = threading.Lock()
     failures: List[str] = []
+    max_workers = max_parallel_override if max_parallel_override is not None else args.max_parallel
 
     def _run(job: Mapping[str, object]) -> int:
         return run_job_with_retry(
@@ -888,10 +890,10 @@ def run_parallel_jobs(
         )
 
     print(
-        f"[launcher] Starting {len(jobs)} jobs with max_parallel={args.max_parallel}",
+        f"[launcher] Starting {len(jobs)} jobs with max_parallel={max_workers}",
         flush=True,
     )
-    with ThreadPoolExecutor(max_workers=args.max_parallel) as pool:
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_to_job = {pool.submit(_run, job): job for job in jobs}
         for future in as_completed(future_to_job):
             job = future_to_job[future]
@@ -911,6 +913,92 @@ def run_parallel_jobs(
         print(f"[launcher] {len(failures)} job(s) failed: {', '.join(failures)}", flush=True)
         return 1
     return 0
+
+
+def _patch_torch_threads(jobs: List[Dict[str, object]], threads: int) -> List[Dict[str, object]]:
+    """Return a copy of jobs with --torch-threads replaced by threads."""
+    patched = []
+    for job in jobs:
+        new_args = replace_arg([str(a) for a in job["args"]], "--torch-threads", str(threads))
+        patched.append({**job, "args": new_args})
+    return patched
+
+
+def run_algo_sequential_jobs(
+    *,
+    root: Path,
+    manifest: Dict[str, object],
+    status_path: Path,
+    jobs: List[Dict[str, object]],
+    output_root: Path,
+    log_dir: Path,
+    args: argparse.Namespace,
+) -> int:
+    """Run algorithms sequentially, each algorithm's scenarios in parallel.
+
+    Execution order: HAPPO×3 → MATD3×3 → MAAC×3 → MASAC×3.
+
+    Motivation
+    ----------
+    Running all 12 jobs simultaneously on an A100 causes:
+    - CPU contention: 12 Python processes share ~12 vCPUs → each env step
+      gets ~1 vCPU → ~2 FPS (half of the natural ~4-5 FPS per process).
+    - GPU saturation: 3 MASAC jobs × 20+ GiB = 60 GiB of the 80 GiB A100,
+      throttling GPU bandwidth for HAPPO/MATD3/MAAC during their updates.
+
+    With algo_sequential:
+    - 3 processes share CPU (4× more vCPU per job) → ~4-5 FPS per job.
+    - Each algorithm gets dedicated GPU bandwidth.
+    - HAPPO/MATD3/MAAC finish ~2× faster; MASAC still limited by QMIX but
+      free of GPU competition.
+    - --algo-sequential-torch-threads (default 4) replaces --torch-threads
+      during each phase, matching the available vCPUs per process.
+    """
+    # Group jobs by algorithm, preserving ALGORITHMS order.
+    algo_groups: Dict[str, List[Dict[str, object]]] = {algo: [] for algo in ALGORITHMS}
+    for job in jobs:
+        name = str(job["name"])
+        if name in algo_groups:
+            algo_groups[name].append(job)
+
+    phase_threads = int(args.algo_sequential_torch_threads)
+    start_idx = ALGORITHMS.index(args.start_from_algorithm)
+    overall_rc = 0
+
+    for phase_num, algo in enumerate(ALGORITHMS):
+        if ALGORITHMS.index(algo) < start_idx:
+            continue
+        group = algo_groups.get(algo, [])
+        if not group:
+            continue
+
+        print(
+            f"\n[launcher] ═══ PHASE {phase_num + 1}/4: {algo.upper()} "
+            f"({len(group)} scenario(s) × {phase_threads} torch-threads) ═══",
+            flush=True,
+        )
+
+        # Give each process more torch threads since only 3 compete.
+        phase_jobs = _patch_torch_threads(group, phase_threads)
+
+        rc = run_parallel_jobs(
+            root=root,
+            manifest=manifest,
+            status_path=status_path,
+            jobs=phase_jobs,
+            output_root=output_root,
+            log_dir=log_dir,
+            args=args,
+            max_parallel_override=len(phase_jobs),
+        )
+        if rc != 0:
+            overall_rc = rc
+            print(
+                f"[launcher] Phase {algo.upper()} had failures — continuing with next phase.",
+                flush=True,
+            )
+
+    return overall_rc
 
 
 def make_manifest(
@@ -942,15 +1030,16 @@ def make_manifest(
         "torch": torch_info.get("torch_version"),
         "cuda": bool(args.cuda),
         "algorithm_family": "MADRL",
-        "execution": "parallel_colab_a100" if args.max_parallel > 1 else "sequential_colab_a100",
+        "execution": args.execution_mode,
         "parallelization": {
-            "requested": args.max_parallel > 1,
-            "effective": args.max_parallel > 1,
+            "execution_mode": args.execution_mode,
             "max_parallel": args.max_parallel,
+            "algo_sequential_torch_threads": args.algo_sequential_torch_threads,
             "reason": (
-                f"Running up to {args.max_parallel} jobs concurrently on A100."
-                if args.max_parallel > 1
-                else "Sequential mode: one job at a time."
+                "algo_sequential: HAPPO→MATD3→MAAC→MASAC each with 3 parallel scenarios "
+                "and dedicated CPU+GPU, targeting ~4-5 FPS per job."
+                if args.execution_mode == "algo_sequential"
+                else f"parallel_all: up to {args.max_parallel} jobs concurrently (2 FPS per job due to shared resources)."
             ),
         },
         "active_project_environment": dict(env_info),
@@ -1058,8 +1147,32 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-parallel", default=12, type=int,
         help=(
-            "Max jobs to run concurrently. Default 12 = all 4 MADRL x 3 scenarios "
-            "simultaneously on A100-SXM4-80GB. Use 1 for sequential."
+            "Max jobs to run concurrently in parallel_all mode. "
+            "Default 12 = all 4 MADRL x 3 scenarios simultaneously on A100-SXM4-80GB. "
+            "Ignored in algo_sequential mode (always 3 per phase)."
+        ),
+    )
+    parser.add_argument(
+        "--execution-mode",
+        default="algo_sequential",
+        choices=("parallel_all", "algo_sequential"),
+        help=(
+            "parallel_all: run all 12 jobs at once (fast wall-clock but each throttled "
+            "to ~2 FPS due to CPU/GPU contention). "
+            "algo_sequential: run each algorithm's 3 scenarios together in isolation "
+            "(HAPPO→MATD3→MAAC→MASAC), giving each algorithm dedicated CPU+GPU → "
+            "~4-5 FPS per job, each at its natural speed. "
+            "Default: algo_sequential."
+        ),
+    )
+    parser.add_argument(
+        "--algo-sequential-torch-threads",
+        default=4,
+        type=int,
+        help=(
+            "Torch inter-op/intra-op threads per process in algo_sequential mode. "
+            "With 3 parallel processes on a 12-vCPU A100 Colab, 4 threads each is "
+            "the natural fit. Ignored in parallel_all mode (uses --torch-threads)."
         ),
     )
     return parser.parse_args(argv)
@@ -1136,7 +1249,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Dry run completed: {status_path}", flush=True)
         return 0
 
-    if args.max_parallel > 1:
+    if args.execution_mode == "algo_sequential":
+        overall_rc = run_algo_sequential_jobs(
+            root=root,
+            manifest=manifest,
+            status_path=status_path,
+            jobs=jobs,
+            output_root=output_root,
+            log_dir=log_dir,
+            args=args,
+        )
+    elif args.max_parallel > 1:
         overall_rc = run_parallel_jobs(
             root=root,
             manifest=manifest,
