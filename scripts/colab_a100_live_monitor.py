@@ -205,6 +205,7 @@ def _phase_sort_key(job: Mapping[str, object]) -> tuple:
 
 def print_progress(status: Mapping[str, object], root: Path) -> None:
     jobs = list(status.get("jobs", []))
+    # Running jobs only — failed jobs are shown in the stderr section.
     active: List[Mapping[str, object]] = [
         j for j in jobs if j.get("completed_at") is None and not j.get("planned_only")
     ]
@@ -218,23 +219,7 @@ def print_progress(status: Mapping[str, object], root: Path) -> None:
             if progress_path.exists():
                 active.append(job)
 
-    # Also include failed jobs so their last-known progress is shown.
-    failed_with_progress: List[Mapping[str, object]] = []
-    for job in jobs:
-        if job.get("completed_at") is None or job.get("planned_only"):
-            continue
-        if job.get("exit_code") in (None, 0) or job.get("skipped"):
-            continue
-        output_dir = job.get("output_dir")
-        if not output_dir:
-            continue
-        progress_path = path_for_job(root, str(output_dir)) / "live_progress.json"
-        if progress_path.exists() and job not in active:
-            failed_with_progress.append(job)
-
-    all_display = active + failed_with_progress
-
-    if not all_display:
+    if not active:
         print("")
         print("Progreso vivo: sin job activo todavia.")
         return
@@ -246,12 +231,13 @@ def print_progress(status: Mapping[str, object], root: Path) -> None:
     print("")
     print("Progreso, metricas y recompensas")
 
-    # Sort by phase (Phase 1 first) then algorithm then scenario.
-    all_display_sorted = sorted(all_display, key=_phase_sort_key)
+    # Sort: Phase 1 (HAPPO/MATD3/MAAC) first, then Phase 2 (MASAC);
+    # within each phase: by algo order, then by scenario (E1 < E2 < E3).
+    active_sorted = sorted(active, key=_phase_sort_key)
 
-    # Print each job with phase headers inserted at phase transitions.
-    current_phase = None
-    for job in all_display_sorted:
+    # Print each job, inserting a phase header at each phase transition.
+    current_phase: Optional[int] = None
+    for job in active_sorted:
         job_name_lower = str(job.get("name", "")).lower()
         job_phase = 0 if job_name_lower in TWO_PHASE_LIGHT else 1
 
@@ -260,12 +246,12 @@ def print_progress(status: Mapping[str, object], root: Path) -> None:
             print("")
             if job_phase == 0:
                 phase_label = " + ".join(a.upper() for a in TWO_PHASE_LIGHT)
-                n_jobs = sum(1 for j in all_display_sorted if str(j.get("name", "")).lower() in TWO_PHASE_LIGHT)
-                print(f"  ─── FASE 1: {phase_label} ({n_jobs} jobs) ────────────────────────────────────────")
+                n = sum(1 for j in active_sorted if str(j.get("name", "")).lower() in TWO_PHASE_LIGHT)
+                print(f"  ─── FASE 1: {phase_label} ({n} jobs) ────────────────────────────────────────")
             else:
                 phase_label = " + ".join(a.upper() for a in TWO_PHASE_HEAVY)
-                n_jobs = sum(1 for j in all_display_sorted if str(j.get("name", "")).lower() in TWO_PHASE_HEAVY)
-                print(f"  ─── FASE 2: {phase_label} ({n_jobs} jobs, GPU dedicado) ──────────────────────────")
+                n = sum(1 for j in active_sorted if str(j.get("name", "")).lower() in TWO_PHASE_HEAVY)
+                print(f"  ─── FASE 2: {phase_label} ({n} jobs, GPU dedicado) ──────────────────────────")
 
         name = str(job.get("name", "?")).upper()
         scenario = str(job.get("scenario", "?"))
@@ -273,10 +259,8 @@ def print_progress(status: Mapping[str, object], root: Path) -> None:
         progress_path = run_dir / "live_progress.json"
         progress = read_json(progress_path)
 
-        is_failed = job.get("completed_at") is not None and job.get("exit_code") not in (None, 0)
-        status_tag = " [FAILED]" if is_failed else ""
         print("")
-        print(f"  ── {name}/{scenario}{status_tag} ─────────────────────────────────────────────")
+        print(f"  ── {name}/{scenario} ─────────────────────────────────────────────")
 
         if not progress:
             print("  Progreso vivo aun no disponible; aparece despues del primer intervalo de pasos.")
