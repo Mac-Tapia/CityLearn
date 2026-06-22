@@ -53,15 +53,16 @@ def main() -> int:
     skip_val     = '--skip-validate'  in sys.argv
 
     citylearn, parent = find_repos()
-    validator = citylearn / 'scripts' / 'validate_notebook_syntax.py'
+    validator = citylearn / 'scripts' / 'validate_training_system.py'
 
-    # ── Step 1: validate ─────────────────────────────────────────────────────
+    # ── Step 1: full system validation ───────────────────────────────────────
     if skip_val:
         print('[push] WARNING: --skip-validate set, skipping validation.')
     else:
-        print('\n[push] Step 1 — validating notebook syntax and badge URL...')
+        print('\n[push] Step 1 — full system validation (launcher, monitor, notebook, git, tests)...')
         rc = subprocess.run(
-            [sys.executable, str(validator)], cwd=citylearn
+            [sys.executable, str(validator), '--skip-git'],  # git checked after push
+            cwd=citylearn
         ).returncode
         if rc != 0:
             print('\n[push] BLOCKED: fix the errors above before pushing.')
@@ -144,6 +145,18 @@ def main() -> int:
     if rc != 0:
         print('[push] ERROR: git push parent failed.')
         return rc
+
+    # ── Step 5: post-push git sync check ─────────────────────────────────────
+    if not dry:
+        print('\n[push] Step 5 — verifying remote branch sync...')
+        post_val = citylearn / 'scripts' / 'validate_training_system.py'
+        rc_post = subprocess.run(
+            [sys.executable, str(post_val), '--skip-tests'],
+            cwd=citylearn
+        ).returncode
+        if rc_post != 0:
+            print('[push] WARNING: post-push validation found issues — check above.')
+            return rc_post
 
     print('\n[push] Done. Colab badge now reflects the latest commit.')
     print(f'  https://colab.research.google.com/github/Mac-Tapia/CityLearn'
