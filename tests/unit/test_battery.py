@@ -194,10 +194,18 @@ class TestBattery(unittest.TestCase):
         # Charge with a known amount of energy
         self.battery.charge(10.0)
         
-        # Manually calculate expected degradation
+        # Manually calculate expected degradation using current formula (APORTE 1:
+        # C-rate factor applied; Arrhenius f_temp = 1.0 at default 25°C).
         energy_balance = self.battery.energy_balance[self.battery.time_step]
-        expected_degradation = self.battery.capacity_loss_coefficient * self.battery.capacity * abs(energy_balance) / (2 * self.battery.degraded_capacity)
-        
+        energy_flow = abs(energy_balance)
+        degraded_cap = max(self.battery.degraded_capacity, 1e-10)
+        c_rate = energy_flow / degraded_cap
+        expected_degradation = (
+            self.battery.capacity_loss_coefficient * self.battery.capacity
+            * energy_flow / (2.0 * degraded_cap)
+            * (c_rate ** 0.55)
+        )
+
         # Call the degrade method directly and compare
         actual_degradation = self.battery.degrade()
         self.assertAlmostEqual(actual_degradation, expected_degradation, places=6)

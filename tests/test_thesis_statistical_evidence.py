@@ -10,7 +10,7 @@ from generate_thesis_objective_evidence import (  # noqa: E402
     ALGORITHM_NAMES,
     algorithm_kpi_score_rows,
     cliffs_delta,
-    pairwise_statistical_rows,
+    mann_whitney_pairwise_rows as pairwise_statistical_rows,
     statistical_omnibus_rows,
     vargha_delaney_a12,
 )

@@ -1,9 +1,15 @@
 """Tests verifying sub-hour simulation support."""
 
+from pathlib import Path
 import numpy as np
 import pytest
 
 pytest.importorskip("gymnasium")
+
+_EV_DATASET = (
+    Path(__file__).resolve().parents[2]
+    / "data" / "datasets" / "citylearn_challenge_2022_phase_all_plus_evs"
+)
 
 from citylearn.base import EpisodeTracker
 from citylearn.citylearn import CityLearnEnv
@@ -180,17 +186,22 @@ def test_battery_degradation_uses_step_energy_without_extra_ratio_scaling():
     battery.reset()
     battery.charge(10.0)
 
+    energy_flow = abs(battery.energy_balance[0])
+    degraded_cap = max(battery.degraded_capacity, 1e-10)
+    c_rate = energy_flow / degraded_cap
+    # degrade() now applies C-rate factor (APORTE 1); f_temp = 1.0 at default 25°C
     expected = (
         battery.capacity_loss_coefficient
         * battery.capacity
-        * abs(battery.energy_balance[0])
-        / (2.0 * max(battery.degraded_capacity, 1e-10))
+        * energy_flow
+        / (2.0 * degraded_cap)
+        * (c_rate ** 0.55)
     )
     assert battery.degrade() == pytest.approx(expected)
 
 
 def test_env_supports_subhour_seconds_per_time_step():
-    schema = 'data/datasets/citylearn_challenge_2022_phase_all_plus_evs/schema.json'
+    schema = str(_EV_DATASET / "schema.json")
     env = CityLearnEnv(
         schema,
         central_agent=True,

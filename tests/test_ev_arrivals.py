@@ -1,15 +1,18 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
-
-from glob import glob
 
 pytest.importorskip("gymnasium")
 
 from citylearn.citylearn import CityLearnEnv
 
-
-SCHEMA_PATH = "data/datasets/citylearn_challenge_2022_phase_all_plus_evs/schema.json"
+_EV_DATASET = (
+    Path(__file__).resolve().parents[1]
+    / "data" / "datasets" / "citylearn_challenge_2022_phase_all_plus_evs"
+)
+SCHEMA_PATH = str(_EV_DATASET / "schema.json")
 
 
 def _zero_actions(env: CityLearnEnv):
@@ -17,14 +20,14 @@ def _zero_actions(env: CityLearnEnv):
 
 
 def _find_transition(from_state: int):
-    for csv_path in glob("data/datasets/citylearn_challenge_2022_phase_all_plus_evs/charger_*_*.csv"):
+    for csv_path in sorted(_EV_DATASET.glob("charger_*_*.csv")):
         df = pd.read_csv(csv_path)
         for idx in range(len(df) - 1):
             if (
                 df.loc[idx, "electric_vehicle_charger_state"] == from_state
                 and df.loc[idx + 1, "electric_vehicle_charger_state"] == 1
             ):
-                return csv_path, idx
+                return str(csv_path), idx
 
     raise AssertionError(f"No {from_state}->1 transition found in dataset.")
 
@@ -32,7 +35,7 @@ def _find_transition(from_state: int):
 @pytest.mark.parametrize("from_state", [2, 3])
 def test_ev_soc_matches_dataset_on_arrival(from_state: int):
     csv_path, transition_index = _find_transition(from_state)
-    charger_id = csv_path.split("/")[-1].replace(".csv", "")
+    charger_id = Path(csv_path).stem
 
     env = CityLearnEnv(SCHEMA_PATH, central_agent=True, random_seed=0)
     env.reset()
@@ -103,7 +106,7 @@ def test_ev_kpi_evaluation_with_evs_and_chargers():
 
 def test_ev_current_soc_overrides_arrival_estimate_when_present():
     csv_path, transition_index = _find_transition(2)
-    charger_id = csv_path.split("/")[-1].replace(".csv", "")
+    charger_id = Path(csv_path).stem
 
     env = CityLearnEnv(SCHEMA_PATH, central_agent=True, random_seed=0)
     env.reset()
