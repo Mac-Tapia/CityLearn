@@ -1111,33 +1111,37 @@ def run_two_phase_jobs(
     except AttributeError:
         vcpu_count = _os.cpu_count() or 12          # fallback (Windows/macOS)
 
-    # Thread environment: prevent numpy/scipy/MKL from spawning extra OMP threads.
-    # Without this, 9 processes × (default 4 OMP threads) = 36 threads competing
-    # for ~12-24 vCPUs → CPU thrashing → env sim stalls waiting for scheduling.
-    # With OMP_NUM_THREADS=1: each process uses exactly 1 core for numpy ops,
-    # leaving the OS free to give each Python main thread consistent CPU time.
-    _single_thread_env = {
+    vcpu_per_p1 = vcpu_count / max(len(phase1_jobs), 1)
+    vcpu_per_p2 = vcpu_count / max(len(phase2_jobs), 1)
+
+    # Thread + allocator environment applied to every subprocess:
+    # OMP_NUM_THREADS=1: prevents numpy/MKL/OpenBLAS from spawning thread pools.
+    #   Without this: 9 processes × 4 default OMP threads = 36 threads thrashing
+    #   on 12 vCPUs. With =1: 9 threads on 12 cores → near-dedicated vCPU per job.
+    # MALLOC_ARENA_MAX=2: glibc defaults to 8×cpu_count arenas → 96 arenas, each
+    #   with its own lock. With 167.1 GiB RAM and 9 concurrent processes, lock
+    #   contention on malloc/free adds latency to Python's memory allocator.
+    #   Capping at 2 arenas: 2 arenas for all 9 processes → minimal lock wait.
+    _perf_env = {
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
         "NUMEXPR_NUM_THREADS": "1",
+        "MALLOC_ARENA_MAX": "2",
     }
 
-    vcpu_per_p1 = vcpu_count / max(len(phase1_jobs), 1)
-    vcpu_per_p2 = vcpu_count / max(len(phase2_jobs), 1)
-
-    # ── PHASE 1: HAPPO + MATD3 + MAAC (9 jobs) ─────────────────────────────
+    # ── PHASE 1: HAPPO + MATD3 + MAAC (9 jobs simultaneous) ─────────────────
     algo_labels = " + ".join(a.upper() for a in TWO_PHASE_LIGHT)
     print(
         f"\n[launcher] ═══ PHASE 1/2 ({algo_labels}): "
         f"{len(phase1_jobs)} jobs x {light_threads} torch-thread(s) "
         f"| GPU ~11.6 GiB / 80 GiB "
         f"| vCPU {vcpu_count}/{len(phase1_jobs)} = {vcpu_per_p1:.1f}/job "
-        f"| OMP_NUM_THREADS=1 ═══",
+        f"| OMP=1 MALLOC_ARENA=2 ═══",
         flush=True,
     )
     p1_jobs = _patch_torch_threads(phase1_jobs, light_threads)
-    p1_jobs = [{**job, "env_overrides": _single_thread_env} for job in p1_jobs]
+    p1_jobs = [{**job, "env_overrides": _perf_env} for job in p1_jobs]
     overall_rc = run_parallel_jobs(
         root=root,
         manifest=manifest,
@@ -1158,7 +1162,7 @@ def run_two_phase_jobs(
         f"{len(phase2_jobs)} jobs x {heavy_threads} torch-threads "
         f"| GPU ~{len(phase2_jobs)*gpu_cap_gib:.0f} GiB cap / 80 GiB "
         f"| vCPU {vcpu_count}/{len(phase2_jobs)} = {vcpu_per_p2:.1f}/job "
-        f"| replay-buffer=CPU | OMP_NUM_THREADS=1 ═══",
+        f"| replay-buffer=CPU | OMP=1 MALLOC_ARENA=2 ═══",
         flush=True,
     )
     p2_jobs = _patch_torch_threads(phase2_jobs, heavy_threads)
@@ -1172,8 +1176,8 @@ def run_two_phase_jobs(
             {**job, "args": replace_arg([str(a) for a in job["args"]], patch_flag, patch_val)}
             for job in p2_jobs
         ]
-    # Same thread environment: prevent numpy from stealing vCPUs across MASAC processes.
-    p2_jobs = [{**job, "env_overrides": _single_thread_env} for job in p2_jobs]
+    # Same thread + allocator environment: prevent numpy from stealing vCPUs across MASAC processes.
+    p2_jobs = [{**job, "env_overrides": _perf_env} for job in p2_jobs]
     rc2 = run_parallel_jobs(
         root=root,
         manifest=manifest,
@@ -1228,8 +1232,8 @@ def make_manifest(
             "two_phase_masac_cuda_fraction": args.two_phase_masac_cuda_fraction,
             "algo_sequential_torch_threads": args.algo_sequential_torch_threads,
             "reason": (
-                "two_phase: Phase1=HAPPO+MATD3+MAAC x3 (9 parallel, ~2-3 FPS/job, ~11 GiB GPU); "
-                "Phase2=MASAC x3 (dedicated A100, 4 vCPU/job, ~4-5 FPS/job, replay-buffer on CPU)."
+                "two_phase: Phase1=HAPPO+MATD3+MAAC x3 (9 parallel, OMP=1+MALLOC_ARENA=2, ~3-5 FPS/job, ~11 GiB GPU); "
+                "Phase2=MASAC x3 (dedicated A100, 4 vCPU/job, OMP=1, ~4-7 FPS/job, replay-buffer on CPU)."
                 if args.execution_mode == "two_phase"
                 else (
                     "algo_sequential: HAPPO→MATD3→MAAC→MASAC one group at a time (3 parallel per phase)."
