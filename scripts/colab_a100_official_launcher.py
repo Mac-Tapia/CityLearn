@@ -1037,37 +1037,59 @@ def run_two_phase_jobs(
     log_dir: Path,
     args: argparse.Namespace,
 ) -> int:
-    """Two-phase execution for maximum per-algorithm throughput.
+    """Two-phase execution optimised for NVIDIA A100-SXM4-80GB (80 GiB VRAM).
 
-    Phase 1 — HAPPO×3 + MATD3×3 + MAAC×3 (9 jobs in parallel)
-    ────────────────────────────────────────────────────────────
-    GPU load: ~11 GiB total (HAPPO~1 + MATD3~2 + MAAC~0.7 per job × 3).
-    CPU:      12 vCPUs / 9 jobs ≈ 1.3 vCPU/job.
-    Torch threads: --two-phase-light-torch-threads (default 1, avoids contention).
-    Expected FPS: 2-3 FPS/job (env sim is single-threaded Python; limited by vCPU share).
+    Phase 1 — HAPPO×3 + MATD3×3 + MAAC×3  (9 jobs in parallel)
+    ─────────────────────────────────────────────────────────────
+    Hardware budget (A100-SXM4-80GB):
+      GPU: ~11.6 GiB / 80 GiB = 14.6%  (HAPPO~1.05 + MATD3~2.14 + MAAC~0.69 per job × 3)
+      GPU free: ~68.4 GiB → zero contention, each algo gets full bandwidth for updates.
+    CPU:  12 vCPUs / 9 jobs = 1.33 vCPU/job.
+    Torch threads: --two-phase-light-torch-threads (default 1).
+      Rationale: env sim is single-threaded Python; extra Torch threads compete for
+      the same ~1.3 vCPU → setting 1 thread avoids context-switch overhead.
+    Expected FPS: 2-3 FPS/job  (bottleneck = CityLearn Python env, not GPU).
+    Expected time: 50-73 min/episode.
 
-    Phase 2 — MASAC×3 (3 jobs, dedicated A100)
-    ───────────────────────────────────────────
-    GPU load: ~21 GiB total (~7 GiB/job, replay buffer kept on CPU RAM).
-    CPU:      12 vCPUs / 3 jobs = 4 vCPU/job → consistent scheduling → 4-5 FPS.
+    Phase 2 — MASAC×3  (3 jobs, dedicated A100-SXM4-80GB)
+    ───────────────────────────────────────────────────────
+    Hardware budget (A100-SXM4-80GB):
+      GPU: ~62.4 GiB / 80 GiB = 78%  (3 × cuda-fraction × 80 GiB, capped per process).
+      GPU free: ~17.6 GiB headroom → prevents OOM from PyTorch caching.
+      RAM: ~41.2 GiB / 83 GiB = 49.6%  (3 × 13.72 GiB replay buffer on CPU).
+    CPU: 12 vCPUs / 3 jobs = 4 vCPU/job → 4× more scheduling time than 12-parallel.
     Torch threads: --two-phase-heavy-torch-threads (default 4, matches 4 vCPU/job).
-    Replay buffer: forced to CPU (41 GiB RAM / 83 GiB available — safe).
-    QMIX hidden dims: preserved at full size (no contention from other algos).
+      QMIX batch matrix ops benefit from 4 intra-op threads.
+    cuda-memory-fraction: --two-phase-masac-cuda-fraction (default 0.26).
+      Rationale: with 3 MASAC processes and fraction=0.92 (default), each process
+      thinks it can cache up to 73.6 GiB → 3 × 73.6 GiB race on 80 GiB GPU → OOM.
+      Capping at 0.26 × 80 = 20.8 GiB/process → 3 × 20.8 = 62.4 GiB total → safe.
+      The actual model+training tensors are <2 GiB; the cap prevents PyTorch
+      from caching stale allocations up to the full A100 capacity.
+    Replay buffer: forced to CPU RAM (41 GiB safe).
+      With buffer on GPU: 13.72 GiB × 3 + model = ~62+ GiB → exceeds cap, causes OOM.
+    Expected FPS: 4-5 FPS/job (4 vCPU/job → consistent OS scheduling).
+    Expected time: 30-37 min/episode (vs 73 min in 12-parallel baseline).
 
-    The two-phase split maximises GPU availability for each group while
-    giving MASAC 4× more vCPU per process than the 12-parallel baseline.
+    Note on 12 FPS target
+    ─────────────────────
+    12 FPS would require 1 job alone with all 12 vCPUs (env sim is GIL-bound, single
+    Python thread). With 3 MASAC jobs simultaneous, 4-5 FPS is the realistic maximum.
+    The two-phase approach is the best balance of total wall-clock time vs FPS/job.
     """
     phase1_jobs = [j for j in jobs if j["name"] in TWO_PHASE_LIGHT]
     phase2_jobs = [j for j in jobs if j["name"] in TWO_PHASE_HEAVY]
 
     light_threads = int(args.two_phase_light_torch_threads)
     heavy_threads = int(args.two_phase_heavy_torch_threads)
+    masac_cuda_fraction = float(args.two_phase_masac_cuda_fraction)
 
-    # ── PHASE 1 ─────────────────────────────────────────────────────────────
-    algo_labels = ", ".join(a.upper() for a in TWO_PHASE_LIGHT)
+    # ── PHASE 1: HAPPO + MATD3 + MAAC (9 jobs) ─────────────────────────────
+    algo_labels = " + ".join(a.upper() for a in TWO_PHASE_LIGHT)
     print(
-        f"\n[launcher] ═══ PHASE 1/2: {algo_labels} "
-        f"({len(phase1_jobs)} jobs x {light_threads} torch-threads) ═══",
+        f"\n[launcher] ═══ PHASE 1/2 ({algo_labels}): "
+        f"{len(phase1_jobs)} jobs x {light_threads} torch-thread(s) "
+        f"| GPU ~11.6 GiB / 80 GiB | CPU 1.3 vCPU/job ═══",
         flush=True,
     )
     p1_jobs = _patch_torch_threads(phase1_jobs, light_threads)
@@ -1084,21 +1106,26 @@ def run_two_phase_jobs(
     if overall_rc != 0:
         print("[launcher] Phase 1 had failures — proceeding to Phase 2.", flush=True)
 
-    # ── PHASE 2 ─────────────────────────────────────────────────────────────
+    # ── PHASE 2: MASAC (3 jobs, dedicated A100) ─────────────────────────────
+    gpu_cap_gib = masac_cuda_fraction * 80.0
     print(
-        f"\n[launcher] ═══ PHASE 2/2: MASAC "
-        f"({len(phase2_jobs)} jobs x {heavy_threads} torch-threads, "
-        f"replay-buffer=CPU, dedicated A100) ═══",
+        f"\n[launcher] ═══ PHASE 2/2 (MASAC): "
+        f"{len(phase2_jobs)} jobs x {heavy_threads} torch-threads "
+        f"| GPU ~{3*gpu_cap_gib:.0f} GiB cap / 80 GiB "
+        f"| CPU 4 vCPU/job | replay-buffer=CPU ═══",
         flush=True,
     )
-    # Keep replay buffer in CPU RAM: prevents 3 × 13.72 GiB GPU race condition.
     p2_jobs = _patch_torch_threads(phase2_jobs, heavy_threads)
-    p2_jobs = [
-        {**job, "args": replace_arg(
-            [str(a) for a in job["args"]], "--masac-preload-batch-device", "cpu"
-        )}
-        for job in p2_jobs
-    ]
+    for patch_flag, patch_val in [
+        # Replay buffer stays in CPU RAM: model+training tensors fit GPU cap.
+        ("--masac-preload-batch-device", "cpu"),
+        # Cap GPU allocation per process to prevent 3-way caching OOM.
+        ("--cuda-memory-fraction", str(masac_cuda_fraction)),
+    ]:
+        p2_jobs = [
+            {**job, "args": replace_arg([str(a) for a in job["args"]], patch_flag, patch_val)}
+            for job in p2_jobs
+        ]
     rc2 = run_parallel_jobs(
         root=root,
         manifest=manifest,
@@ -1150,6 +1177,7 @@ def make_manifest(
             "max_parallel": args.max_parallel,
             "two_phase_light_torch_threads": args.two_phase_light_torch_threads,
             "two_phase_heavy_torch_threads": args.two_phase_heavy_torch_threads,
+            "two_phase_masac_cuda_fraction": args.two_phase_masac_cuda_fraction,
             "algo_sequential_torch_threads": args.algo_sequential_torch_threads,
             "reason": (
                 "two_phase: Phase1=HAPPO+MATD3+MAAC x3 (9 parallel, ~2-3 FPS/job, ~11 GiB GPU); "
@@ -1304,6 +1332,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "Torch threads per process for Phase 2 (MASAC). "
             "3 jobs share 12 vCPUs → 4 vCPU/job. QMIX benefits from 4 threads "
             "for batch matrix ops. Default: 4."
+        ),
+    )
+    parser.add_argument(
+        "--two-phase-masac-cuda-fraction",
+        default=0.26,
+        type=float,
+        help=(
+            "CUDA memory fraction per MASAC process in Phase 2 (two_phase mode). "
+            "On A100-SXM4-80GB: 0.26 × 80 GiB = 20.8 GiB/process; "
+            "3 processes × 20.8 GiB = 62.4 GiB total (17.6 GiB margin on 80 GiB). "
+            "Prevents PyTorch caching allocator from racing across 3 processes "
+            "when the full 80 GiB appears free. Default: 0.26."
         ),
     )
     parser.add_argument(
