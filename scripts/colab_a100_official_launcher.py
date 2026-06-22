@@ -981,6 +981,21 @@ def run_algo_sequential_jobs(
         # Give each process more torch threads since only 3 compete.
         phase_jobs = _patch_torch_threads(group, phase_threads)
 
+        # MASAC alone on the A100: with `auto` preload, each of the 3 processes
+        # would try to load its 13.72 GiB replay buffer to GPU (total ~41 GiB).
+        # During concurrent QMIX updates the remaining ~39 GiB is tight for 3×
+        # model+gradient+optimizer state → race condition OOM.  Keeping the
+        # buffer in CPU RAM (13.72 GiB × 3 = 41 GiB, well within 83 GiB Colab
+        # RAM) reduces GPU to ~7 GiB per job (21 GiB total) → zero OOM risk.
+        if algo == "masac":
+            phase_jobs = [
+                {**job, "args": replace_arg(
+                    [str(a) for a in job["args"]],
+                    "--masac-preload-batch-device", "cpu",
+                )}
+                for job in phase_jobs
+            ]
+
         rc = run_parallel_jobs(
             root=root,
             manifest=manifest,
