@@ -28,6 +28,13 @@ ALGORITHMS = ("happo", "masac", "matd3", "maac")
 CITYLEARN_V2_BENCHMARKS = ("PPO", "SAC", "A2C")
 SCENARIOS = ("E1", "E2", "E3")
 HEAVY_ALGORITHMS = {"masac", "maac"}
+
+# two_phase execution: Phase 1 = light algorithms in parallel (9 jobs),
+# Phase 2 = MASAC alone (3 jobs with dedicated A100 GPU+CPU).
+# MAAC is grouped with light algorithms: its GPU footprint (~0.7 GiB/job) is
+# negligible and its attention mechanism is far lighter than MASAC's QMIX replay.
+TWO_PHASE_LIGHT = ("happo", "matd3", "maac")  # Phase 1: 9 jobs simultaneous
+TWO_PHASE_HEAVY = ("masac",)                  # Phase 2: 3 jobs, dedicated GPU
 DEFAULT_SCHEMA = "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json"
 DEFAULT_OUTPUT_ROOT = "outputs/colab_madrl_a100_official"
 REFERENCE_SOURCES = [
@@ -1020,6 +1027,94 @@ def run_algo_sequential_jobs(
     return overall_rc
 
 
+def run_two_phase_jobs(
+    *,
+    root: Path,
+    manifest: Dict[str, object],
+    status_path: Path,
+    jobs: List[Dict[str, object]],
+    output_root: Path,
+    log_dir: Path,
+    args: argparse.Namespace,
+) -> int:
+    """Two-phase execution for maximum per-algorithm throughput.
+
+    Phase 1 — HAPPO×3 + MATD3×3 + MAAC×3 (9 jobs in parallel)
+    ────────────────────────────────────────────────────────────
+    GPU load: ~11 GiB total (HAPPO~1 + MATD3~2 + MAAC~0.7 per job × 3).
+    CPU:      12 vCPUs / 9 jobs ≈ 1.3 vCPU/job.
+    Torch threads: --two-phase-light-torch-threads (default 1, avoids contention).
+    Expected FPS: 2-3 FPS/job (env sim is single-threaded Python; limited by vCPU share).
+
+    Phase 2 — MASAC×3 (3 jobs, dedicated A100)
+    ───────────────────────────────────────────
+    GPU load: ~21 GiB total (~7 GiB/job, replay buffer kept on CPU RAM).
+    CPU:      12 vCPUs / 3 jobs = 4 vCPU/job → consistent scheduling → 4-5 FPS.
+    Torch threads: --two-phase-heavy-torch-threads (default 4, matches 4 vCPU/job).
+    Replay buffer: forced to CPU (41 GiB RAM / 83 GiB available — safe).
+    QMIX hidden dims: preserved at full size (no contention from other algos).
+
+    The two-phase split maximises GPU availability for each group while
+    giving MASAC 4× more vCPU per process than the 12-parallel baseline.
+    """
+    phase1_jobs = [j for j in jobs if j["name"] in TWO_PHASE_LIGHT]
+    phase2_jobs = [j for j in jobs if j["name"] in TWO_PHASE_HEAVY]
+
+    light_threads = int(args.two_phase_light_torch_threads)
+    heavy_threads = int(args.two_phase_heavy_torch_threads)
+
+    # ── PHASE 1 ─────────────────────────────────────────────────────────────
+    algo_labels = ", ".join(a.upper() for a in TWO_PHASE_LIGHT)
+    print(
+        f"\n[launcher] ═══ PHASE 1/2: {algo_labels} "
+        f"({len(phase1_jobs)} jobs x {light_threads} torch-threads) ═══",
+        flush=True,
+    )
+    p1_jobs = _patch_torch_threads(phase1_jobs, light_threads)
+    overall_rc = run_parallel_jobs(
+        root=root,
+        manifest=manifest,
+        status_path=status_path,
+        jobs=p1_jobs,
+        output_root=output_root,
+        log_dir=log_dir,
+        args=args,
+        max_parallel_override=len(p1_jobs),
+    )
+    if overall_rc != 0:
+        print("[launcher] Phase 1 had failures — proceeding to Phase 2.", flush=True)
+
+    # ── PHASE 2 ─────────────────────────────────────────────────────────────
+    print(
+        f"\n[launcher] ═══ PHASE 2/2: MASAC "
+        f"({len(phase2_jobs)} jobs x {heavy_threads} torch-threads, "
+        f"replay-buffer=CPU, dedicated A100) ═══",
+        flush=True,
+    )
+    # Keep replay buffer in CPU RAM: prevents 3 × 13.72 GiB GPU race condition.
+    p2_jobs = _patch_torch_threads(phase2_jobs, heavy_threads)
+    p2_jobs = [
+        {**job, "args": replace_arg(
+            [str(a) for a in job["args"]], "--masac-preload-batch-device", "cpu"
+        )}
+        for job in p2_jobs
+    ]
+    rc2 = run_parallel_jobs(
+        root=root,
+        manifest=manifest,
+        status_path=status_path,
+        jobs=p2_jobs,
+        output_root=output_root,
+        log_dir=log_dir,
+        args=args,
+        max_parallel_override=len(p2_jobs),
+    )
+    if rc2 != 0:
+        overall_rc = rc2
+
+    return overall_rc
+
+
 def make_manifest(
     *,
     args: argparse.Namespace,
@@ -1053,12 +1148,18 @@ def make_manifest(
         "parallelization": {
             "execution_mode": args.execution_mode,
             "max_parallel": args.max_parallel,
+            "two_phase_light_torch_threads": args.two_phase_light_torch_threads,
+            "two_phase_heavy_torch_threads": args.two_phase_heavy_torch_threads,
             "algo_sequential_torch_threads": args.algo_sequential_torch_threads,
             "reason": (
-                "algo_sequential: HAPPO→MATD3→MAAC→MASAC each with 3 parallel scenarios "
-                "and dedicated CPU+GPU, targeting ~4-5 FPS per job."
-                if args.execution_mode == "algo_sequential"
-                else f"parallel_all: up to {args.max_parallel} jobs concurrently (2 FPS per job due to shared resources)."
+                "two_phase: Phase1=HAPPO+MATD3+MAAC x3 (9 parallel, ~2-3 FPS/job, ~11 GiB GPU); "
+                "Phase2=MASAC x3 (dedicated A100, 4 vCPU/job, ~4-5 FPS/job, replay-buffer on CPU)."
+                if args.execution_mode == "two_phase"
+                else (
+                    "algo_sequential: HAPPO→MATD3→MAAC→MASAC one group at a time (3 parallel per phase)."
+                    if args.execution_mode == "algo_sequential"
+                    else f"parallel_all: all 12 jobs simultaneously (~2 FPS/job, high GPU contention)."
+                )
             ),
         },
         "active_project_environment": dict(env_info),
@@ -1173,14 +1274,36 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--execution-mode",
-        default="parallel_all",
-        choices=("parallel_all", "algo_sequential"),
+        default="two_phase",
+        choices=("parallel_all", "two_phase", "algo_sequential"),
         help=(
-            "parallel_all (default): run all 12 jobs simultaneously — "
-            "4 MADRL algorithms × 3 scenarios at the same time on the A100. "
-            "algo_sequential: run each algorithm's 3 scenarios together in isolation "
-            "(HAPPO→MATD3→MAAC→MASAC), giving each algorithm dedicated CPU+GPU → "
-            "~4-5 FPS per job but algorithms run one group at a time."
+            "two_phase (default): Phase 1 = HAPPO+MATD3+MAAC × 3 scenarios (9 jobs "
+            "simultaneous, ~11 GiB GPU total, 2-3 FPS/job); Phase 2 = MASAC × 3 "
+            "scenarios (3 jobs, dedicated A100, replay-buffer on CPU, 4-5 FPS/job). "
+            "parallel_all: all 12 jobs simultaneously (2 FPS/job, 74 GiB GPU). "
+            "algo_sequential: HAPPO→MATD3→MAAC→MASAC one algorithm at a time "
+            "(3 jobs per phase, 4-5 FPS/job, max GPU per phase)."
+        ),
+    )
+    parser.add_argument(
+        "--two-phase-light-torch-threads",
+        default=1,
+        type=int,
+        help=(
+            "Torch threads per process for Phase 1 (HAPPO/MATD3/MAAC). "
+            "9 jobs share 12 vCPUs → 1.3 vCPU/job. Setting torch-threads=1 "
+            "avoids Torch competing with the CityLearn env simulation thread. "
+            "Default: 1."
+        ),
+    )
+    parser.add_argument(
+        "--two-phase-heavy-torch-threads",
+        default=4,
+        type=int,
+        help=(
+            "Torch threads per process for Phase 2 (MASAC). "
+            "3 jobs share 12 vCPUs → 4 vCPU/job. QMIX benefits from 4 threads "
+            "for batch matrix ops. Default: 4."
         ),
     )
     parser.add_argument(
@@ -1188,9 +1311,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=4,
         type=int,
         help=(
-            "Torch inter-op/intra-op threads per process in algo_sequential mode. "
-            "With 3 parallel processes on a 12-vCPU A100 Colab, 4 threads each is "
-            "the natural fit. Ignored in parallel_all mode (uses --torch-threads)."
+            "Torch threads per process in algo_sequential mode (3 jobs/phase). "
+            "With 4 vCPU/job on a 12-vCPU A100 Colab, 4 threads is the natural fit. "
+            "Ignored in two_phase and parallel_all modes."
         ),
     )
     return parser.parse_args(argv)
@@ -1267,7 +1390,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Dry run completed: {status_path}", flush=True)
         return 0
 
-    if args.execution_mode == "algo_sequential":
+    if args.execution_mode == "two_phase":
+        overall_rc = run_two_phase_jobs(
+            root=root,
+            manifest=manifest,
+            status_path=status_path,
+            jobs=jobs,
+            output_root=output_root,
+            log_dir=log_dir,
+            args=args,
+        )
+    elif args.execution_mode == "algo_sequential":
         overall_rc = run_algo_sequential_jobs(
             root=root,
             manifest=manifest,
