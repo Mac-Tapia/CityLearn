@@ -469,7 +469,7 @@ def build_jobs(args: argparse.Namespace, root: Path, output_root: Path, schema_a
                     "--actor-sample-times",
                     str(args.masac_actor_sample_times),
                     "--masac-preload-batch-device",
-                    args.masac_preload_batch_device,
+                    args.masac_preload_batch_device,  # default="cuda" → FS: GPU VRAM per-algorithm
                     "--actor-lr",
                     "3e-4",
                     "--critic-lr",
@@ -1023,17 +1023,15 @@ def run_algo_sequential_jobs(
         # Give each process more torch threads since only 3 compete.
         phase_jobs = _patch_torch_threads(group, phase_threads)
 
-        # MASAC alone on the A100: with `auto` preload, each of the 3 processes
-        # would try to load its 13.72 GiB replay buffer to GPU (total ~41 GiB).
-        # During concurrent QMIX updates the remaining ~39 GiB is tight for 3×
-        # model+gradient+optimizer state → race condition OOM.  Keeping the
-        # buffer in CPU RAM (13.72 GiB × 3 = 41 GiB = 24.6% of 167.1 GiB Colab
-        # RAM) reduces GPU to ~7 GiB per job (21 GiB total) → zero OOM risk.
+        # MASAC: FS = GPU VRAM (GpuBackedNdArray float32, ~10.28 GiB/job).
+        # In algo_sequential mode, only 3 MASAC jobs share the A100 → no Phase-1 overlap.
+        # GPU: 3 × (10.28 buffer + 0.9 model) ≈ 33.5 GiB / 80 GiB = 42%. Safe.
+        # Job args already set preload-batch-device=cuda; patch cuda_fraction here.
         if algo == "masac":
             phase_jobs = [
                 {**job, "args": replace_arg(
                     [str(a) for a in job["args"]],
-                    "--masac-preload-batch-device", "cpu",
+                    "--cuda-memory-fraction", "0.30",  # 24 GiB/job, covers buffer+model
                 )}
                 for job in phase_jobs
             ]
@@ -1093,9 +1091,9 @@ def run_two_phase_jobs(
     Phase 2 — MASAC×3  (3 jobs, dedicated A100-SXM4-80GB)
     ───────────────────────────────────────────────────────
     Hardware budget (A100-SXM4-80GB + 167.1 GiB RAM, a2-ultragpu-1g spec):
-      GPU: ~62.4 GiB / 80 GiB = 78%  (3 × cuda-fraction × 80 GiB, capped per process).
-      GPU free: ~17.6 GiB headroom → prevents OOM from PyTorch caching.
-      RAM: ~41.2 GiB / 167.1 GiB = 24.6%  (3 × 13.72 GiB replay buffer on CPU).
+      GPU: 3 × (10.28 GiB buffer + 0.9 GiB model) = ~33.5 GiB / 80 GiB = 42%.
+      GPU cap: cuda-fraction=0.26 → 20.8 GiB/process; covers buffer (10.28) + model + overhead.
+      RAM: ~6 GiB / 167.1 GiB = 3.6% (MASAC buffer on GPU VRAM, not RAM).
     CPU: 12 vCPUs / 3 jobs = 4 vCPU/job → 4× more scheduling time than 12-parallel.
     Torch threads: --two-phase-heavy-torch-threads (default 4, matches 4 vCPU/job).
       QMIX batch matrix ops benefit from 4 intra-op threads.
@@ -1103,10 +1101,8 @@ def run_two_phase_jobs(
       Rationale: with 3 MASAC processes and fraction=0.92 (default), each process
       thinks it can cache up to 73.6 GiB → 3 × 73.6 GiB race on 80 GiB GPU → OOM.
       Capping at 0.26 × 80 = 20.8 GiB/process → 3 × 20.8 = 62.4 GiB total → safe.
-      The actual model+training tensors are <2 GiB; the cap prevents PyTorch
-      from caching stale allocations up to the full A100 capacity.
-    Replay buffer: forced to CPU RAM (41 GiB = 24.6% of 167.1 GiB — very safe).
-      With buffer on GPU: 13.72 GiB × 3 + model = ~62+ GiB → exceeds cap, causes OOM.
+    Replay buffer: FS=GPU VRAM (GpuBackedNdArray float32, 15 ep = 10.28 GiB/job).
+      Libera 41 GiB de RAM (era float64 en RAM). preload=cuda: zero-copy desde GPU.
     Expected FPS: 4-5 FPS/job (4 vCPU/job → consistent OS scheduling).
     Expected time: 30-37 min/episode (vs 73 min in 12-parallel baseline).
 
@@ -1189,14 +1185,13 @@ def run_two_phase_jobs(
         f"{len(phase2_jobs)} jobs x {heavy_threads} torch-threads "
         f"| GPU ~{len(phase2_jobs)*gpu_cap_gib:.0f} GiB cap / 80 GiB "
         f"| vCPU {vcpu_count}/{len(phase2_jobs)} = {vcpu_per_p2:.1f}/job "
-        f"| replay-buffer=CPU | OMP=1 MALLOC_ARENA=2 ═══",
+        f"| replay-buffer=GPU-VRAM (GpuBackedNdArray float32) | OMP=1 MALLOC_ARENA=2 ═══",
         flush=True,
     )
     p2_jobs = _patch_torch_threads(phase2_jobs, heavy_threads)
     for patch_flag, patch_val in [
-        # Replay buffer stays in CPU RAM: model+training tensors fit GPU cap.
-        ("--masac-preload-batch-device", "cpu"),
         # Cap GPU allocation per process to prevent 3-way caching OOM.
+        # Job args already set preload-batch-device=cuda (GPU VRAM FS for MASAC).
         ("--cuda-memory-fraction", str(masac_cuda_fraction)),
     ]:
         p2_jobs = [
@@ -1504,7 +1499,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--masac-rnn-hidden-dim", default=128, type=int)       # balanced (256 uses more VRAM with 3 concurrent)
     parser.add_argument("--masac-qmix-hidden-dim", default=128, type=int)      # was 128
     parser.add_argument("--masac-hyper-hidden-dim", default=256, type=int)     # was 256
-    parser.add_argument("--masac-preload-batch-device", default="auto", choices=("auto", "cuda", "cpu"))
+    parser.add_argument(
+        "--masac-preload-batch-device", default="cuda", choices=("auto", "cuda", "cpu"),
+        help="FS strategy para buffer MASAC: cuda=GPU VRAM (GpuBackedNdArray float32, default), "
+             "cpu=RAM sistema (compatibilidad), auto=decide segun --masac-preload-batch-device.",
+    )
     #
     # MATD3  — off-policy TD3  | FS: SSD local /content/ (DiskBackedNdArray memmap)
     #   buffer_size=400K → 4.8 GiB on SSD × 3 = 14.4 GiB (SSD 235 GB, no RAM cost)
