@@ -9,6 +9,7 @@ import torch
 from torch.autograd import Variable
 
 from citylearn_v3_training_common import (
+    count_completed_episodes,
     CityLearnMAACVecEnv,
     NoOpLogger,
     add_common_citylearn_args,
@@ -80,7 +81,32 @@ def main() -> int:
 
     output_dir = resolve_output_dir(args.output_dir, "maac", args.scenario, args.seed)
     artifact_dirs = ensure_artifact_layout(output_dir)
+
+    # ── Checkpoint-resume ─────────────────────────────────────────────────────
+    _completed = count_completed_episodes(output_dir)
+    _ckpt_dir  = artifact_dirs["checkpoints"]
+    # MAAC saves checkpoint_episode_N.pt — find the highest N
+    _maac_ckpts = sorted(_ckpt_dir.glob("checkpoint_episode_*.pt"), key=lambda p: p.stat().st_mtime)
+    _maac_ckpt  = _maac_ckpts[-1] if _maac_ckpts else None
+    _remaining_episodes = max(1, args.episodes - _completed)
+    _episode_offset = _completed
+    if _completed > 0 and _maac_ckpt is not None:
+        print(
+            f"[MAAC/{args.scenario}] Resuming from episode {_completed} "
+            f"({_remaining_episodes} remaining). Checkpoint: {_maac_ckpt.name}",
+            flush=True,
+        )
+    elif _completed > 0:
+        print(
+            f"[MAAC/{args.scenario}] {_completed} episodes but no checkpoint — "
+            f"starting fresh.",
+            flush=True,
+        )
+        _episode_offset = 0
+        _maac_ckpt = None
+    # ─────────────────────────────────────────────────────────────────────────
     env = CityLearnMAACVecEnv(
+        episode_offset=_episode_offset,
         schema_path=args.schema_path,
         scenario=args.scenario,
         seed=args.seed,
@@ -115,17 +141,22 @@ def main() -> int:
             "or reduce action bins."
         )
 
-    model = AttentionSAC.init_from_env(
-        env,
-        tau=args.tau,
-        pi_lr=args.pi_lr,
-        q_lr=args.q_lr,
-        gamma=args.gamma,
-        pol_hidden_dim=args.hidden_size,
-        critic_hidden_dim=args.hidden_size,
-        attend_heads=args.attend_heads,
-        reward_scale=args.reward_scale,
-    )
+    if _maac_ckpt is not None:
+        model = AttentionSAC.init_from_save(_maac_ckpt)
+        model.prep_rollouts(device="cuda" if torch.cuda.is_available() else "cpu")
+        print(f"[MAAC/{args.scenario}] Loaded checkpoint: {_maac_ckpt.name}", flush=True)
+    else:
+        model = AttentionSAC.init_from_env(
+            env,
+            tau=args.tau,
+            pi_lr=args.pi_lr,
+            q_lr=args.q_lr,
+            gamma=args.gamma,
+            pol_hidden_dim=args.hidden_size,
+            critic_hidden_dim=args.hidden_size,
+            attend_heads=args.attend_heads,
+            reward_scale=args.reward_scale,
+        )
     finite_optimizer_guard = install_finite_optimizer_step_guard(
         [
             {
@@ -195,7 +226,7 @@ def main() -> int:
             initial_stage="maac_backend_starting",
             note="MAAC backend is collecting transitions or updating attention critics and policies.",
         )
-        for episode in range(args.episodes):
+        for episode in range(_remaining_episodes):
             obs = env.reset()
             model.prep_rollouts(device="gpu" if use_gpu else "cpu")
 
@@ -227,7 +258,7 @@ def main() -> int:
                 if np.all(dones):
                     break
 
-            model.save(artifact_dirs["checkpoints"] / f"checkpoint_episode_{episode + 1}.pt")
+            model.save(artifact_dirs["checkpoints"] / f"checkpoint_episode_{episode + _episode_offset + 1}.pt")
 
         model.prep_rollouts(device="cpu")
         try:

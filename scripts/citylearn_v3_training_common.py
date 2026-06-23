@@ -32,6 +32,65 @@ _CSV_CACHE_DIR = PROJECT_ROOT / "outputs" / "dataset_cache"
 DATA_DIR_NAME = "data"
 CHECKPOINT_DIR_NAME = "checkpoints"
 FIGURES_DIR_NAME = "figures"
+
+
+# ── Checkpoint-resume helpers ─────────────────────────────────────────────
+def count_completed_episodes(output_dir: Path) -> int:
+    """Count episodes that finished in a previous run from timeseries.csv."""
+    for candidate in (
+        output_dir / "data" / "timeseries.csv",
+        output_dir / "timeseries.csv",
+    ):
+        if not candidate.exists():
+            continue
+        try:
+            import csv as _csv2
+            done_eps: set = set()
+            with candidate.open(newline="", encoding="utf-8") as _f:
+                for _row in _csv2.DictReader(_f):
+                    if str(_row.get("all_done", "")).lower() in ("true", "1", "yes"):
+                        _ep = _row.get("episode")
+                        if _ep is not None:
+                            try:
+                                done_eps.add(int(float(_ep)))
+                            except (ValueError, TypeError):
+                                pass
+            return len(done_eps)
+        except Exception:
+            return 0
+    return 0
+
+
+def find_latest_harl_models_dir(checkpoint_dir: Path) -> "Optional[Path]":
+    """Return the most-recently-modified HARL models/ dir with actor_agent0.pt."""
+    if not checkpoint_dir.exists():
+        return None
+    candidates = sorted(
+        (p for p in checkpoint_dir.rglob("actor_agent0.pt") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+    )
+    return candidates[-1].parent if candidates else None
+
+
+def find_matd3_models_dir(checkpoint_dir: Path) -> "Optional[Path]":
+    """Return the MATD3 off-policy models dir if any actor.pt files exist."""
+    models_dir = checkpoint_dir / "offpolicy_run" / "models"
+    if models_dir.exists() and any(models_dir.rglob("actor.pt")):
+        return models_dir
+    return None
+
+
+def _read_csv_rows(path: Path) -> "List[Dict[str, object]]":
+    """Read all rows from a CSV as a list of dicts; returns [] on any error."""
+    if not path.exists():
+        return []
+    try:
+        import csv as _csv2
+        with path.open(newline="", encoding="utf-8") as _f:
+            return list(_csv2.DictReader(_f))
+    except Exception:
+        return []
+
 TABLES_DIR_NAME = "tables"
 SPACE_BOUND = 1.0e6
 
@@ -2283,6 +2342,16 @@ def write_training_artifacts(
 
     timeseries_rows = list(getattr(adapter, "timeseries_records", [])) if adapter is not None else []
     trace_rows = list(getattr(adapter, "trace_records", [])) if adapter is not None else []
+    # If this is a resumed run (global_step started > 0), merge old CSV rows so
+    # the final CSV covers all episodes (old + new) in one file.
+    _first_gs = int(float(timeseries_rows[0].get("global_step", 0) or 0)) if timeseries_rows else 0
+    if _first_gs > 0:
+        _old_ts = _read_csv_rows(data_dir / "timeseries.csv")
+        if _old_ts:
+            timeseries_rows = _old_ts + list(timeseries_rows)
+        _old_tr = _read_csv_rows(data_dir / "trace.csv")
+        if _old_tr:
+            trace_rows = _old_tr + list(trace_rows)
     episode_summaries = _episode_summaries(timeseries_rows)
     citylearn_kpi_frame_rows = _citylearn_kpi_frame_rows(candidate)
     expected_episode_time_steps = _as_int(getattr(args, "episode_time_steps", None))
@@ -2722,6 +2791,7 @@ class CityLearnV3BackendAdapter:
         trace_record_interval: int = 1,
         trace_detail: str = "full",
         normalize_observations: bool = True,
+        episode_offset: int = 0,
     ):
         ensure_project_paths()
         from citylearn.v3 import make_citylearn_v3_env, make_citylearn_v3_project_env
@@ -2875,11 +2945,12 @@ class CityLearnV3BackendAdapter:
         self._live_progress_lock = threading.Lock()
 
         self._last_observations: Dict[str, np.ndarray] = {}
-        self.global_step = 0
+        _ep_off = max(0, int(episode_offset))
+        self.global_step = _ep_off * self.episode_time_steps
         self.reset_count = 0
         self.trace_records: List[Dict[str, object]] = []
         self.timeseries_records: List[Dict[str, object]] = []
-        self.completed_episode_count = 0
+        self.completed_episode_count = _ep_off
         self.last_completed_episode: Optional[int] = None
         self.last_completed_global_step: Optional[int] = None
         self.last_completed_time_step: Optional[int] = None

@@ -8,6 +8,8 @@ import sys
 import torch
 
 from citylearn_v3_training_common import (
+    count_completed_episodes,
+    find_latest_harl_models_dir,
     CityLearnHARLEnv,
     FiniteTensorBoardWriter,
     add_common_citylearn_args,
@@ -69,11 +71,35 @@ def main() -> int:
     )
     configured_episodes = max(1, configured_num_env_steps // max(args.episode_time_steps, 1) // rollout_threads)
 
+
+    # ── Checkpoint-resume: detect completed episodes + latest models dir ──────
+    _completed = count_completed_episodes(output_dir)
+    _ckpt_dir  = artifact_dirs["checkpoints"]
+    _models_dir = find_latest_harl_models_dir(_ckpt_dir)
+    _remaining_episodes = max(1, configured_episodes - _completed)
+    _episode_offset = _completed
+    if _completed > 0 and _models_dir is not None:
+        print(
+            f"[HAPPO/{args.scenario}] Resuming from episode {_completed} "
+            f"({_remaining_episodes} remaining). Checkpoint: {_models_dir}",
+            flush=True,
+        )
+        configured_num_env_steps = _remaining_episodes * args.episode_time_steps
+        configured_episodes = _remaining_episodes
+    elif _completed > 0:
+        print(
+            f"[HAPPO/{args.scenario}] {_completed} episode(s) detected but no "
+            f"checkpoint found — starting fresh.",
+            flush=True,
+        )
+        _episode_offset = 0
+    # ─────────────────────────────────────────────────────────────────────────
     def make_citylearn_train_env(env_name, seed, n_threads, env_args):
         def make_env(rank):
             def init_env():
                 env = CityLearnHARLEnv(
                     schema_path=args.schema_path,
+                    episode_offset=_episode_offset,
                     scenario=args.scenario,
                     seed=args.seed + rank * 1000,
                     episode_time_steps=args.episode_time_steps,
@@ -111,6 +137,8 @@ def main() -> int:
     algo_args["train"]["eval_interval"] = max(1, int(args.eval_interval))
     algo_args["eval"]["use_eval"] = False
     algo_args["logger"]["log_dir"] = str(artifact_dirs["checkpoints"])
+    if _completed > 0 and _models_dir is not None:
+        algo_args["train"]["model_dir"] = str(_models_dir)
     algo_args["model"]["hidden_sizes"] = [args.hidden_size, args.hidden_size]
     algo_args["model"]["lr"] = float(args.actor_lr)
     algo_args["model"]["critic_lr"] = float(args.critic_lr)
