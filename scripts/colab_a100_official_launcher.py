@@ -507,7 +507,7 @@ def build_jobs(args: argparse.Namespace, root: Path, output_root: Path, schema_a
                     "--hidden-size",
                     str(args.matd3_hidden_size),
                     "--lr",
-                    "3e-4",
+                    str(args.matd3_lr),
                     "--max-grad-norm",
                     "1.0",
                     "--gamma",
@@ -550,13 +550,13 @@ def build_jobs(args: argparse.Namespace, root: Path, output_root: Path, schema_a
                     "--hidden-size",
                     str(args.maac_hidden_size),
                     "--attend-heads",
-                    "4",
+                    str(args.maac_attend_heads),
                     "--pi-lr",
                     "3e-4",
                     "--q-lr",
-                    "1e-3",
+                    str(args.maac_q_lr),
                     "--tau",
-                    "1e-3",
+                    str(args.maac_tau),
                     "--gamma",
                     "0.9999",
                     "--reward-scale",
@@ -601,28 +601,31 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
     args = [str(item) for item in retry["args"]]
 
     if name == "masac":
-        # buffer_size=10 → 13.72 GiB for Iquitos obs_shape (~370 dims from 42 EV chargers),
-        # which exceeds the 12 GiB limit set below. Drop to 8 → ~10.98 GiB to pass the check.
+        # OOM fallback: buffer_size=15 → ~10.28 GiB float32/job. Drop to 8 episodes
+        # (6.85 GiB float32) + keep on GPU (preload=cuda) but cap cuda_frac=0.20.
+        # Reduces hidden dims to lower peak GPU pressure during concurrent phase.
         args = replace_arg(args, "--buffer-size", "8")
-        args = replace_arg(args, "--critic-batch-size", "32")
+        args = replace_arg(args, "--critic-batch-size", "64")
         args = replace_arg(args, "--max-replay-buffer-gib", "12")
-        # Keep replay buffer in CPU RAM: avoids GPU OOM from 13.72 GiB buffer
-        # competing with model weights when other jobs share the A100.
-        args = replace_arg(args, "--masac-preload-batch-device", "cpu")
-        # Cap GPU allocation to 0.26 × 80 GiB = 20.8 GiB per process.
-        # Without this cap, PyTorch's caching allocator may try to claim up to
-        # 73.6 GiB (fraction=0.92 default), racing with other concurrent jobs.
-        args = replace_arg(args, "--cuda-memory-fraction", "0.26")
-        # Reduce hidden dims to lower GPU memory pressure when running alongside other jobs.
-        args = replace_arg(args, "--rnn-hidden-dim", "128")
+        args = replace_arg(args, "--masac-preload-batch-device", "cuda")
+        args = replace_arg(args, "--cuda-memory-fraction", "0.20")
+        args = replace_arg(args, "--rnn-hidden-dim", "64")
         args = replace_arg(args, "--qmix-hidden-dim", "64")
         args = replace_arg(args, "--hyper-hidden-dim", "128")
+        args = replace_arg(args, "--critic-train-steps", "1")
+        args = replace_arg(args, "--actor-sample-times", "5")
     elif name == "matd3":
-        args = replace_arg(args, "--batch-size", "256")
-        args = replace_arg(args, "--buffer-size", "4096")
+        # OOM fallback: reduce batch (less GPU memory per step) and buffer (less SSD/RAM).
+        args = replace_arg(args, "--batch-size", "512")
+        args = replace_arg(args, "--buffer-size", "50000")
+        args = replace_arg(args, "--hidden-size", "256")
+        args = replace_arg(args, "--train-interval", "100")
     elif name == "maac":
+        # OOM fallback: reduce batch and buffer.
         args = replace_arg(args, "--batch-size", "256")
         args = replace_arg(args, "--buffer-length", "50000")
+        args = replace_arg(args, "--hidden-size", "256")
+        args = replace_arg(args, "--attend-heads", "4")
     else:
         return None
 
@@ -1251,8 +1254,9 @@ def run_two_phase_concurrent_jobs(
       two_phase sequential : Phase1 ~40h + Phase2 ~27h = ~67h
       two_phase_concurrent : max(~54h, ~54h)          = ~54h  (saves ~13h, 19%)
 
-    Parameters controlled by --two-phase-masac-cuda-fraction (default 0.18
-    in notebook; actual MASAC fraction is max(provided, 0.22) when buffer is on GPU).
+    Parameters controlled by --two-phase-masac-cuda-fraction (default 0.26
+    in launcher; actual MASAC fraction is max(provided, 0.25) to cover 15-episode
+    GPU buffer at float32 = 10.28 GiB + model 0.9 GiB = 11.18 GiB per process).
     """
     phase1_jobs = [j for j in jobs if j["name"] in TWO_PHASE_LIGHT]
     phase2_jobs = [j for j in jobs if j["name"] in TWO_PHASE_HEAVY]
@@ -1286,15 +1290,17 @@ def run_two_phase_concurrent_jobs(
     #   Total system RAM: ~87 GiB / 167 GiB = 52%   ← safe, was 165 GiB (99%)
     #
     # GPU VRAM (80 GiB):
-    #   - 3 MASAC: buffer (float32) 6.85 GiB + model 0.9 GiB = ~23 GiB
-    #   - 3 MATD3: model ~2.1 GiB × 3 = ~6 GiB
-    #   - 3 MAAC:  model ~2.1 GiB × 3 = ~6 GiB
+    #   - 3 MASAC: buffer float32 (15 ep) 10.28 GiB + model 0.9 GiB = ~33.5 GiB
+    #   - 3 MATD3: model ~3.5 GiB × 3 (hidden=512) = ~10.5 GiB
+    #   - 3 MAAC:  model ~3.5 GiB × 3 (hidden=512) = ~10.5 GiB
     #   - 3 HAPPO: model ~0.5 GiB × 3 = ~1.5 GiB
-    #   Total GPU: ~36.5 GiB / 80 GiB = 46%
+    #   Total GPU: ~56 GiB / 80 GiB = 70%
     #
     # Disk SSD (235+ GiB local Colab):
-    #   - 3 MATD3 MlpPolicyBuffer memmap: ~2.4 GiB × 3 = ~7.2 GiB
-    masac_gpu_frac = max(masac_cuda_fraction, 0.22)
+    #   - 3 MATD3 MlpPolicyBuffer memmap: ~4.8 GiB × 3 (400K buffer) = ~14.4 GiB
+    #
+    # cuda_frac=0.25: 0.25×80=20 GiB/process; covers 10.28 GiB buffer + 0.9 GiB model.
+    masac_gpu_frac = max(masac_cuda_fraction, 0.25)
     p2_jobs = _patch_torch_threads(phase2_jobs, 1)
     for patch_flag, patch_val in [
         ("--masac-preload-batch-device", "cuda"),   # buffer on GPU VRAM
@@ -1480,34 +1486,54 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--log-tail", default=12, type=int)
     parser.add_argument("--oom-retry", action=argparse.BooleanOptionalAction, default=True)
 
-    parser.add_argument("--happo-hidden-size", default=384, type=int)
-    # Iquitos 2023-2025: Building_7 has 42 EV chargers → obs_shape expands to ~370
-    # (7 obs templates × 42 chargers + 31 base + 42 type-codes = ~370 dims).
-    # A100-SXM4 Colab instance: 167.1 GiB system RAM (a2-ultragpu-1g spec).
-    #   buffer_size=10 → 13.7 GiB/job × 3 = 41 GiB  =  24.6% of 167.1 GiB → safe.
-    #   buffer_size=20 → 27.4 GiB/job × 3 = 82 GiB  =  49.1% of 167.1 GiB → safe.
-    #   buffer_size=40 → 54.9 GiB/job × 3 = 165 GiB = 98.7% of 167.1 GiB → too close.
-    # Default 10 preserves thesis experiment consistency. Increase via --masac-buffer-size.
+    # ── Per-algorithm hyperparameters (A100-SXM4 80 GiB / 167 GiB RAM / 235 GB SSD) ──
+    #
+    # HAPPO  — on-policy PPO  | FS: RAM   (rollout ~26 MB, no migration)
+    parser.add_argument("--happo-hidden-size", default=512, type=int)  # was 384
+    #
+    # MASAC  — off-policy SAC+QMIX | FS: GPU VRAM (GpuBackedNdArray float32)
+    #   buffer_size=15 ep → float32: 15/10×6.85 GiB = 10.28 GiB/job × 3 = 30.8 GiB GPU
+    #   + models ~2.7 GiB → total MASAC GPU ≈ 33.5 GiB (< 80 GiB, cuda_frac=0.25)
+    #   Larger critic_batch (512) + train_steps (2) + actor_samples (10) exploit
+    #   zero-copy reads from the GPU buffer for maximum GPU utilization.
     parser.add_argument("--masac-max-replay-buffer-gib", default=20.0, type=float)
-    parser.add_argument("--masac-buffer-size", default=10, type=int)
-    parser.add_argument("--masac-critic-batch-size", default=64, type=int)
-    parser.add_argument("--masac-critic-train-steps", default=1, type=int)
-    parser.add_argument("--masac-actor-sample-times", default=5, type=int)
-    parser.add_argument("--masac-rnn-hidden-dim", default=256, type=int)
-    parser.add_argument("--masac-qmix-hidden-dim", default=128, type=int)
-    parser.add_argument("--masac-hyper-hidden-dim", default=256, type=int)
+    parser.add_argument("--masac-buffer-size", default=15, type=int)           # was 10
+    parser.add_argument("--masac-critic-batch-size", default=512, type=int)    # was 64
+    parser.add_argument("--masac-critic-train-steps", default=2, type=int)     # was 1
+    parser.add_argument("--masac-actor-sample-times", default=10, type=int)    # was 5
+    parser.add_argument("--masac-rnn-hidden-dim", default=128, type=int)       # balanced (256 uses more VRAM with 3 concurrent)
+    parser.add_argument("--masac-qmix-hidden-dim", default=128, type=int)      # was 128
+    parser.add_argument("--masac-hyper-hidden-dim", default=256, type=int)     # was 256
     parser.add_argument("--masac-preload-batch-device", default="auto", choices=("auto", "cuda", "cpu"))
-    parser.add_argument("--matd3-batch-size", default=512, type=int)
-    parser.add_argument("--matd3-buffer-size", default=6000, type=int)
-    parser.add_argument("--matd3-hidden-size", default=256, type=int)
-    parser.add_argument("--matd3-train-interval", default=100, type=int)
+    #
+    # MATD3  — off-policy TD3  | FS: SSD local /content/ (DiskBackedNdArray memmap)
+    #   buffer_size=400K → 4.8 GiB on SSD × 3 = 14.4 GiB (SSD 235 GB, no RAM cost)
+    #   batch_size=4096 → larger batches exploit A100 throughput; OS page-cache keeps
+    #   hot transitions in RAM after first access (near-DRAM speed in steady-state).
+    #   hidden_size=512 → larger actor/critic network for 17-agent 748-dim shared obs.
+    #   train_interval=50 → 2× more frequent updates = better GPU utilization.
+    parser.add_argument("--matd3-batch-size", default=4096, type=int)          # was 512
+    parser.add_argument("--matd3-buffer-size", default=400000, type=int)       # was 6000
+    parser.add_argument("--matd3-hidden-size", default=512, type=int)          # was 256
+    parser.add_argument("--matd3-lr", default="3e-4", type=str)
+    parser.add_argument("--matd3-train-interval", default=50, type=int)        # was 100
     parser.add_argument("--matd3-num-random-episodes", default=1, type=int,
                         help="Random warmup episodes before MATD3 training (1 ep = 8760 steps ≈ 40 min at 3 FPS).")
-    parser.add_argument("--maac-batch-size", default=512, type=int)
+    #
+    # MAAC   — off-policy Attention SAC | FS: RAM (np.roll internal, ~600 MB)
+    #   batch_size=1024 → multi-head attention benefits from larger batches on A100.
+    #   hidden_size=512 → 512/attend_heads=8 → 64 keys/head (standard for 17 agents).
+    #   steps_per_update=100 → update every 100 env steps (was 250), more GPU use.
+    #   q_lr=5e-4 → reduced from 1e-3 for stability with larger batch + hidden.
+    #   tau=5e-3 → faster target network update with more frequent updates.
+    parser.add_argument("--maac-batch-size", default=1024, type=int)           # was 512
     parser.add_argument("--maac-buffer-length", default=100000, type=int)
-    parser.add_argument("--maac-hidden-size", default=256, type=int)
-    parser.add_argument("--maac-steps-per-update", default=250, type=int)
+    parser.add_argument("--maac-hidden-size", default=512, type=int)           # was 256
+    parser.add_argument("--maac-attend-heads", default=8, type=int)            # was hardcoded 4
+    parser.add_argument("--maac-steps-per-update", default=100, type=int)      # was 250
     parser.add_argument("--maac-num-updates", default=8, type=int)
+    parser.add_argument("--maac-q-lr", default="5e-4", type=str)               # was hardcoded 1e-3
+    parser.add_argument("--maac-tau", default="5e-3", type=str)                # was hardcoded 1e-3
     parser.add_argument(
         "--max-parallel", default=12, type=int,
         help=(
