@@ -1,0 +1,155 @@
+"""
+Regression test: _episode_offset (and related resume-block vars) must be assigned
+BEFORE they are used in the env constructor.
+
+Bug history: MATD3 and MASAC failed with:
+    UnboundLocalError: local variable '_episode_offset' referenced before assignment
+because the checkpoint-resume block was placed AFTER env = CityLearn*Env(...).
+This test uses Python's AST to verify the fix holds for all 4 training scripts.
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+from pathlib import Path
+
+SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
+
+SCRIPTS = [
+    "train_citylearn_v3_matd3.py",
+    "train_citylearn_v3_masac.py",
+    "train_citylearn_v3_happo.py",
+    "train_citylearn_v3_maac.py",
+]
+
+# For each script: (env_constructor_pattern, vars_that_must_be_assigned_before_it)
+ORDERING_CHECKS = {
+    "train_citylearn_v3_matd3.py": {
+        "env_pattern": r"episode_offset=_episode_offset",
+        "must_precede": ["_episode_offset", "_completed", "_matd3_models"],
+    },
+    "train_citylearn_v3_masac.py": {
+        "env_pattern": r"episode_offset=_episode_offset",
+        "must_precede": ["_episode_offset", "_completed", "_masac_has_ckpt"],
+    },
+    "train_citylearn_v3_happo.py": {
+        "env_pattern": r"episode_offset=_episode_offset",
+        "must_precede": ["_episode_offset", "_completed"],
+    },
+    "train_citylearn_v3_maac.py": {
+        "env_pattern": r"episode_offset=_episode_offset",
+        "must_precede": ["_episode_offset", "_completed"],
+    },
+}
+
+
+def _find_in_main(src: str, pattern: str, is_assignment: bool) -> int | None:
+    """Return first line number in main() matching pattern as assignment or use."""
+    lines = src.splitlines()
+    in_main = False
+    main_start = 0
+    for i, line in enumerate(lines):
+        if re.match(r"^def main\(", line):
+            in_main = True
+            main_start = i
+        elif in_main and i > main_start + 1 and re.match(r"^def ", line):
+            break
+
+    for lineno, line in enumerate(lines[main_start:], main_start + 1):
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith("from") or stripped.startswith("import"):
+            continue
+        if re.search(pattern, stripped):
+            return lineno
+    return None
+
+
+def test_syntax_all_scripts():
+    for name in SCRIPTS:
+        path = SCRIPTS_DIR / name
+        src = path.read_text(encoding="utf-8")
+        try:
+            ast.parse(src)
+        except SyntaxError as e:
+            raise AssertionError(f"{name}: SyntaxError — {e}") from e
+
+
+def test_exactly_one_checkpoint_resume_block():
+    for name in SCRIPTS:
+        src = (SCRIPTS_DIR / name).read_text(encoding="utf-8")
+        count = src.count("Checkpoint-resume")
+        assert count == 1, (
+            f"{name}: expected 1 Checkpoint-resume block, found {count}. "
+            "Duplicate blocks re-introduce the UnboundLocalError risk."
+        )
+
+
+def test_episode_offset_assigned_before_env_constructor():
+    """Core regression: _episode_offset must be assigned before CityLearn*Env(...)."""
+    for name, checks in ORDERING_CHECKS.items():
+        src = (SCRIPTS_DIR / name).read_text(encoding="utf-8")
+        lines = src.splitlines()
+
+        # Find env constructor line
+        env_line = None
+        for i, line in enumerate(lines, 1):
+            if re.search(checks["env_pattern"], line.strip()):
+                env_line = i
+                break
+
+        assert env_line is not None, f"{name}: env constructor pattern not found"
+
+        for var in checks["must_precede"]:
+            # Find first assignment of this var (word-boundary match, not substring)
+            first_assign = None
+            for i, line in enumerate(lines, 1):
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                # Assignment: var = ... at start of stripped line
+                if re.match(rf"^{re.escape(var)}\s*=", stripped):
+                    first_assign = i
+                    break
+
+            assert first_assign is not None, f"{name}: {var} never assigned"
+            assert first_assign < env_line, (
+                f"{name}: {var} assigned at L{first_assign} but env constructor "
+                f"is at L{env_line} — UnboundLocalError will occur on fresh runs!"
+            )
+
+
+def test_ast_no_load_before_store_in_main():
+    """AST-level check: no _ variable used before its first assignment in main()."""
+    for name in SCRIPTS:
+        src = (SCRIPTS_DIR / name).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+
+        main_fn = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "main":
+                main_fn = node
+                break
+
+        assert main_fn is not None, f"{name}: no main() found"
+
+        first_store: dict[str, int] = {}
+        first_load: dict[str, int] = {}
+
+        for node in ast.walk(main_fn):
+            if isinstance(node, ast.Name) and node.id.startswith("_"):
+                lineno = node.lineno
+                if isinstance(node.ctx, ast.Store):
+                    if node.id not in first_store:
+                        first_store[node.id] = lineno
+                elif isinstance(node.ctx, ast.Load):
+                    if node.id not in first_load:
+                        first_load[node.id] = lineno
+
+        for var, use_line in first_load.items():
+            if var in first_store:
+                assign_line = first_store[var]
+                assert assign_line <= use_line, (
+                    f"{name}: {var} first used at L{use_line} but first assigned "
+                    f"at L{assign_line} — potential UnboundLocalError!"
+                )

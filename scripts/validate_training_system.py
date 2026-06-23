@@ -350,38 +350,25 @@ def check_git_sync() -> int:
 # ============================================================================
 # CHECK 6 — MADRL-specific test suite (no external deps required)
 # ============================================================================
-def check_tests() -> int:
-    print('\n[6] MADRL tests — test_masac_oom_retry_fix.py')
-    failures = 0
+def _run_test_file(test_file: 'Path', module_name: str) -> tuple[int, int]:
+    """Load and run all test_ functions from a test file. Returns (passed, failed)."""
+    import types, inspect as _inspect
+    pytest_shim = types.ModuleType('pytest')
+    pytest_shim.approx = lambda x, **kw: x
+    def _mark_param(*a, **kw):
+        def dec(f): return f
+        return dec
+    def _fixture(*a, **kw):
+        def dec(f): return f
+        return dec
+    pytest_shim.mark    = types.SimpleNamespace(parametrize=_mark_param)
+    pytest_shim.fixture = _fixture
+    sys.modules.setdefault('pytest', pytest_shim)
 
-    test_file = TESTS_DIR / 'test_masac_oom_retry_fix.py'
-    if not test_file.exists():
-        _fail('tests:file_exists', f'{test_file} not found')
-        return 1
+    spec = importlib.util.spec_from_file_location(module_name, test_file)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
 
-    # Load and run the tests manually (no pytest dependency)
-    try:
-        import types
-        pytest_shim = types.ModuleType('pytest')
-        pytest_shim.approx = lambda x, **kw: x
-        def _mark_param(*a, **kw):
-            def dec(f): return f
-            return dec
-        def _fixture(*a, **kw):
-            def dec(f): return f
-            return dec
-        pytest_shim.mark    = types.SimpleNamespace(parametrize=_mark_param)
-        pytest_shim.fixture = _fixture
-        sys.modules['pytest'] = pytest_shim
-
-        spec = importlib.util.spec_from_file_location('_oom_tests', test_file)
-        mod  = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-    except Exception as exc:
-        _fail('tests:import', str(exc))
-        return 1
-
-    # Run all test_ functions
     passed = 0
     failed = 0
     for name in dir(mod):
@@ -391,7 +378,6 @@ def check_tests() -> int:
         if not callable(fn):
             continue
         try:
-            import inspect as _inspect
             sig = _inspect.signature(fn)
             params = [p for p in sig.parameters.values()
                       if p.default is _inspect.Parameter.empty]
@@ -406,12 +392,36 @@ def check_tests() -> int:
         except Exception as exc:
             _fail(f'test:{name}', f'{type(exc).__name__}: {exc}')
             failed += 1
+    return passed, failed
 
-    failures = failed
-    if passed:
-        _ok('tests:summary', f'{passed} passed, {failed} failed')
 
-    return failures
+def check_tests() -> int:
+    test_files = [
+        ('test_masac_oom_retry_fix.py',                '_oom_tests'),
+        ('test_training_script_variable_ordering.py',  '_var_order_tests'),
+    ]
+    print(f'\n[6] MADRL tests — {", ".join(n for n, _ in test_files)}')
+    total_passed = 0
+    total_failed = 0
+
+    for filename, module_name in test_files:
+        test_file = TESTS_DIR / filename
+        if not test_file.exists():
+            _fail(f'tests:file_exists:{filename}', f'{test_file} not found')
+            total_failed += 1
+            continue
+        try:
+            passed, failed = _run_test_file(test_file, module_name)
+            total_passed += passed
+            total_failed += failed
+        except Exception as exc:
+            _fail(f'tests:import:{filename}', str(exc))
+            total_failed += 1
+
+    if total_passed:
+        _ok('tests:summary', f'{total_passed} passed, {total_failed} failed')
+
+    return total_failed
 
 
 # ============================================================================
