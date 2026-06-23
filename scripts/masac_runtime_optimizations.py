@@ -22,6 +22,7 @@ training updates).
 from __future__ import annotations
 
 import gc
+import os
 import sys
 from typing import Any
 
@@ -98,6 +99,58 @@ class GpuBackedNdArray:
 
     def __repr__(self) -> str:
         return f"GpuBackedNdArray(shape={self.shape}, device={self._device})"
+
+
+# ── Disk-backed array (numpy.memmap on fast local SSD) ─────────────────────
+
+class DiskBackedNdArray:
+    """Drop-in for a numpy array backed by numpy.memmap on fast local disk.
+
+    Returns regular numpy arrays from ``__getitem__`` — fully transparent to
+    all external training code that expects numpy.  Used for MATD3's replay
+    buffer (~2.4 GiB / job) so warmup data is preserved on local SSD (Colab
+    `/content/` ≈ 2 GB/s) and freed from system RAM.
+
+    Write path: ``buf[i] = data``  →  direct memmap write (OS handles paging)
+    Read path:  ``buf[i]``         →  OS pages from SSD (hot pages stay cached)
+    """
+
+    __slots__ = ("_mm", "shape", "dtype", "ndim", "_path")
+
+    def __init__(self, mm: "np.memmap", path: str) -> None:
+        self._mm = mm
+        self._path = path
+        self.shape = tuple(mm.shape)
+        self.dtype = mm.dtype
+        self.ndim = mm.ndim
+
+    @classmethod
+    def from_numpy(cls, arr: np.ndarray, disk_dir: str, name: str) -> "DiskBackedNdArray":
+        """Copy ``arr`` to a memmap file on disk, then the caller should free ``arr``."""
+        os.makedirs(disk_dir, exist_ok=True)
+        safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in str(name))
+        path = os.path.join(disk_dir, f"{safe}.mmap")
+        mm = np.memmap(path, dtype=arr.dtype, mode="w+", shape=arr.shape)
+        mm[:] = arr
+        mm.flush()
+        return cls(mm, path)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        self._mm[key] = value
+
+    def __getitem__(self, key: Any) -> np.ndarray:
+        return np.asarray(self._mm[key])
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def __array__(self, dtype: Any = None) -> np.ndarray:
+        arr = np.asarray(self._mm)
+        return arr.astype(dtype) if dtype is not None else arr
+
+    def __repr__(self) -> str:
+        size_gib = self._mm.nbytes / 1024 ** 3
+        return f"DiskBackedNdArray(shape={self.shape}, {size_gib:.2f} GiB, path={self._path!r})"
 
 
 # ── Buffer migration ────────────────────────────────────────────────────────
@@ -206,6 +259,104 @@ def install_gpu_replay_buffer(runner: Any, device: torch.device) -> dict:
     except Exception as exc:
         print(
             f"[masac_gpu_buf] WARNING: GPU buffer migration failed ({exc}). "
+            f"Buffer remains in system RAM.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return {"enabled": False, "reason": str(exc)}
+
+
+# ── Disk buffer migration (MATD3 / MlpPolicyBuffer) ────────────────────────
+
+def _migrate_dict_disk(data: dict, disk_dir: str, prefix: str) -> dict[str, int]:
+    """Replace large float numpy arrays in a dict with DiskBackedNdArray."""
+    migrated: dict[str, int] = {}
+    for key in list(data.keys()):
+        val = data[key]
+        if _is_large_float_ndarray(val):
+            nbytes = val.nbytes
+            name = f"{prefix}_{key}"
+            disk_arr = DiskBackedNdArray.from_numpy(val, disk_dir, name)
+            data[key] = None   # free RAM before next alloc
+            data[key] = disk_arr
+            migrated[str(key)] = nbytes
+    return migrated
+
+
+def _migrate_obj_disk(obj: Any, disk_dir: str) -> dict[str, int]:
+    """Walk an object graph and move large float numpy arrays to disk memmap."""
+    migrated: dict[str, int] = {}
+    seen_ids: set[int] = set()
+
+    def _walk(o: Any, d: int) -> None:
+        if d > 4 or id(o) in seen_ids:
+            return
+        seen_ids.add(id(o))
+
+        target = None
+        if isinstance(o, dict):
+            target = o
+        elif hasattr(o, "__dict__"):
+            target = vars(o)
+        else:
+            return
+
+        for key in list(target.keys()):
+            val = target[key]
+            if _is_large_float_ndarray(val):
+                nbytes = val.nbytes
+                name = f"{type(o).__name__}_{key}"
+                disk_arr = DiskBackedNdArray.from_numpy(val, disk_dir, name)
+                target[key] = None   # free RAM
+                target[key] = disk_arr
+                migrated[f"{type(o).__name__}.{key}"] = nbytes
+            elif isinstance(val, dict) and any(
+                _is_large_float_ndarray(v) for v in val.values()
+            ):
+                migrated.update(_migrate_dict_disk(val, disk_dir, str(key)))
+            elif val is not None and not isinstance(val, (str, int, float, bool, type)):
+                _walk(val, d + 1)
+
+    _walk(obj, 0)
+    return migrated
+
+
+def install_disk_replay_buffer(runner: Any, disk_dir: str) -> dict:
+    """Migrate replay buffer arrays from system RAM to disk-backed numpy memmap.
+
+    Copies existing buffer data (including MPERunner warmup transitions) to
+    memory-mapped files on fast local SSD (``disk_dir``), then frees the
+    original numpy arrays.  ``__getitem__`` returns regular numpy arrays —
+    transparent to all external training code.
+
+    In Colab use ``disk_dir="/content/madrl_buf_tmp/<algo>_<scenario>"``.
+    The OS page-cache keeps hot pages in RAM, so repeated random reads are
+    nearly as fast as DRAM after the first access.
+    """
+    try:
+        os.makedirs(disk_dir, exist_ok=True)
+        migrated = _migrate_obj_disk(runner, disk_dir)
+        gc.collect()
+        total_bytes = sum(migrated.values())
+        total_gib = total_bytes / 1024**3
+        result = {
+            "enabled": True,
+            "backend": "disk",
+            "disk_dir": disk_dir,
+            "migrated_arrays": migrated,
+            "migrated_gib": round(total_gib, 2),
+            "migrated_count": len(migrated),
+        }
+        print(
+            f"[replay_disk_buf] Moved {len(migrated)} arrays "
+            f"({total_gib:.2f} GiB) from system RAM → SSD ({disk_dir}). "
+            f"Arrays: {list(migrated.keys())[:6]}",
+            flush=True,
+        )
+        return result
+    except Exception as exc:
+        print(
+            f"[replay_disk_buf] WARNING: disk migration failed ({exc}). "
             f"Buffer remains in system RAM.",
             file=sys.stderr,
             flush=True,

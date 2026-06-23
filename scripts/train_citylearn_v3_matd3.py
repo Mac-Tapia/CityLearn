@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from masac_runtime_optimizations import install_disk_replay_buffer
+
 from citylearn_v3_training_common import (
     count_completed_episodes,
     find_matd3_models_dir,
@@ -47,6 +49,11 @@ def parse_args():
     parser.add_argument("--torch-threads", default=1, type=int)
     parser.add_argument("--live-heartbeat-seconds", default=30, type=int)
     parser.add_argument("--cuda", action="store_true")
+    parser.add_argument(
+        "--buffer-disk-dir", default="", type=str,
+        help="Move MlpPolicyBuffer arrays to a numpy.memmap on this directory (local SSD). "
+             "Auto-detects Colab /content when empty string.",
+    )
     parser.add_argument("--experiment-name", default="citylearn_v3_matd3")
     return parser.parse_args()
 
@@ -182,6 +189,17 @@ def main() -> int:
     }
 
     runner = MPERunner(config=config)
+
+    # Move MlpPolicyBuffer numpy arrays (~2.4 GiB) from system RAM to local SSD.
+    # MPERunner.__init__ runs warmup() before returning, so the buffer contains
+    # real transitions — we copy them to memmap then free the RAM arrays.
+    _disk_dir = args.buffer_disk_dir.strip() or None
+    if _disk_dir is None and os.path.exists("/content"):  # Colab auto-detect
+        _disk_dir = f"/content/madrl_buf_tmp/matd3_{args.scenario}_s{args.seed}"
+    disk_buf_result: dict = {"enabled": False}
+    if _disk_dir:
+        disk_buf_result = install_disk_replay_buffer(runner, _disk_dir)
+
     if hasattr(runner, "writter"):
         finite_writer = FiniteTensorBoardWriter(
             runner.writter,
@@ -237,6 +255,7 @@ def main() -> int:
         "reward_profile": "MATD3",
         "reward_metadata": env.adapter.reward_metadata,
         "finite_optimizer_step_guard": finite_optimizer_guard,
+        "disk_replay_buffer": disk_buf_result,
     }
 
     heartbeat_stop = None
