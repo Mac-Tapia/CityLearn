@@ -177,6 +177,7 @@ docs/source/api/
 examples/*
 !examples/*.py
 !examples/*.ipynb
+!examples/pyrightconfig.json
 
 # ignore folder
 .ignore
