@@ -48,6 +48,15 @@ def parse_args():
     parser.add_argument("--num-random-episodes", default=1, type=int)
     parser.add_argument("--torch-threads", default=1, type=int)
     parser.add_argument("--live-heartbeat-seconds", default=30, type=int)
+    parser.add_argument(
+        "--live-progress-interval-initial", default=50, type=int,
+        help="Interval for live progress writes during warmup phase (steps).")
+    parser.add_argument(
+        "--live-progress-interval-threshold", default=2000, type=int,
+        help="Step threshold after which to switch to stable interval.")
+    parser.add_argument(
+        "--live-progress-interval-stable", default=300, type=int,
+        help="Interval for live progress writes during stable training phase (steps).")
     parser.add_argument("--cuda", action="store_true")
     parser.add_argument(
         "--buffer-disk-dir", default="", type=str,
@@ -107,6 +116,9 @@ def main() -> int:
         algorithm="MATD3",
         live_progress_path=str(output_dir / "live_progress.json"),
         live_progress_interval=args.live_progress_interval,
+        live_progress_interval_initial=args.live_progress_interval_initial,
+        live_progress_interval_threshold=args.live_progress_interval_threshold,
+        live_progress_interval_stable=args.live_progress_interval_stable,
         trace_record_interval=args.trace_record_interval,
         trace_detail=args.trace_detail,
         normalize_observations=args.normalize_observations,

@@ -516,10 +516,13 @@ def build_jobs(args: argparse.Namespace, root: Path, output_root: Path, schema_a
                     str(args.matd3_train_interval),
                     "--num-random-episodes",
                     str(args.matd3_num_random_episodes),
-                    # Override global live-progress-interval: MATD3 warmup (8760 random steps
-                    # at ~3-5 FPS) takes ~30-50 min; writing every 300 steps keeps the monitor
-                    # showing updates every ~60-100 s instead of every ~4-5 min.
-                    "--live-progress-interval",
+                    # MATD3 dynamic live-progress-interval: initial 50 steps (fast feedback),
+                    # then 300 steps after 2000 total steps (reduce I/O during main training).
+                    "--live-progress-interval-initial",
+                    "50",
+                    "--live-progress-interval-threshold",
+                    "2000",
+                    "--live-progress-interval-stable",
                     "300",
                 ],
             }

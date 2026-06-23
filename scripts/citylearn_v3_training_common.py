@@ -2788,6 +2788,9 @@ class CityLearnV3BackendAdapter:
         algorithm: str = "MADRL",
         live_progress_path: Optional[str] = None,
         live_progress_interval: int = 100,
+        live_progress_interval_initial: Optional[int] = None,
+        live_progress_interval_threshold: Optional[int] = None,
+        live_progress_interval_stable: Optional[int] = None,
         trace_record_interval: int = 1,
         trace_detail: str = "full",
         normalize_observations: bool = True,
@@ -2840,6 +2843,22 @@ class CityLearnV3BackendAdapter:
         self.discrete_action_mode = str(discrete_action_mode or "axis").strip().lower()
         self.live_progress_path = Path(live_progress_path) if live_progress_path else None
         self.live_progress_interval = max(1, int(live_progress_interval))
+        # Dynamic interval support for warmup phase (MATD3): initially fast writes, then slower
+        self.live_progress_interval_initial = (
+            max(1, int(live_progress_interval_initial)) 
+            if live_progress_interval_initial is not None 
+            else self.live_progress_interval
+        )
+        self.live_progress_interval_threshold = (
+            max(0, int(live_progress_interval_threshold)) 
+            if live_progress_interval_threshold is not None 
+            else 0
+        )
+        self.live_progress_interval_stable = (
+            max(1, int(live_progress_interval_stable)) 
+            if live_progress_interval_stable is not None 
+            else self.live_progress_interval
+        )
         self.trace_record_interval = max(0, int(trace_record_interval))
         self.trace_detail = str(trace_detail or "full").strip().lower()
         if self.trace_detail not in {"full", "compact"}:
@@ -3432,7 +3451,15 @@ class CityLearnV3BackendAdapter:
         if self.live_progress_path is None:
             return
 
-        if int(timeseries_row["global_step"]) % self.live_progress_interval != 0:
+        global_step = int(timeseries_row["global_step"])
+        
+        # Dynamic interval: fast writes initially (warmup), then slower (stable training)
+        if self.live_progress_interval_threshold > 0 and global_step < self.live_progress_interval_threshold:
+            effective_interval = self.live_progress_interval_initial
+        else:
+            effective_interval = self.live_progress_interval_stable
+        
+        if global_step % effective_interval != 0:
             return
 
         episode = int(timeseries_row.get("episode", 0))
