@@ -69,6 +69,28 @@ def main() -> int:
         (args.episodes or 0) * args.episode_time_steps,
     )
     configured_episodes = max(1, configured_num_env_steps // max(args.episode_time_steps, 1))
+    # ── Checkpoint-resume (must run before env to supply episode_offset) ─────
+    _completed = count_completed_episodes(output_dir)
+    _ckpt_dir  = artifact_dirs["checkpoints"]
+    _matd3_models = find_matd3_models_dir(_ckpt_dir)
+    _remaining_episodes = max(1, configured_episodes - _completed)
+    _episode_offset = _completed
+    if _completed > 0 and _matd3_models is not None:
+        print(
+            f"[MATD3/{args.scenario}] Resuming from episode {_completed} "
+            f"({_remaining_episodes} remaining). Checkpoint: {_matd3_models}",
+            flush=True,
+        )
+        configured_num_env_steps = _remaining_episodes * args.episode_time_steps
+        configured_episodes = _remaining_episodes
+    elif _completed > 0:
+        print(
+            f"[MATD3/{args.scenario}] {_completed} episodes but no checkpoint — "
+            f"starting fresh.",
+            flush=True,
+        )
+        _episode_offset = 0
+    # ─────────────────────────────────────────────────────────────────────────
     env = CityLearnOffPolicyVecEnv(
         episode_offset=_episode_offset,
         schema_path=args.schema_path,
@@ -152,31 +174,6 @@ def main() -> int:
     def policy_mapping_fn(agent_id):
         return f"policy_{agent_id}"
 
-
-    # ── Checkpoint-resume ─────────────────────────────────────────────────────
-    _completed = count_completed_episodes(output_dir)
-    _ckpt_dir  = artifact_dirs["checkpoints"]
-    _matd3_models = find_matd3_models_dir(_ckpt_dir)
-    _remaining_episodes = max(1, configured_episodes - _completed)
-    _episode_offset = _completed
-    if _completed > 0 and _matd3_models is not None:
-        print(
-            f"[MATD3/{args.scenario}] Resuming from episode {_completed} "
-            f"({_remaining_episodes} remaining). Checkpoint: {_matd3_models}",
-            flush=True,
-        )
-        # Off-policy: replay buffer is lost on restart; warmup will repeat.
-        # But policy weights are restored so learning continues from trained state.
-        configured_num_env_steps = _remaining_episodes * args.episode_time_steps
-        configured_episodes = _remaining_episodes
-    elif _completed > 0:
-        print(
-            f"[MATD3/{args.scenario}] {_completed} episodes but no checkpoint — "
-            f"starting fresh.",
-            flush=True,
-        )
-        _episode_offset = 0
-    # ─────────────────────────────────────────────────────────────────────────
     run_dir = artifact_dirs["checkpoints"] / "offpolicy_run"
     run_dir.mkdir(parents=True, exist_ok=True)
     config = {

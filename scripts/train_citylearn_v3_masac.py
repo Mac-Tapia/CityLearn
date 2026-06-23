@@ -127,6 +127,32 @@ def main() -> int:
     output_dir = resolve_output_dir(args.output_dir, "masac", args.scenario, args.seed)
     artifact_dirs = ensure_artifact_layout(output_dir)
     configured_episodes = int(args.episodes if args.episodes is not None else args.epochs)
+    # ── Checkpoint-resume (must run before env to supply episode_offset) ─────
+    _completed = count_completed_episodes(output_dir)
+    _remaining_episodes = max(1, configured_episodes - _completed)
+    _episode_offset = _completed
+    _masac_ckpt = artifact_dirs["checkpoints"] / "models"
+    _masac_has_ckpt = (
+        _masac_ckpt.exists()
+        and any(
+            _masac_ckpt.rglob("*.pkl")
+        )
+    )
+    if _completed > 0 and _masac_has_ckpt:
+        print(
+            f"[MASAC/{args.scenario}] Resuming from episode {_completed} "
+            f"({_remaining_episodes} remaining). Checkpoint: {_masac_ckpt}",
+            flush=True,
+        )
+        configured_episodes = _remaining_episodes
+    elif _completed > 0:
+        print(
+            f"[MASAC/{args.scenario}] {_completed} episodes but no checkpoint — "
+            f"starting fresh.",
+            flush=True,
+        )
+        _episode_offset = 0
+    # ─────────────────────────────────────────────────────────────────────────
     env = CityLearnSMACDiscreteEnv(
         episode_offset=_episode_offset,
         schema_path=args.schema_path,
@@ -168,32 +194,6 @@ def main() -> int:
     backend_args.cuda = bool(gpu_runtime["cuda_enabled"])
     backend_args.result_dir = str(artifact_dirs["data"] / "backend_results")
 
-    # ── Checkpoint-resume ─────────────────────────────────────────────────────
-    _completed = count_completed_episodes(output_dir)
-    _remaining_episodes = max(1, configured_episodes - _completed)
-    _episode_offset = _completed
-    _masac_ckpt = artifact_dirs["checkpoints"] / "models"
-    _masac_has_ckpt = (
-        _masac_ckpt.exists()
-        and any(
-            _masac_ckpt.rglob("*.pkl")
-        )
-    )
-    if _completed > 0 and _masac_has_ckpt:
-        print(
-            f"[MASAC/{args.scenario}] Resuming from episode {_completed} "
-            f"({_remaining_episodes} remaining). Checkpoint: {_masac_ckpt}",
-            flush=True,
-        )
-        configured_episodes = _remaining_episodes
-    elif _completed > 0:
-        print(
-            f"[MASAC/{args.scenario}] {_completed} episodes but no checkpoint — "
-            f"starting fresh.",
-            flush=True,
-        )
-        _episode_offset = 0
-    # ─────────────────────────────────────────────────────────────────────────
     backend_args.model_dir = str(artifact_dirs["checkpoints"] / "models")
     backend_args.load_model = _completed > 0 and _masac_has_ckpt
     backend_args.replay_dir = ""
