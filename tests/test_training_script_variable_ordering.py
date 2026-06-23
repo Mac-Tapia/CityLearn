@@ -169,3 +169,70 @@ def test_ast_no_load_before_store_in_main():
                     f"{name}: {var} first used at L{use_line} but first assigned "
                     f"at L{assign_line} — potential UnboundLocalError!"
                 )
+
+
+def test_masac_gpu_buffer_installed():
+    """MASAC train script must call install_gpu_replay_buffer after Runner init.
+
+    When preload_batch_device=cuda, the 13.7 GiB numpy replay buffer must be
+    moved to GPU VRAM to prevent system RAM OOM on 12-job concurrent runs.
+    """
+    src = (SCRIPTS_DIR / "train_citylearn_v3_masac.py").read_text(encoding="utf-8")
+
+    assert "install_gpu_replay_buffer" in src, (
+        "train_citylearn_v3_masac.py must import and call install_gpu_replay_buffer "
+        "to move the MASAC replay buffer (~13.7 GiB) from system RAM to GPU VRAM."
+    )
+    assert "install_gpu_replay_buffer(runner" in src, (
+        "install_gpu_replay_buffer must be called with 'runner' as the first argument "
+        "after Runner(env, backend_args) is initialized."
+    )
+
+    # Verify that the call happens AFTER Runner initialization
+    lines = src.splitlines()
+    runner_init_line = None
+    gpu_buf_call_line = None
+    for i, line in enumerate(lines, 1):
+        if "runner = Runner(env, backend_args)" in line:
+            runner_init_line = i
+        if "install_gpu_replay_buffer(runner" in line:
+            gpu_buf_call_line = i
+
+    assert runner_init_line is not None, "Runner(env, backend_args) not found"
+    assert gpu_buf_call_line is not None, "install_gpu_replay_buffer(runner) call not found"
+    assert gpu_buf_call_line > runner_init_line, (
+        f"install_gpu_replay_buffer (L{gpu_buf_call_line}) must come AFTER "
+        f"Runner initialization (L{runner_init_line})."
+    )
+
+
+def test_masac_runtime_optimizations_has_gpu_buffer():
+    """masac_runtime_optimizations.py must export GpuBackedNdArray and install_gpu_replay_buffer."""
+    src = (SCRIPTS_DIR / "masac_runtime_optimizations.py").read_text(encoding="utf-8")
+
+    assert "class GpuBackedNdArray" in src, (
+        "masac_runtime_optimizations.py must define GpuBackedNdArray — "
+        "a numpy-compatible array backed by a CUDA tensor for system RAM reduction."
+    )
+    assert "def install_gpu_replay_buffer" in src, (
+        "masac_runtime_optimizations.py must define install_gpu_replay_buffer."
+    )
+    assert "__setitem__" in src, (
+        "GpuBackedNdArray must implement __setitem__ to accept numpy writes transparently."
+    )
+    assert "__getitem__" in src, (
+        "GpuBackedNdArray must implement __getitem__ to return CUDA tensors for batch sampling."
+    )
+
+
+def test_launcher_masac_uses_cuda_preload():
+    """Concurrent launcher must use preload_batch_device=cuda for MASAC GPU buffer offload."""
+    launcher_path = SCRIPTS_DIR / "colab_a100_official_launcher.py"
+    src = launcher_path.read_text(encoding="utf-8")
+
+    # Find the two_phase_concurrent MASAC patching block
+    assert '"--masac-preload-batch-device", "cuda"' in src, (
+        "colab_a100_official_launcher.py must patch MASAC with preload_batch_device=cuda "
+        "in run_two_phase_concurrent_jobs so the GPU buffer is activated. "
+        "Found 'cpu' instead — the 41 GiB MASAC buffer stays in system RAM → OOM!"
+    )

@@ -8,7 +8,10 @@ import sys
 import numpy as np
 import torch
 
-from masac_runtime_optimizations import install_masac_runtime_optimizations
+from masac_runtime_optimizations import (
+    install_masac_runtime_optimizations,
+    install_gpu_replay_buffer,
+)
 
 from citylearn_v3_training_common import (
     count_completed_episodes,
@@ -42,9 +45,13 @@ def parse_args():
     )
     parser.add_argument(
         "--max-replay-buffer-gib",
-        default=8.0,
+        default=20.0,
         type=float,
-        help="Abort before backend startup if MASAC replay buffer would exceed this estimate.",
+        help=(
+            "Abort before backend startup if MASAC replay buffer would exceed this estimate. "
+            "Default 20 GiB covers buffer_size=10 (13.7 GiB) on GPU. Set lower if buffer "
+            "must stay in system RAM."
+        ),
     )
     parser.add_argument("--buffer-size", default=20, type=int)
     parser.add_argument("--critic-batch-size", default=64, type=int)
@@ -224,12 +231,20 @@ def main() -> int:
         state_shape=backend_args.state_shape,
     )
 
-    if estimated_replay_buffer_gib > float(args.max_replay_buffer_gib):
+    # When preload_batch_device=cuda, the buffer is migrated to GPU after runner init
+    # (install_gpu_replay_buffer), so the system RAM check is not the binding constraint.
+    _buf_on_gpu = (
+        backend_args.cuda
+        and str(backend_args.citylearn_preload_batch_device).lower() == "cuda"
+        and torch.cuda.is_available()
+    )
+    if estimated_replay_buffer_gib > float(args.max_replay_buffer_gib) and not _buf_on_gpu:
         raise MemoryError(
             "MASAC replay buffer estimate is too large: "
             f"{estimated_replay_buffer_gib:.2f} GiB > {args.max_replay_buffer_gib:.2f} GiB. "
             "Use --discrete-action-mode axis for CityLearn multi-actuator actions, "
-            "or reduce episode length, buffer size or action bins."
+            "or reduce episode length, buffer size or action bins. "
+            "Alternatively, use --masac-preload-batch-device cuda to place the buffer on GPU."
         )
 
     torch.manual_seed(args.seed)
@@ -277,8 +292,17 @@ def main() -> int:
 
     heartbeat_stop = None
     heartbeat_thread = None
+    gpu_buf_result: dict = {"enabled": False}
     try:
         runner = Runner(env, backend_args)
+        # Move the replay buffer (pre-allocated numpy float64 arrays, ~13.7 GiB)
+        # from system RAM to GPU VRAM when running in GPU mode.
+        # This frees ~13.7 GiB × 3 concurrent jobs = ~41 GiB of system RAM,
+        # preventing the OOM (exit=-9 SIGKILL) that occurs at 12-job concurrency.
+        if backend_args.cuda and str(backend_args.citylearn_preload_batch_device).lower() == "cuda":
+            _gpu_device = torch.device("cuda:0")
+            gpu_buf_result = install_gpu_replay_buffer(runner, _gpu_device)
+            hyperparameters["gpu_replay_buffer"] = gpu_buf_result
         learner = getattr(runner, "qmix_pg_learner", None)
         if learner is not None and getattr(learner, "alpha_optimizer", None) is not None:
             for group in learner.alpha_optimizer.param_groups:

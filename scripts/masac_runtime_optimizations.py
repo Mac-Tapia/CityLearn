@@ -3,17 +3,198 @@
 The upstream MASAC implementation is kept in ``external/MARL``.  This module
 patches its learner class at runtime so the project remains reproducible
 without committing local-only changes inside the external submodule.
+
+GPU replay buffer offload
+─────────────────────────
+The external MARL buffer pre-allocates ``buffer_size × episode_limit × *dims``
+numpy float64 arrays in system RAM (~13.7 GiB per MASAC job with default args).
+With 3 concurrent MASAC jobs that equals ~41 GiB of system RAM, causing OOM
+on A100 Colab (167 GiB limit) when 12 jobs run simultaneously.
+
+``install_gpu_replay_buffer`` replaces those numpy arrays with
+``GpuBackedNdArray`` objects that store data as float32 CUDA tensors,
+moving the 41 GiB from system RAM to GPU VRAM (80 GiB A100, ≈62% used).
+The replacement is transparent: numpy-style indexing still works, and
+``_prepare_batch`` receives CUDA tensors directly (zero extra copy during
+training updates).
 """
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
 
 PATCH_VERSION = "citylearn_masac_runtime_v1"
+_GPU_BUF_PATCH_VERSION = "citylearn_masac_gpu_buf_v1"
+_GPU_BUF_MIN_BYTES = 50 * 1024 * 1024   # only migrate arrays ≥ 50 MiB
+
+
+# ── GPU-backed numpy-compatible array ──────────────────────────────────────
+
+class GpuBackedNdArray:
+    """Drop-in for a pre-allocated numpy float64 array stored as float32 CUDA tensor.
+
+    The external MARL buffer uses numpy arrays as ring buffers, writing to
+    them with slice assignment (``buf['o'][ep_idx, step_idx] = obs``) and
+    reading with fancy indexing (``buf['o'][sample_indices]``).
+
+    This class intercepts those operations transparently:
+    - Writes: numpy → CPU tensor → CUDA tensor (non-blocking)
+    - Reads: returns CUDA tensor directly (zero-copy when training on GPU)
+
+    Only float-like dtypes are migrated; integer fields (padded, terminated)
+    are left as numpy arrays since they are tiny (<< 1 MiB) and frequently
+    used in numpy comparisons.
+    """
+
+    __slots__ = ("_tensor", "shape", "dtype", "ndim", "_device")
+
+    def __init__(self, tensor: torch.Tensor):
+        self._tensor = tensor
+        self.shape = tuple(tensor.shape)
+        self.dtype = np.float32
+        self.ndim = tensor.ndim
+        self._device = tensor.device
+
+    @classmethod
+    def from_numpy(cls, arr: np.ndarray, device: torch.device) -> "GpuBackedNdArray":
+        t = torch.as_tensor(arr.astype(np.float32, copy=False), device=device)
+        return cls(t)
+
+    @classmethod
+    def zeros(cls, shape: tuple, device: torch.device) -> "GpuBackedNdArray":
+        return cls(torch.zeros(shape, dtype=torch.float32, device=device))
+
+    # ── numpy-compatible writes ──
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if isinstance(value, np.ndarray):
+            src = torch.as_tensor(value.astype(np.float32, copy=False))
+            self._tensor[key].copy_(src, non_blocking=True)
+        elif isinstance(value, torch.Tensor):
+            self._tensor[key].copy_(
+                value.to(dtype=torch.float32, non_blocking=True),
+                non_blocking=True,
+            )
+        else:
+            self._tensor[key] = float(value)
+
+    # ── numpy-compatible reads ──
+    def __getitem__(self, key: Any) -> torch.Tensor:
+        return self._tensor[key]
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    # Allow numpy ufuncs and np.array() to fall back to CPU copy
+    def __array__(self, dtype: Any = None) -> np.ndarray:
+        arr = self._tensor.cpu().numpy()
+        return arr.astype(dtype) if dtype is not None else arr
+
+    def __repr__(self) -> str:
+        return f"GpuBackedNdArray(shape={self.shape}, device={self._device})"
+
+
+# ── Buffer migration ────────────────────────────────────────────────────────
+
+def _is_large_float_ndarray(value: Any) -> bool:
+    return (
+        isinstance(value, np.ndarray)
+        and np.issubdtype(value.dtype, np.floating)
+        and value.nbytes >= _GPU_BUF_MIN_BYTES
+    )
+
+
+def _migrate_dict(data: dict, device: torch.device) -> dict[str, int]:
+    """Replace large float numpy arrays in a dict with GpuBackedNdArray."""
+    migrated: dict[str, int] = {}
+    for key, val in list(data.items()):
+        if _is_large_float_ndarray(val):
+            data[key] = GpuBackedNdArray.from_numpy(val, device)
+            migrated[str(key)] = val.nbytes
+    return migrated
+
+
+def _migrate_obj(obj: Any, device: torch.device, depth: int = 0) -> dict[str, int]:
+    """Recursively replace large float numpy arrays on an object with GpuBackedNdArray."""
+    migrated: dict[str, int] = {}
+    if depth > 4 or obj is None:
+        return migrated
+    seen_ids: set[int] = set()
+
+    def _walk(o: Any, d: int) -> None:
+        if d > 4 or id(o) in seen_ids:
+            return
+        seen_ids.add(id(o))
+
+        target = None
+        if isinstance(o, dict):
+            target = o
+        elif hasattr(o, "__dict__"):
+            target = vars(o)
+        else:
+            return
+
+        for key, val in list(target.items()):
+            if _is_large_float_ndarray(val):
+                gpu_arr = GpuBackedNdArray.from_numpy(val, device)
+                target[key] = gpu_arr
+                migrated[f"{type(o).__name__}.{key}"] = val.nbytes
+            elif isinstance(val, dict) and any(
+                _is_large_float_ndarray(v) for v in val.values()
+            ):
+                migrated.update(_migrate_dict(val, device))
+            elif val is not None and not isinstance(val, (str, int, float, bool, type)):
+                _walk(val, d + 1)
+
+    _walk(obj, 0)
+    return migrated
+
+
+def install_gpu_replay_buffer(runner: Any, device: torch.device) -> dict:
+    """Migrate the external MARL replay buffer from system RAM to GPU VRAM.
+
+    Walks the runner's object graph, finds pre-allocated numpy float arrays
+    (≥50 MiB), and replaces them with GpuBackedNdArray tensors on ``device``.
+    The replacement is transparent: the buffer's store/sample code continues
+    to use numpy-style slice assignment/indexing without modification.
+
+    Returns a metadata dict with ``{"enabled": bool, "migrated_bytes": int, ...}``.
+    """
+    if not torch.cuda.is_available():
+        return {"enabled": False, "reason": "CUDA not available"}
+
+    try:
+        migrated = _migrate_obj(runner, device)
+        total_bytes = sum(migrated.values())
+        total_gib = total_bytes / 1024**3
+        result = {
+            "enabled": True,
+            "patch_version": _GPU_BUF_PATCH_VERSION,
+            "device": str(device),
+            "migrated_arrays": migrated,
+            "migrated_gib": round(total_gib, 2),
+            "migrated_count": len(migrated),
+        }
+        print(
+            f"[masac_gpu_buf] Moved {len(migrated)} replay buffer arrays "
+            f"({total_gib:.2f} GiB) from system RAM → {device}. "
+            f"Arrays: {list(migrated.keys())[:6]}",
+            flush=True,
+        )
+        return result
+    except Exception as exc:
+        print(
+            f"[masac_gpu_buf] WARNING: GPU buffer migration failed ({exc}). "
+            f"Buffer remains in system RAM.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return {"enabled": False, "reason": str(exc)}
 
 
 def _device_for(args: Any) -> torch.device:

@@ -1074,7 +1074,7 @@ def run_two_phase_jobs(
     Hardware budget:
       GPU: ~11.6 GiB / 80 GiB = 14.6%  (HAPPO~1.05 + MATD3~2.14 + MAAC~0.69 per job × 3)
       GPU free: ~68.4 GiB → zero contention, each algo gets full bandwidth for updates.
-      RAM: ~8-12 GiB per env load × 9 jobs (MATD3 staggered 90s apart to prevent OOM).
+      RAM: ~11.5 GiB per process × 9 jobs ≈ 104 GiB (MASAC buffer on GPU → no extra CPU RAM).
     CPU:  12 vCPUs / 9 jobs = 1.33 vCPU/job.
     Torch threads: --two-phase-light-torch-threads (default 1).
       Rationale: env sim is single-threaded Python (GIL). With 9 processes on 12 vCPUs
@@ -1233,21 +1233,26 @@ def run_two_phase_concurrent_jobs(
     Optimised for A100-SXM4-80GB (80 GiB VRAM, 167.1 GiB RAM).
     All 12 jobs share the GPU and 12 vCPUs equally (1 vCPU/job).
 
-    GPU budget:
-      Phase 1 (HAPPO×3 + MATD3×3 + MAAC×3): ~14 GiB (observed)
-      MASAC×3 at cuda_fraction=0.18: 3 × 14.4 GiB = 43.2 GiB
-      Total: ~57.2 GiB / 80 GiB = 71.5%  — ~22.8 GiB headroom.
+    GPU budget (MASAC replay buffer on GPU):
+      HAPPO×3 + MATD3×3 + MAAC×3: ~14 GiB total (observed ~1.55 GiB/job)
+      MASAC×3 buffer: 3 × 13.7 GiB = 41.1 GiB  (buffer_size=10 ep × 1.37 GiB/ep)
+      MASAC×3 model+cuda: 3 × 0.22 × 80 GiB reserved = 52.8 GiB
+      Actual GPU usage: ~14 + 41.1 + 1.5 (model) ≈ 56.6 GiB / 80 GiB = 70.8%
+
+    System RAM budget (buffer on GPU frees 41 GiB from CPU RAM):
+      12 processes × ~11.55 GiB/process = ~138.6 GiB
+      + launcher (~1 GiB) + OS (~8 GiB) = ~147.6 GiB / 167.1 GiB = 88.3%
+      Peak during MATD3 loading (120s stagger): ~155 GiB (93%) — safe.
+      Without GPU offload: 12 × 11.55 + 41.1 buffer = ~180 GiB → OOM (observed).
 
     CPU: 12 jobs on 12 vCPUs = 1 vCPU/job → ~2-2.5 FPS/job for env sim.
-    MASAC has CPU-idle phases (GPU QMIX updates) that partially free CPU for
-    Phase 1 jobs, so effective Phase 1 FPS is typically 2-2.5 rather than 2.
 
     Wall clock comparison (50 episodes, A100-SXM4-80GB):
       two_phase sequential : Phase1 ~40h + Phase2 ~27h = ~67h
       two_phase_concurrent : max(~54h, ~54h)          = ~54h  (saves ~13h, 19%)
 
     Parameters controlled by --two-phase-masac-cuda-fraction (default 0.18
-    in notebook; not the launcher default of 0.26 which is for Phase2-only use).
+    in notebook; actual MASAC fraction is max(provided, 0.22) when buffer is on GPU).
     """
     phase1_jobs = [j for j in jobs if j["name"] in TWO_PHASE_LIGHT]
     phase2_jobs = [j for j in jobs if j["name"] in TWO_PHASE_HEAVY]
@@ -1272,11 +1277,18 @@ def run_two_phase_concurrent_jobs(
     p1_jobs = _patch_torch_threads(phase1_jobs, 1)
     p1_jobs = [{**job, "env_overrides": _perf_env} for job in p1_jobs]
 
-    # MASAC: same torch_threads=1, lower cuda_fraction, replay buffer on CPU
+    # MASAC: replay buffer on GPU (not CPU).
+    # RAM budget with 12 concurrent processes on 167 GiB:
+    #   CPU-RAM: buffer=10ep×13.7 GiB×3 = 41.1 GiB → pushes 12-process total to ~180 GiB → OOM.
+    #   GPU-RAM: buffer=10ep×13.7 GiB×3 = 41.1 GiB on 80 GiB A100 → 52% GPU, system RAM ~113 GiB.
+    # Moving the buffer to GPU frees 41 GiB of system RAM and keeps GPU at ~62%.
+    # cuda_fraction must cover buffer (13.7 GiB) + model+overhead (~2 GiB) = ~15.7 GiB/job.
+    # We use max(provided_fraction, 0.22) → 17.6 GiB/job → safe margin.
+    masac_gpu_frac = max(masac_cuda_fraction, 0.22)
     p2_jobs = _patch_torch_threads(phase2_jobs, 1)
     for patch_flag, patch_val in [
-        ("--masac-preload-batch-device", "cpu"),
-        ("--cuda-memory-fraction", str(masac_cuda_fraction)),
+        ("--masac-preload-batch-device", "cuda"),   # buffer lives on GPU, frees system RAM
+        ("--cuda-memory-fraction", str(masac_gpu_frac)),
     ]:
         p2_jobs = [
             {**job, "args": replace_arg([str(a) for a in job["args"]], patch_flag, patch_val)}
@@ -1284,31 +1296,34 @@ def run_two_phase_concurrent_jobs(
         ]
     p2_jobs = [{**job, "env_overrides": _perf_env} for job in p2_jobs]
 
-    # Stagger MATD3 job starts to avoid simultaneous RAM spikes.
-    # Each CityLearn env load peaks at ~8-12 GiB RAM; 3 MATD3 jobs launching
-    # simultaneously overwhelms the 167 GiB budget (exit=-9 / SIGKILL).
-    # 90s gap allows the previous job to finish loading before the next starts.
+    # Stagger MATD3 job starts to prevent simultaneous dataset-load RAM spikes.
+    # With MASAC buffer on GPU, 9 initial processes use ~113 GiB system RAM.
+    # Each MATD3 load peaks ~17 GiB temporarily; 120s gap ensures the previous
+    # job finishes loading (CityLearn 17-building dataset takes ~60-90s) before
+    # the next starts, keeping peak below 155 GiB (93%) at all times.
     _matd3_delay = 0
     staggered = []
     for job in (p1_jobs + p2_jobs):
         if job["name"] == "matd3":
             job = {**job, "startup_delay_seconds": _matd3_delay}
-            _matd3_delay += 90
+            _matd3_delay += 120
         staggered.append(job)
     all_jobs = staggered
 
     n_total = len(all_jobs)
     vcpu_ratio = vcpu_count / max(n_total, 1)
-    p1_gpu_gib = len(phase1_jobs) * 1.55   # ~1.55 GiB per Phase-1 job (observed)
-    p2_gpu_gib = len(phase2_jobs) * masac_cuda_fraction * 80.0
+    p1_gpu_gib = len(phase1_jobs) * 1.55
+    masac_buf_gib = len(phase2_jobs) * 13.7   # buffer on GPU (buffer_size=10 ep × 1.37 GiB/ep)
+    p2_gpu_gib = len(phase2_jobs) * masac_gpu_frac * 80.0
 
     print(
         f"\n[launcher] ═══ CONCURRENT (HAPPO+MATD3+MAAC+MASAC): "
         f"{n_total} jobs × 1 torch-thread "
         f"| GPU ~{p1_gpu_gib:.0f}+{p2_gpu_gib:.0f} GiB / 80 GiB "
+        f"  (MASAC buf={masac_buf_gib:.0f} GiB on GPU, sys-RAM freed)"
         f"| vCPU {vcpu_count}/{n_total} = {vcpu_ratio:.1f}/job "
-        f"| MASAC cuda_frac={masac_cuda_fraction} replay=CPU | OMP=1 MALLOC_ARENA=2 "
-        f"| MATD3 stagger=90s/job ═══",
+        f"| MASAC preload=cuda frac={masac_gpu_frac:.2f} | OMP=1 MALLOC_ARENA=2 "
+        f"| MATD3 stagger=120s/job ═══",
         flush=True,
     )
 
