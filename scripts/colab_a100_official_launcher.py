@@ -786,6 +786,7 @@ def run_one_job(
     err_path = log_dir / f"{label}{suffix}.stderr.log"
     command = command_for_job(job)
     started = time.time()
+    startup_delay = float(job.get("startup_delay_seconds", 0))
     record = {
         "name": name,
         "scenario": scenario,
@@ -799,10 +800,9 @@ def run_one_job(
         "command": " ".join(command),
         "attempt": attempt,
         "oom_retry": bool(job.get("oom_retry", False)),
+        "startup_delay_seconds": startup_delay,
     }
     append_job_record(manifest, status_path, record, lock=lock)
-
-    startup_delay = float(job.get("startup_delay_seconds", 0))
     if startup_delay > 0:
         print(
             f"[launcher] {name.upper()}/{scenario}: startup delay {startup_delay:.0f}s "

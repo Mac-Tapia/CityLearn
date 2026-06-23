@@ -263,7 +263,22 @@ def print_progress(status: Mapping[str, object], root: Path) -> None:
         print(f"  ── {name}/{scenario} ─────────────────────────────────────────────")
 
         if not progress:
-            print("  Progreso vivo aun no disponible; aparece despues del primer intervalo de pasos.")
+            startup_delay = float(job.get("startup_delay_seconds") or 0)
+            if startup_delay > 0:
+                started_at_str = str(job.get("started_at") or "")
+                remaining = 0.0
+                if started_at_str:
+                    try:
+                        started_ts = datetime.fromisoformat(started_at_str).timestamp()
+                        remaining = max(0.0, startup_delay - (time.time() - started_ts))
+                    except ValueError:
+                        pass
+                if remaining > 0:
+                    print(f"  En espera de inicio: delay={startup_delay:.0f}s, faltan ~{remaining:.0f}s")
+                else:
+                    print("  Iniciando (delay expirado, esperando primer heartbeat)...")
+            else:
+                print("  Progreso vivo aun no disponible; aparece despues del primer intervalo de pasos.")
             continue
 
         global_step = int(progress.get("global_step") or 0)
