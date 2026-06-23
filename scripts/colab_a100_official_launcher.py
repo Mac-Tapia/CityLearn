@@ -438,6 +438,8 @@ def build_jobs(args: argparse.Namespace, root: Path, output_root: Path, schema_a
                     "0.9999",
                     "--action-aggregation",
                     "mean",
+                    "--live-progress-interval",
+                    "300",
                 ],
             }
         )
@@ -559,6 +561,8 @@ def build_jobs(args: argparse.Namespace, root: Path, output_root: Path, schema_a
                     "0.9999",
                     "--reward-scale",
                     "10.0",
+                    "--live-progress-interval",
+                    "300",
                 ],
             }
         )
