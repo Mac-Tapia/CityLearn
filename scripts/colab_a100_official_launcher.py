@@ -879,14 +879,19 @@ def run_job_with_retry(
     )
     log_path = Path(str(last_record.get("log") or ""))
     err_path = Path(str(last_record.get("stderr_log") or ""))
-    if not args.oom_retry or not is_oom_failure(log_path, err_path):
+    # exit=-9 is SIGKILL from the Linux OOM killer (system RAM exhausted).
+    # is_oom_failure() checks log text for CUDA OOM strings, which a SIGKILL
+    # never writes.  Treat either condition as an OOM worth retrying.
+    _sigkill = (exit_code == -9)
+    if not args.oom_retry or (not _sigkill and not is_oom_failure(log_path, err_path)):
         return exit_code
 
     retry_job = make_oom_retry_job(job)
     if retry_job is None:
         return exit_code
 
-    print(f"OOM detected for {job['name'].upper()}/{job['scenario']}; retrying with conservative settings.", flush=True)
+    _oom_reason = "SIGKILL (system RAM OOM)" if _sigkill else "CUDA OOM"
+    print(f"[launcher] {_oom_reason} detected for {job['name'].upper()}/{job['scenario']}; retrying with conservative settings.", flush=True)
     return run_one_job(
         root=root,
         manifest=manifest,
@@ -1310,10 +1315,13 @@ def run_two_phase_concurrent_jobs(
         ]
     p2_jobs = [{**job, "env_overrides": _perf_env} for job in p2_jobs]
 
-    # Stagger MATD3 starts: 120s gap so dataset loads don't overlap in RAM.
-    # After disk-buffer migration MATD3 steady-state RAM drops by 2.4 GiB/job,
-    # but the peak during warmup still uses full RAM before migration completes.
-    _matd3_delay = 0
+    # Stagger MATD3 starts: E1 at 300s, E2 at 420s, E3 at 540s.
+    # MASAC allocates 3×20.6 GiB float64 in RAM at t=0, then migrates to GPU
+    # as float32 (~180s).  Starting MATD3/E1 at t=0 pushes peak RAM above
+    # 167 GiB, causing the Linux OOM killer to SIGKILL it (exit=-9).
+    # Delay 300s ensures MASAC buffer migration is complete before any MATD3
+    # job starts its warmup, keeping peak RAM safely under 167 GiB.
+    _matd3_delay = 300
     staggered = []
     for job in (p1_jobs + p2_jobs):
         if job["name"] == "matd3":
@@ -1336,7 +1344,7 @@ def run_two_phase_concurrent_jobs(
         f" | GPU ~37 GiB / 80 GiB (46%)"
         f" | SSD ~{matd3_buf_disk_gib:.0f} GiB (MATD3 buf) "
         f"| MASAC buf={masac_buf_gpu_gib:.0f} GiB on GPU, MATD3 buf={matd3_buf_disk_gib:.0f} GiB on SSD "
-        f"| MATD3 stagger=120s/job ═══",
+        f"| MATD3 stagger=300s/E1+120s/job (post-MASAC-migration) ═══",
         flush=True,
     )
 
