@@ -1209,6 +1209,99 @@ def run_two_phase_jobs(
     return overall_rc
 
 
+def run_two_phase_concurrent_jobs(
+    *,
+    root: Path,
+    manifest: Dict[str, object],
+    status_path: Path,
+    jobs: List[Dict[str, object]],
+    output_root: Path,
+    log_dir: Path,
+    args: argparse.Namespace,
+) -> int:
+    """Run all 12 jobs simultaneously: HAPPO+MATD3+MAAC+MASAC concurrently.
+
+    Optimised for A100-SXM4-80GB (80 GiB VRAM, 167.1 GiB RAM).
+    All 12 jobs share the GPU and 12 vCPUs equally (1 vCPU/job).
+
+    GPU budget:
+      Phase 1 (HAPPO×3 + MATD3×3 + MAAC×3): ~14 GiB (observed)
+      MASAC×3 at cuda_fraction=0.18: 3 × 14.4 GiB = 43.2 GiB
+      Total: ~57.2 GiB / 80 GiB = 71.5%  — ~22.8 GiB headroom.
+
+    CPU: 12 jobs on 12 vCPUs = 1 vCPU/job → ~2-2.5 FPS/job for env sim.
+    MASAC has CPU-idle phases (GPU QMIX updates) that partially free CPU for
+    Phase 1 jobs, so effective Phase 1 FPS is typically 2-2.5 rather than 2.
+
+    Wall clock comparison (50 episodes, A100-SXM4-80GB):
+      two_phase sequential : Phase1 ~40h + Phase2 ~27h = ~67h
+      two_phase_concurrent : max(~54h, ~54h)          = ~54h  (saves ~13h, 19%)
+
+    Parameters controlled by --two-phase-masac-cuda-fraction (default 0.18
+    in notebook; not the launcher default of 0.26 which is for Phase2-only use).
+    """
+    phase1_jobs = [j for j in jobs if j["name"] in TWO_PHASE_LIGHT]
+    phase2_jobs = [j for j in jobs if j["name"] in TWO_PHASE_HEAVY]
+
+    masac_cuda_fraction = float(args.two_phase_masac_cuda_fraction)
+
+    try:
+        import os as _os
+        vcpu_count = len(_os.sched_getaffinity(0))
+    except AttributeError:
+        vcpu_count = _os.cpu_count() or 12
+
+    _perf_env = {
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+        "MALLOC_ARENA_MAX": "2",
+    }
+
+    # All Phase 1 jobs: torch_threads=1 (1 vCPU per job, GIL-bound env sim)
+    p1_jobs = _patch_torch_threads(phase1_jobs, 1)
+    p1_jobs = [{**job, "env_overrides": _perf_env} for job in p1_jobs]
+
+    # MASAC: same torch_threads=1, lower cuda_fraction, replay buffer on CPU
+    p2_jobs = _patch_torch_threads(phase2_jobs, 1)
+    for patch_flag, patch_val in [
+        ("--masac-preload-batch-device", "cpu"),
+        ("--cuda-memory-fraction", str(masac_cuda_fraction)),
+    ]:
+        p2_jobs = [
+            {**job, "args": replace_arg([str(a) for a in job["args"]], patch_flag, patch_val)}
+            for job in p2_jobs
+        ]
+    p2_jobs = [{**job, "env_overrides": _perf_env} for job in p2_jobs]
+
+    all_jobs = p1_jobs + p2_jobs
+    n_total = len(all_jobs)
+    vcpu_ratio = vcpu_count / max(n_total, 1)
+    p1_gpu_gib = len(phase1_jobs) * 1.55   # ~1.55 GiB per Phase-1 job (observed)
+    p2_gpu_gib = len(phase2_jobs) * masac_cuda_fraction * 80.0
+
+    print(
+        f"\n[launcher] ═══ CONCURRENT (HAPPO+MATD3+MAAC+MASAC): "
+        f"{n_total} jobs × 1 torch-thread "
+        f"| GPU ~{p1_gpu_gib:.0f}+{p2_gpu_gib:.0f} GiB / 80 GiB "
+        f"| vCPU {vcpu_count}/{n_total} = {vcpu_ratio:.1f}/job "
+        f"| MASAC cuda_frac={masac_cuda_fraction} replay=CPU | OMP=1 MALLOC_ARENA=2 ═══",
+        flush=True,
+    )
+
+    return run_parallel_jobs(
+        root=root,
+        manifest=manifest,
+        status_path=status_path,
+        jobs=all_jobs,
+        output_root=output_root,
+        log_dir=log_dir,
+        args=args,
+        max_parallel_override=n_total,
+    )
+
+
 def make_manifest(
     *,
     args: argparse.Namespace,
@@ -1251,9 +1344,15 @@ def make_manifest(
                 "Phase2=MASAC x3 (dedicated A100, 4 vCPU/job, OMP=1, ~4-7 FPS/job, replay-buffer on CPU)."
                 if args.execution_mode == "two_phase"
                 else (
-                    "algo_sequential: HAPPO→MATD3→MAAC→MASAC one group at a time (3 parallel per phase)."
-                    if args.execution_mode == "algo_sequential"
-                    else f"parallel_all: all 12 jobs simultaneously (~2 FPS/job, high GPU contention)."
+                    "two_phase_concurrent: all 12 jobs simultaneously (MASAC overlaps Phase1), "
+                    "MASAC cuda_frac=0.18 (14.4 GiB×3=43.2 GiB + Phase1 14 GiB = 57 GiB / 80 GiB), "
+                    "1 vCPU/job ~2-2.5 FPS, saves ~13h vs sequential two_phase."
+                    if args.execution_mode == "two_phase_concurrent"
+                    else (
+                        "algo_sequential: HAPPO→MATD3→MAAC→MASAC one group at a time (3 parallel per phase)."
+                        if args.execution_mode == "algo_sequential"
+                        else f"parallel_all: all 12 jobs simultaneously (~2 FPS/job, high GPU contention)."
+                    )
                 )
             ),
         },
@@ -1374,14 +1473,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--execution-mode",
         default="two_phase",
-        choices=("parallel_all", "two_phase", "algo_sequential"),
+        choices=("parallel_all", "two_phase", "two_phase_concurrent", "algo_sequential"),
         help=(
             "two_phase (default): Phase 1 = HAPPO+MATD3+MAAC × 3 scenarios (9 jobs "
-            "simultaneous, ~11 GiB GPU total, 2-3 FPS/job); Phase 2 = MASAC × 3 "
-            "scenarios (3 jobs, dedicated A100, replay-buffer on CPU, 4-5 FPS/job). "
-            "parallel_all: all 12 jobs simultaneously (2 FPS/job, 74 GiB GPU). "
-            "algo_sequential: HAPPO→MATD3→MAAC→MASAC one algorithm at a time "
-            "(3 jobs per phase, 4-5 FPS/job, max GPU per phase)."
+            "simultaneous, ~11 GiB GPU, 3 FPS/job); Phase 2 = MASAC × 3 scenarios "
+            "(3 jobs, dedicated A100, 4 vCPU/job, 4-5 FPS/job). ~67h total. "
+            "two_phase_concurrent: all 12 jobs simultaneously (MASAC overlaps Phase1), "
+            "MASAC cuda_fraction=0.18 (set via --two-phase-masac-cuda-fraction), "
+            "1 vCPU/job → 2-2.5 FPS, saves ~13h (19%%) vs two_phase. ~54h total. "
+            "algo_sequential: HAPPO→MATD3→MAAC→MASAC one group at a time (3 per phase). "
+            "parallel_all: all 12 simultaneously, no MASAC GPU cap (risk OOM)."
         ),
     )
     parser.add_argument(
@@ -1503,6 +1604,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.execution_mode == "two_phase":
         overall_rc = run_two_phase_jobs(
+            root=root,
+            manifest=manifest,
+            status_path=status_path,
+            jobs=jobs,
+            output_root=output_root,
+            log_dir=log_dir,
+            args=args,
+        )
+    elif args.execution_mode == "two_phase_concurrent":
+        overall_rc = run_two_phase_concurrent_jobs(
             root=root,
             manifest=manifest,
             status_path=status_path,

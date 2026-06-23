@@ -291,10 +291,12 @@ def check_notebook() -> int:
         _fail('notebook:launcher_base_args', 'def launcher_base_args not found in any cell')
         failures += 1
     else:
-        if not _check('notebook:execution_mode_two_phase',
-                      '--execution-mode' in launcher_cell_src and 'two_phase' in launcher_cell_src,
-                      '--execution-mode two_phase present',
-                      '--execution-mode two_phase missing from launcher_base_args!'):
+        _valid_modes = ('two_phase', 'two_phase_concurrent', 'algo_sequential', 'parallel_all')
+        if not _check('notebook:execution_mode_set',
+                      '--execution-mode' in launcher_cell_src and
+                      any(m in launcher_cell_src for m in _valid_modes),
+                      '--execution-mode <valid_mode> present',
+                      '--execution-mode missing or invalid in launcher_base_args!'):
             failures += 1
         if not _check('notebook:no_max_parallel_12',
                       "'--max-parallel', '12'" not in launcher_cell_src and
