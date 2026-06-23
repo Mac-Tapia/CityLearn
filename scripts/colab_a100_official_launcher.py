@@ -1315,18 +1315,21 @@ def run_two_phase_concurrent_jobs(
         ]
     p2_jobs = [{**job, "env_overrides": _perf_env} for job in p2_jobs]
 
-    # Stagger MATD3 starts: E1 at 300s, E2 at 420s, E3 at 540s.
-    # MASAC allocates 3×20.6 GiB float64 in RAM at t=0, then migrates to GPU
-    # as float32 (~180s).  Starting MATD3/E1 at t=0 pushes peak RAM above
-    # 167 GiB, causing the Linux OOM killer to SIGKILL it (exit=-9).
-    # Delay 300s ensures MASAC buffer migration is complete before any MATD3
-    # job starts its warmup, keeping peak RAM safely under 167 GiB.
-    _matd3_delay = 300
+    # Stagger MATD3 starts: E1 at 600s, E2 at 730s, E3 at 860s.
+    # Previous 300/420/540s delays: E1+E2 still get OOM-killed (exit=-9) while
+    # E3 at 540s survived.  Root cause: at t<540s the 9 concurrent processes
+    # (HAPPO×3 + MASAC×3 + MAAC×3) still have transient peak RAM from dataset
+    # loading and initial gradient allocation that, combined with the new MATD3
+    # env load (~10-12 GiB), pushes past the 167 GiB Colab limit.
+    # Starting all MATD3 jobs after 600s gives the other processes time to
+    # reach steady state.  130s inter-job gap (vs 120s) adds a safety margin
+    # between concurrent MATD3 env loads.
+    _matd3_delay = 600
     staggered = []
     for job in (p1_jobs + p2_jobs):
         if job["name"] == "matd3":
             job = {**job, "startup_delay_seconds": _matd3_delay}
-            _matd3_delay += 120
+            _matd3_delay += 130
         staggered.append(job)
     all_jobs = staggered
 
@@ -1344,7 +1347,7 @@ def run_two_phase_concurrent_jobs(
         f" | GPU ~37 GiB / 80 GiB (46%)"
         f" | SSD ~{matd3_buf_disk_gib:.0f} GiB (MATD3 buf) "
         f"| MASAC buf={masac_buf_gpu_gib:.0f} GiB on GPU, MATD3 buf={matd3_buf_disk_gib:.0f} GiB on SSD "
-        f"| MATD3 stagger=300s/E1+120s/job (post-MASAC-migration) ═══",
+        f"| MATD3 stagger=600s/E1+130s/job (steady-state RAM after concurrent init) ═══",
         flush=True,
     )
 

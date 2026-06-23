@@ -76,14 +76,18 @@ class GpuBackedNdArray:
     def __setitem__(self, key: Any, value: Any) -> None:
         if isinstance(value, np.ndarray):
             src = torch.as_tensor(value.astype(np.float32, copy=False))
-            self._tensor[key].copy_(src, non_blocking=True)
         elif isinstance(value, torch.Tensor):
-            self._tensor[key].copy_(
-                value.to(dtype=torch.float32, non_blocking=True),
-                non_blocking=True,
-            )
+            src = value.to(dtype=torch.float32, non_blocking=True)
         else:
             self._tensor[key] = float(value)
+            return
+        target = self._tensor[key]
+        # numpy broadcasts [1, T, N, D] → [T, N, D] silently when key is a
+        # scalar (episode_batch has leading batch-1 dim from rollout.py:126).
+        # torch copy_() requires exact shapes — replicate numpy semantics.
+        while src.ndim > target.ndim and src.shape[0] == 1:
+            src = src.squeeze(0)
+        target.copy_(src, non_blocking=True)
 
     # ── numpy-compatible reads ──
     def __getitem__(self, key: Any) -> torch.Tensor:
