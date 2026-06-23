@@ -104,16 +104,9 @@ def main() -> int:
         trace_detail=args.trace_detail,
         normalize_observations=args.normalize_observations,
     )
-    eval_env = CityLearnOffPolicyVecEnv(
-        schema_path=args.schema_path,
-        scenario=args.scenario,
-        seed=args.seed + 10000,
-        episode_time_steps=args.episode_time_steps,
-        algorithm="MATD3",
-        trace_record_interval=args.trace_record_interval,
-        trace_detail=args.trace_detail,
-        normalize_observations=args.normalize_observations,
-    )
+    # eval is disabled (use_eval=False) — reuse the training env reference instead
+    # of loading a second full dataset copy (~8-12 GiB RAM per env × 3 jobs = 24-36 GiB saved).
+    eval_env = env
     gpu_runtime = configure_torch_runtime(
         torch,
         use_cuda=args.cuda,
@@ -284,7 +277,8 @@ def main() -> int:
     finally:
         stop_live_progress_heartbeat(heartbeat_stop, heartbeat_thread)
         env.close()
-        eval_env.close()
+        if eval_env is not env:
+            eval_env.close()
         if hasattr(runner, "writter"):
             runner.writter.export_scalars_to_json(str(Path(runner.log_dir) / "summary.json"))
             runner.writter.close()

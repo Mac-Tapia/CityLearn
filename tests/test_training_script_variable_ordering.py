@@ -119,6 +119,22 @@ def test_episode_offset_assigned_before_env_constructor():
             )
 
 
+def test_matd3_no_duplicate_env_load():
+    """MATD3 must not create a second CityLearnOffPolicyVecEnv (eval_env) since
+    use_eval=False — loading the dataset twice per job wastes 8-12 GiB RAM × 3 jobs."""
+    src = (SCRIPTS_DIR / "train_citylearn_v3_matd3.py").read_text(encoding="utf-8")
+    # Count CityLearnOffPolicyVecEnv(...) constructor calls
+    count = src.count("CityLearnOffPolicyVecEnv(")
+    assert count == 1, (
+        f"train_citylearn_v3_matd3.py: expected 1 CityLearnOffPolicyVecEnv constructor call, "
+        f"found {count}. A second eval_env loads the full dataset twice per job — ~24-36 GiB wasted RAM."
+    )
+    # Also check that eval_env is reused (not allocated anew)
+    assert "eval_env = env" in src, (
+        "eval_env should be set to 'env' (reuse) when use_eval=False, not a new env."
+    )
+
+
 def test_ast_no_load_before_store_in_main():
     """AST-level check: no _ variable used before its first assignment in main()."""
     for name in SCRIPTS:

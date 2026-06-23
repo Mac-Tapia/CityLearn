@@ -796,6 +796,15 @@ def run_one_job(
     }
     append_job_record(manifest, status_path, record, lock=lock)
 
+    startup_delay = float(job.get("startup_delay_seconds", 0))
+    if startup_delay > 0:
+        print(
+            f"[launcher] {name.upper()}/{scenario}: startup delay {startup_delay:.0f}s "
+            f"(stagger RAM allocation for concurrent dataset loads)",
+            flush=True,
+        )
+        time.sleep(startup_delay)
+
     print(f"START {name.upper()}/{scenario} attempt={attempt} log={log_path}", flush=True)
     proc_env = os.environ.copy()
     # Per-job env overrides (e.g. OMP_NUM_THREADS to prevent numpy thread stealing).
@@ -1065,7 +1074,7 @@ def run_two_phase_jobs(
     Hardware budget:
       GPU: ~11.6 GiB / 80 GiB = 14.6%  (HAPPO~1.05 + MATD3~2.14 + MAAC~0.69 per job × 3)
       GPU free: ~68.4 GiB → zero contention, each algo gets full bandwidth for updates.
-      RAM: negligible (no large replay buffers for HAPPO/MATD3/MAAC).
+      RAM: ~8-12 GiB per env load × 9 jobs (MATD3 staggered 90s apart to prevent OOM).
     CPU:  12 vCPUs / 9 jobs = 1.33 vCPU/job.
     Torch threads: --two-phase-light-torch-threads (default 1).
       Rationale: env sim is single-threaded Python (GIL). With 9 processes on 12 vCPUs
@@ -1275,7 +1284,19 @@ def run_two_phase_concurrent_jobs(
         ]
     p2_jobs = [{**job, "env_overrides": _perf_env} for job in p2_jobs]
 
-    all_jobs = p1_jobs + p2_jobs
+    # Stagger MATD3 job starts to avoid simultaneous RAM spikes.
+    # Each CityLearn env load peaks at ~8-12 GiB RAM; 3 MATD3 jobs launching
+    # simultaneously overwhelms the 167 GiB budget (exit=-9 / SIGKILL).
+    # 90s gap allows the previous job to finish loading before the next starts.
+    _matd3_delay = 0
+    staggered = []
+    for job in (p1_jobs + p2_jobs):
+        if job["name"] == "matd3":
+            job = {**job, "startup_delay_seconds": _matd3_delay}
+            _matd3_delay += 90
+        staggered.append(job)
+    all_jobs = staggered
+
     n_total = len(all_jobs)
     vcpu_ratio = vcpu_count / max(n_total, 1)
     p1_gpu_gib = len(phase1_jobs) * 1.55   # ~1.55 GiB per Phase-1 job (observed)
@@ -1286,7 +1307,8 @@ def run_two_phase_concurrent_jobs(
         f"{n_total} jobs × 1 torch-thread "
         f"| GPU ~{p1_gpu_gib:.0f}+{p2_gpu_gib:.0f} GiB / 80 GiB "
         f"| vCPU {vcpu_count}/{n_total} = {vcpu_ratio:.1f}/job "
-        f"| MASAC cuda_frac={masac_cuda_fraction} replay=CPU | OMP=1 MALLOC_ARENA=2 ═══",
+        f"| MASAC cuda_frac={masac_cuda_fraction} replay=CPU | OMP=1 MALLOC_ARENA=2 "
+        f"| MATD3 stagger=90s/job ═══",
         flush=True,
     )
 
