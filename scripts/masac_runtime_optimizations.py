@@ -21,6 +21,7 @@ training updates).
 
 from __future__ import annotations
 
+import gc
 import sys
 from typing import Any
 
@@ -112,10 +113,18 @@ def _is_large_float_ndarray(value: Any) -> bool:
 def _migrate_dict(data: dict, device: torch.device) -> dict[str, int]:
     """Replace large float numpy arrays in a dict with GpuBackedNdArray."""
     migrated: dict[str, int] = {}
-    for key, val in list(data.items()):
+    for key in list(data.keys()):
+        val = data[key]
         if _is_large_float_ndarray(val):
-            data[key] = GpuBackedNdArray.from_numpy(val, device)
-            migrated[str(key)] = val.nbytes
+            nbytes = val.nbytes
+            shape = val.shape
+            # Drop the dict's reference BEFORE allocating GPU memory so the
+            # original float64 array (13.7 GiB per job) is freed immediately
+            # by Python's reference counter. Buffer starts filled with zeros
+            # at epoch 0, so we don't need to copy the existing data.
+            data[key] = None
+            data[key] = GpuBackedNdArray.zeros(shape, device)
+            migrated[str(key)] = nbytes
     return migrated
 
 
@@ -139,11 +148,14 @@ def _migrate_obj(obj: Any, device: torch.device, depth: int = 0) -> dict[str, in
         else:
             return
 
-        for key, val in list(target.items()):
+        for key in list(target.keys()):
+            val = target[key]
             if _is_large_float_ndarray(val):
-                gpu_arr = GpuBackedNdArray.from_numpy(val, device)
-                target[key] = gpu_arr
-                migrated[f"{type(o).__name__}.{key}"] = val.nbytes
+                nbytes = val.nbytes
+                shape = val.shape
+                target[key] = None   # free float64 before GPU alloc
+                target[key] = GpuBackedNdArray.zeros(shape, device)
+                migrated[f"{type(o).__name__}.{key}"] = nbytes
             elif isinstance(val, dict) and any(
                 _is_large_float_ndarray(v) for v in val.values()
             ):
@@ -170,6 +182,10 @@ def install_gpu_replay_buffer(runner: Any, device: torch.device) -> dict:
 
     try:
         migrated = _migrate_obj(runner, device)
+        # Force Python GC so any remaining references to the original float64
+        # arrays (freed by setting dict/attr slots to None before GPU alloc)
+        # are collected immediately rather than on the next GC cycle.
+        gc.collect()
         total_bytes = sum(migrated.values())
         total_gib = total_bytes / 1024**3
         result = {
@@ -182,7 +198,7 @@ def install_gpu_replay_buffer(runner: Any, device: torch.device) -> dict:
         }
         print(
             f"[masac_gpu_buf] Moved {len(migrated)} replay buffer arrays "
-            f"({total_gib:.2f} GiB) from system RAM → {device}. "
+            f"({total_gib:.2f} GiB float64 freed from RAM → {device} as float32. "
             f"Arrays: {list(migrated.keys())[:6]}",
             flush=True,
         )
