@@ -10,7 +10,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Optional, Sequence
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 
 ALGORITHMS = ("happo", "masac", "matd3", "maac")
@@ -145,7 +145,14 @@ def _job_is_running(job: Mapping[str, object]) -> bool:
     return job.get("completed_at") is None and not job.get("planned_only") and not job.get("skipped")
 
 
+def execution_mode(status: Mapping[str, object]) -> str:
+    par = dict(status.get("parallelization") or {})
+    return str(par.get("execution_mode") or status.get("execution") or "?")
+
+
 def infer_two_phase(status: Mapping[str, object]) -> Optional[int]:
+    if execution_mode(status) != "two_phase_happo_masac":
+        return None
     jobs = list(status.get("jobs", []))
     if not jobs:
         return None
@@ -158,6 +165,33 @@ def infer_two_phase(status: Mapping[str, object]) -> Optional[int]:
     if any(not _job_is_done(j) for j in p2):
         return 2
     return 0
+
+
+def _phase_algo_set(phase: int) -> frozenset:
+    return TWO_PHASE_P1 if phase == 1 else TWO_PHASE_P2
+
+
+def _jobs_in_phase(status: Mapping[str, object], phase: int) -> List[Mapping[str, object]]:
+    algos = _phase_algo_set(phase)
+    return [j for j in status.get("jobs", []) if str(j.get("name")) in algos]
+
+
+def _phase_job_label(job: Mapping[str, object], phase: int, current_phase: Optional[int]) -> str:
+    name = str(job.get("name", "?")).upper()
+    scenario = str(job.get("scenario", "?"))
+    if job.get("planned_only"):
+        if current_phase == 1 and phase == 2:
+            return f"{name}/{scenario} [en cola fase 2]"
+        return f"{name}/{scenario} [planificado]"
+    if job.get("skipped"):
+        return f"{name}/{scenario} [omitido]"
+    if _job_is_done(job):
+        return f"{name}/{scenario} [ok]"
+    if _job_is_running(job):
+        return f"{name}/{scenario} [activo]"
+    if current_phase == 1 and phase == 2:
+        return f"{name}/{scenario} [en cola fase 2]"
+    return f"{name}/{scenario} [pendiente]"
 
 
 def estimate_phase_eta_minutes(
@@ -201,31 +235,49 @@ def estimate_phase_eta_minutes(
 
 def print_parallelization(status: Mapping[str, object], root: Path) -> None:
     par = dict(status.get("parallelization") or {})
-    exec_mode = str(par.get("execution_mode") or status.get("execution") or "?")
+    exec_mode = execution_mode(status)
     est_min_ep = float(par.get("est_min_per_episode") or EST_MIN_PER_EPISODE_DEFAULT)
     episodes = int(status.get("episodes") or 0)
     est_phase_h = float(par.get("est_phase_wall_hours") or (episodes * est_min_ep / 60.0 if episodes else 0))
     est_total_h = float(par.get("est_total_wall_hours") or (est_phase_h * 2 if est_phase_h else 0))
 
     jobs = list(status.get("jobs", []))
-    running = sum(1 for j in jobs if _job_is_running(j))
     done = sum(1 for j in jobs if _job_is_done(j))
     phase = infer_two_phase(status)
 
     print("")
     print("Paralelismo y tiempos")
     print(f"  execution_mode : {exec_mode}")
+    strategy = str(par.get("strategy") or "")
+    if strategy:
+        print(f"  strategy       : {strategy}")
     if exec_mode == "two_phase_happo_masac":
         if phase == 1:
-            phase_label = "Fase 1/2 (HAPPO+MASAC x3, 6 paralelos, sin stagger)"
+            phase_label = "Fase 1/2 — HAPPO+MASAC x3 (6 paralelos, sin stagger)"
         elif phase == 2:
-            phase_label = "Fase 2/2 (MATD3+MAAC x3, 6 paralelos, sin stagger)"
+            phase_label = "Fase 2/2 — MATD3+MAAC x3 (6 paralelos, sin stagger)"
         elif phase == 0:
             phase_label = "Completado (ambas fases)"
         else:
             phase_label = "two_phase_happo_masac (fase por determinar)"
         print(f"  fase           : {phase_label}")
-        print(f"  jobs           : {running} activos | {done}/12 completados")
+        if phase in (1, 2):
+            phase_jobs = _jobs_in_phase(status, phase)
+            phase_running = sum(1 for j in phase_jobs if _job_is_running(j))
+            phase_done = sum(1 for j in phase_jobs if _job_is_done(j))
+            print(f"  jobs fase      : {phase_running} activos | {phase_done}/6 completados en fase")
+            active = [_phase_job_label(j, phase, phase) for j in phase_jobs if _job_is_running(j)]
+            if active:
+                print(f"  activos        : {', '.join(active)}")
+            if phase == 1:
+                queued = [
+                    _phase_job_label(j, 2, phase)
+                    for j in _jobs_in_phase(status, 2)
+                    if not _job_is_done(j) and not _job_is_running(j)
+                ]
+                if queued:
+                    print(f"  en cola fase 2 : {', '.join(queued[:6])}")
+        print(f"  jobs total     : {done}/12 completados")
         print(
             f"  est. tiempo    : ~{est_min_ep:.0f} min/episodio | "
             f"~{est_phase_h:.0f} h/fase | ~{est_total_h:.0f} h total (wall)"
@@ -241,8 +293,10 @@ def print_parallelization(status: Mapping[str, object], root: Path) -> None:
         elif phase == 0:
             print("  ETA            : entrenamiento completado")
     else:
-        print(f"  strategy       : {par.get('strategy', '?')}")
+        running = sum(1 for j in jobs if _job_is_running(j))
         print(f"  jobs activos   : {running}")
+        if "stagger" in strategy.lower() or any(float(j.get("startup_delay_seconds") or 0) > 0 for j in jobs):
+            print("  ATENCION       : stagger detectado — re-ejecuta celdas 1.2, 6.1, 7.0, 7.1 con two_phase_happo_masac")
 
 
 def print_status(status: Mapping[str, object], root: Path) -> None:

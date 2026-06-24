@@ -1146,7 +1146,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="A100-80GB: 16 gradient steps per update (2x vs 8; GPU is fast).")
     parser.add_argument(
         "--execution-mode",
-        default="algo_sequential",
+        default="two_phase_happo_masac",
         choices=("algo_sequential", "two_phase_happo_masac"),
         help=(
             "algo_sequential: HAPPO->MASAC->MATD3->MAAC, 3 scenarios in parallel per algorithm. "
