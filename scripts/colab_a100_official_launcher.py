@@ -1162,12 +1162,49 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _load_protocol_guard():
+    guard_path = Path(__file__).resolve().parent / "colab_protocol_guard.py"
+    if not guard_path.is_file():
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_colab_protocol_guard", guard_path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _assert_launcher_self() -> None:
+    script = Path(__file__).resolve()
+    guard = _load_protocol_guard()
+    if guard is not None:
+        guard.assert_not_legacy_path(script, role="launcher")
+        guard.validate_launcher_source(script.read_text(encoding="utf-8"), path=str(script))
+        return
+    if "MADRL_CityLearn_v3" in str(script):
+        raise RuntimeError(f"Launcher en clone legacy Drive: {script}")
+    src = script.read_text(encoding="utf-8")
+    if LAUNCHER_PROTOCOL_ID not in src or "run_two_phase_happo_masac_jobs" not in src:
+        raise RuntimeError(f"Launcher corrupto o legacy: {script}")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    _assert_launcher_self()
+    script_path = Path(__file__).resolve()
     print(
-        f"[launcher] protocol={LAUNCHER_PROTOCOL_ID} execution_mode={args.execution_mode}",
+        f"[launcher] protocol={LAUNCHER_PROTOCOL_ID} execution_mode={args.execution_mode} "
+        f"script_path={script_path}",
         flush=True,
     )
+    if args.execution_mode != "two_phase_happo_masac":
+        print(
+            f"[launcher] FATAL: execution_mode={args.execution_mode!r} — solo two_phase_happo_masac",
+            flush=True,
+        )
+        return 2
     root = project_root()
     env_info = configure_environment(root, args)
 

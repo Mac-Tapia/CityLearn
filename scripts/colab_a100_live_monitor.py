@@ -529,8 +529,34 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _load_protocol_guard():
+    guard_path = Path(__file__).resolve().parent / "colab_protocol_guard.py"
+    if not guard_path.is_file():
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_colab_protocol_guard", guard_path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _assert_monitor_self() -> None:
+    script = Path(__file__).resolve()
+    guard = _load_protocol_guard()
+    if guard is not None:
+        guard.assert_not_legacy_path(script, role="monitor")
+        guard.validate_monitor_source(script.read_text(encoding="utf-8"), path=str(script))
+        return
+    if MONITOR_PROTOCOL_ID not in script.read_text(encoding="utf-8"):
+        raise RuntimeError(f"Monitor corrupto o legacy: {script}")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    _assert_monitor_self()
     root = project_root()
     output_root = resolve_output_root(root, args.output_root)
     if output_root is None:
