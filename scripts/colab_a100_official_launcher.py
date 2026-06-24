@@ -587,28 +587,28 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
     args = [str(item) for item in retry["args"]]
 
     if name == "masac":
-        # OOM retry: 50% of A100-80GB defaults
-        args = replace_arg(args, "--buffer-size", "20")           # 40 -> 20 episodes
-        args = replace_arg(args, "--critic-batch-size", "512")    # 1024 -> 512
-        args = replace_arg(args, "--max-replay-buffer-gib", "20") # 40 -> 20 GiB
-        args = replace_arg(args, "--masac-rnn-hidden-dim", "512") # 1024 -> 512
-        args = replace_arg(args, "--masac-qmix-hidden-dim", "256")# 512 -> 256
-        args = replace_arg(args, "--masac-hyper-hidden-dim", "512")# 1024 -> 512
+        # OOM retry: ~50% of two_phase cuda defaults (8 ep / 11 GiB -> 4 ep / 5.5 GiB)
+        args = replace_arg(args, "--buffer-size", "4")
+        args = replace_arg(args, "--critic-batch-size", "256")
+        args = replace_arg(args, "--max-replay-buffer-gib", "5.5")
+        args = replace_arg(args, "--rnn-hidden-dim", "256")
+        args = replace_arg(args, "--qmix-hidden-dim", "128")
+        args = replace_arg(args, "--hyper-hidden-dim", "256")
         args = replace_arg(args, "--masac-preload-batch-device", "cpu")
     elif name == "matd3":
-        # OOM retry: 50% of A100-80GB defaults
-        args = replace_arg(args, "--batch-size", "512")           # 1024 -> 512
-        args = replace_arg(args, "--buffer-size", "1000000")      # 2M -> 1M
-        args = replace_arg(args, "--hidden-size", "512")          # 1024 -> 512
+        # OOM retry: ~50% of A100-80GB defaults
+        args = replace_arg(args, "--batch-size", "512")
+        args = replace_arg(args, "--buffer-size", "1000000")
+        args = replace_arg(args, "--hidden-size", "512")
     elif name == "maac":
-        # OOM retry: 50% of A100-80GB defaults
-        args = replace_arg(args, "--batch-size", "512")           # 1024 -> 512
-        args = replace_arg(args, "--buffer-length", "500000")     # 1M -> 500K
-        args = replace_arg(args, "--hidden-size", "512")          # 1024 -> 512
-        args = replace_arg(args, "--num-updates", "8")            # 16 -> 8
+        # OOM retry: ~50% of A100-80GB defaults
+        args = replace_arg(args, "--batch-size", "512")
+        args = replace_arg(args, "--buffer-length", "500000")
+        args = replace_arg(args, "--hidden-size", "512")
+        args = replace_arg(args, "--num-updates", "8")
     elif name == "happo":
-        # OOM retry: reduce hidden size
-        args = replace_arg(args, "--hidden-size", "512")          # 1024 -> 512
+        args = replace_arg(args, "--hidden-size", "256")
+        args = replace_arg(args, "--n-rollout-threads", "1")
     else:
         return None
 
@@ -1079,7 +1079,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--episodes", default=50, type=int)
     parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--schema-path", default=DEFAULT_SCHEMA)
-    parser.add_argument("--torch-threads", default=4, type=int)
+    parser.add_argument("--torch-threads", default=2, type=int)
     parser.add_argument("--parallel-scenarios", default=3, type=int,
                         help="Number of scenarios to run concurrently per algorithm. "
                              "Set to 1 for sequential. A100-80GB: 3 is safe (MASAC uses CPU buffer).")
@@ -1102,34 +1102,32 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--log-tail", default=4, type=int)
     parser.add_argument("--oom-retry", action=argparse.BooleanOptionalAction, default=True)
 
-    # ── A100-SXM4-80GB hyperparameters ───────────────────────────────────────
-    # VRAM budget (73.6 GiB usable @ 0.92): 3 parallel scenarios per algo.
-    # HAPPO x3: lighter [512,512] policy nets target ~11 FPS on A100-class runs.
-    # MATD3 x3: ~1.5 GiB each = 4.5 GiB. MAAC x3: ~1.5 GiB each = 4.5 GiB.
-    # RAM budget (167 GiB): MASAC buffer 3x40=120 GiB, MATD3 buffer 3x14=42 GiB.
+    # ── A100-SXM4-80GB hyperparameters (two_phase_happo_masac primary) ─────────
+    # Phase1 (6 jobs): 3xHAPPO light GPU + 3xMASAC replay on GPU @ 0.26 frac (~21 GiB/job cap).
+    # Phase2 (6 jobs): 3xMATD3 + 3xMAAC; buffers mostly RAM (~14+7 GiB/job).
+    # Notebook cell 6.1 is the single source of truth; these defaults match launcher_base_args().
     parser.add_argument("--happo-hidden-size", default=512, type=int,
-                        help="A100-80GB HAPPO speed profile: [512,512] targets ~11 FPS with 3 parallel scenarios.")
-    parser.add_argument("--happo-n-rollout-threads", default=4, type=int,
-                        help="Parallel env subprocesses per HAPPO job (ShareSubprocVecEnv). "
-                             "A100-80GB + 3 parallel scenarios: 4 threads x 3 = 12 procs → ~4x FPS. "
-                             "Set to 1 for DummyVecEnv (debug).")
-    parser.add_argument("--masac-max-replay-buffer-gib", default=40.0, type=float)
-    parser.add_argument("--masac-buffer-size", default=40, type=int,
-                        help="Episodes in replay buffer. 40 ep = 350400 steps per instance.")
-    parser.add_argument("--masac-critic-batch-size", default=1024, type=int,
-                        help="A100-80GB: 1024 fills Tensor Cores. Was 512 (bug).")
+                        help="HAPPO [512,512] speed profile; ~11 FPS/job with n_rollout_threads=1 in two_phase.")
+    parser.add_argument("--happo-n-rollout-threads", default=1, type=int,
+                        help="Env rollouts per HAPPO job. Use 1 for two_phase (6 jobs/fase); "
+                             "4 only for algo_sequential with 3 HAPPO-only scenarios.")
+    parser.add_argument("--masac-max-replay-buffer-gib", default=11.0, type=float)
+    parser.add_argument("--masac-buffer-size", default=8, type=int,
+                        help="Episodes in replay buffer. 8 ep ~11 GiB on GPU (axis mode, 8760 steps).")
+    parser.add_argument("--masac-critic-batch-size", default=512, type=int,
+                        help="A100 two_phase: 512 balances Tensor Core use and peak VRAM with cuda buffer.")
     parser.add_argument("--masac-critic-train-steps", default=2, type=int,
-                        help="A100-80GB: 2 critic steps per env step (GPU is fast).")
+                        help="2 critic steps per env step.")
     parser.add_argument("--masac-actor-sample-times", default=10, type=int,
-                        help="A100-80GB: 10 actor updates per critic step (2x vs 5).")
-    parser.add_argument("--masac-rnn-hidden-dim", default=1024, type=int,
-                        help="A100-80GB: GRU actor hidden dim 1024 (2x vs 512).")
-    parser.add_argument("--masac-qmix-hidden-dim", default=512, type=int,
-                        help="A100-80GB: QMIX monotonic mixing 512 (2x vs 256).")
-    parser.add_argument("--masac-hyper-hidden-dim", default=1024, type=int,
-                        help="A100-80GB: hypernetwork hidden dim 1024 (2x vs 512).")
-    parser.add_argument("--masac-preload-batch-device", default="cpu", choices=("auto", "cuda", "cpu"),
-                        help="cpu: keeps 3x40=120 GiB buffer in RAM, freeing VRAM for parallel scenarios.")
+                        help="10 actor updates per critic step.")
+    parser.add_argument("--masac-rnn-hidden-dim", default=512, type=int,
+                        help="GRU actor hidden dim; 512 stable with ~11 GiB GPU replay buffer.")
+    parser.add_argument("--masac-qmix-hidden-dim", default=256, type=int,
+                        help="QMIX mixing hidden dim.")
+    parser.add_argument("--masac-hyper-hidden-dim", default=512, type=int,
+                        help="Hypernetwork hidden dim for QMIX weights.")
+    parser.add_argument("--masac-preload-batch-device", default="cuda", choices=("auto", "cuda", "cpu"),
+                        help="cuda for two_phase Phase1 (buffer on GPU); cpu for algo_sequential 40-ep runs.")
     parser.add_argument("--matd3-batch-size", default=1024, type=int,
                         help="A100-80GB: Tensor Cores optimal at batch>=512.")
     parser.add_argument("--matd3-buffer-size", default=2000000, type=int,
