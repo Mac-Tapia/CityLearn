@@ -136,6 +136,13 @@ def add_common_citylearn_args(parser: argparse.ArgumentParser) -> None:
             "not from Windows shared GPU memory."
         ),
     )
+    parser.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        default=True,
+        help="Disable intra-job checkpoint resume when live_progress/checkpoints exist.",
+    )
 
 
 def configure_torch_runtime(
@@ -702,6 +709,212 @@ def _checkpoint_files(output_dir: Path, checkpoint_dir: Optional[Path] = None) -
         })
 
     return output
+
+
+def job_has_final_results(output_dir: Path) -> bool:
+    output_dir = Path(output_dir)
+    return (output_dir / "data" / "results.json").is_file() or (output_dir / "results.json").is_file()
+
+
+def read_live_progress_json(output_dir: Path) -> Optional[Dict[str, object]]:
+    path = Path(output_dir) / "live_progress.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def infer_completed_episodes_from_live_progress(
+    live_progress: Mapping[str, object],
+    *,
+    episode_time_steps: int,
+) -> int:
+    """Episodes fully finished before an interrupt (0-indexed episode in progress excluded)."""
+
+    global_step = _as_int(live_progress.get("global_step")) or 0
+    if global_step <= 0:
+        return 0
+    episode = _as_int(live_progress.get("episode")) or 0
+    return max(0, min(int(episode), 10_000))
+
+
+def find_harl_actor_checkpoint_dir(checkpoints_dir: Path) -> Optional[Path]:
+    checkpoints_dir = Path(checkpoints_dir)
+    if not checkpoints_dir.is_dir():
+        return None
+    candidates = sorted(checkpoints_dir.rglob("actor_agent0.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0].parent if candidates else None
+
+
+def find_offpolicy_model_dir(checkpoints_dir: Path) -> Optional[Path]:
+    checkpoints_dir = Path(checkpoints_dir)
+    actor_files = sorted(checkpoints_dir.rglob("policy_0/actor.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not actor_files:
+        actor_files = sorted(checkpoints_dir.rglob("actor.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not actor_files:
+        return None
+    policy_dir = actor_files[0].parent
+    models_dir = policy_dir.parent
+    return models_dir if models_dir.is_dir() else None
+
+
+def find_masac_checkpoint_bundle(checkpoints_dir: Path) -> Optional[Dict[str, Path]]:
+    checkpoints_dir = Path(checkpoints_dir)
+    rnn_files = list(checkpoints_dir.rglob("*_rnn_net_params.pkl"))
+    if not rnn_files:
+        return None
+
+    def _step_key(path: Path) -> int:
+        stem = path.name.split("_", 1)[0]
+        try:
+            return int(stem)
+        except ValueError:
+            return -1
+
+    rnn_path = max(rnn_files, key=_step_key)
+    prefix = rnn_path.name.split("_", 1)[0] + "_"
+    parent = rnn_path.parent
+    qmix_path = parent / f"{prefix}qmix_net_params.pkl"
+    policy_path = parent / f"{prefix}policy_net_params.pkl"
+    if not qmix_path.is_file():
+        return None
+    bundle = {"rnn": rnn_path, "qmix": qmix_path}
+    if policy_path.is_file():
+        bundle["policy"] = policy_path
+    return bundle
+
+
+def find_maac_resume_checkpoint(checkpoints_dir: Path) -> Tuple[Optional[Path], int]:
+    checkpoints_dir = Path(checkpoints_dir)
+    numbered = []
+    for path in checkpoints_dir.glob("checkpoint_episode_*.pt"):
+        suffix = path.stem.replace("checkpoint_episode_", "")
+        try:
+            numbered.append((int(suffix), path))
+        except ValueError:
+            continue
+    if numbered:
+        episode_no, path = max(numbered, key=lambda item: item[0])
+        return path, max(0, episode_no)
+    model_pt = checkpoints_dir / "model.pt"
+    if model_pt.is_file():
+        return model_pt, 0
+    return None, 0
+
+
+def discover_job_resume_plan(
+    output_dir: Path,
+    *,
+    algorithm: str,
+    target_episodes: int,
+    episode_time_steps: int,
+    rollout_threads: int = 1,
+    allow_resume: bool = True,
+) -> Dict[str, object]:
+    """Plan intra-job resume from Drive/local artifacts when results.json is missing."""
+
+    output_dir = Path(output_dir)
+    target_episodes = max(1, int(target_episodes))
+    episode_time_steps = max(1, int(episode_time_steps))
+    rollout_threads = max(1, int(rollout_threads))
+    checkpoints_dir = output_dir / CHECKPOINT_DIR_NAME
+
+    plan: Dict[str, object] = {
+        "active": False,
+        "algorithm": algorithm.upper(),
+        "target_episodes": target_episodes,
+        "completed_episodes": 0,
+        "remaining_episodes": target_episodes,
+        "remaining_num_env_steps": target_episodes * episode_time_steps * rollout_threads,
+        "model_dir": None,
+        "maac_checkpoint": None,
+        "maac_start_episode": 0,
+        "note": "fresh_start",
+    }
+
+    if not allow_resume or job_has_final_results(output_dir):
+        plan["note"] = "job_complete_or_resume_disabled"
+        return plan
+
+    live = read_live_progress_json(output_dir)
+    completed = 0
+    if live:
+        completed = infer_completed_episodes_from_live_progress(
+            live,
+            episode_time_steps=episode_time_steps,
+        )
+
+    algo = algorithm.lower()
+    model_dir: Optional[Path] = None
+    maac_ckpt: Optional[Path] = None
+    maac_start = 0
+
+    if algo == "happo":
+        model_dir = find_harl_actor_checkpoint_dir(checkpoints_dir)
+    elif algo in {"matd3", "maddpg"}:
+        model_dir = find_offpolicy_model_dir(checkpoints_dir / "offpolicy_run")
+    elif algo == "masac":
+        model_dir = None
+        if find_masac_checkpoint_bundle(checkpoints_dir / "models"):
+            model_dir = checkpoints_dir / "models"
+    elif algo == "maac":
+        maac_ckpt, maac_start = find_maac_resume_checkpoint(checkpoints_dir)
+        completed = max(completed, maac_start)
+
+    has_checkpoint = model_dir is not None or maac_ckpt is not None
+    if completed <= 0 and not has_checkpoint:
+        return plan
+
+    remaining = max(0, target_episodes - completed)
+    if remaining <= 0:
+        plan["note"] = "episodes_complete_missing_results_json"
+        plan["completed_episodes"] = completed
+        return plan
+
+    plan.update(
+        {
+            "active": True,
+            "completed_episodes": completed,
+            "remaining_episodes": remaining,
+            "remaining_num_env_steps": remaining * episode_time_steps * rollout_threads,
+            "model_dir": str(model_dir) if model_dir else None,
+            "maac_checkpoint": str(maac_ckpt) if maac_ckpt else None,
+            "maac_start_episode": maac_start,
+            "note": "resume_from_checkpoint",
+            "live_progress_episode": (live or {}).get("episode"),
+            "live_progress_global_step": (live or {}).get("global_step"),
+        }
+    )
+    return plan
+
+
+def write_job_resume_manifest(output_dir: Path, plan: Mapping[str, object]) -> Path:
+    output_dir = Path(output_dir)
+    data_dir = output_dir / DATA_DIR_NAME
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / "job_resume_state.json"
+    payload = dict(plan)
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def load_masac_checkpoint_bundle(learner, bundle: Mapping[str, Path], *, use_cuda: bool) -> None:
+    import torch
+
+    map_location = "cuda:0" if use_cuda else "cpu"
+    learner.eval_rnn.load_state_dict(torch.load(str(bundle["rnn"]), map_location=map_location))
+    learner.eval_rnn_2.load_state_dict(torch.load(str(bundle["rnn"]), map_location=map_location))
+    learner.eval_qmix_net.load_state_dict(torch.load(str(bundle["qmix"]), map_location=map_location))
+    learner.eval_qmix_net_2.load_state_dict(torch.load(str(bundle["qmix"]), map_location=map_location))
+    if bundle.get("policy") is not None:
+        learner.agent.policy.load_state_dict(torch.load(str(bundle["policy"]), map_location=map_location))
+    learner.target_rnn.load_state_dict(learner.eval_rnn.state_dict())
+    learner.target_rnn_2.load_state_dict(learner.eval_rnn.state_dict())
+    learner.target_qmix_net.load_state_dict(learner.eval_qmix_net.state_dict())
+    learner.target_qmix_net_2.load_state_dict(learner.eval_qmix_net.state_dict())
 
 
 def _episode_summaries(timeseries_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:

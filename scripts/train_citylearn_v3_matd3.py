@@ -21,6 +21,8 @@ from citylearn_v3_training_common import (
     install_finite_optimizer_step_guard,
     install_noop_wandb,
     resolve_output_dir,
+    discover_job_resume_plan,
+    write_job_resume_manifest,
     start_live_progress_heartbeat,
     stop_live_progress_heartbeat,
     write_training_artifacts,
@@ -67,6 +69,24 @@ def main() -> int:
         (args.episodes or 0) * args.episode_time_steps,
     )
     configured_episodes = max(1, configured_num_env_steps // max(args.episode_time_steps, 1))
+
+    resume_plan = discover_job_resume_plan(
+        output_dir,
+        algorithm="matd3",
+        target_episodes=configured_episodes,
+        episode_time_steps=args.episode_time_steps,
+        allow_resume=bool(getattr(args, "resume", True)),
+    )
+    if resume_plan.get("active"):
+        configured_episodes = int(resume_plan["remaining_episodes"])
+        configured_num_env_steps = int(resume_plan["remaining_num_env_steps"])
+        print(
+            f"[matd3] RESUME ep {resume_plan['completed_episodes']}/{resume_plan['target_episodes']} "
+            f"-> {configured_episodes} remaining",
+            flush=True,
+        )
+    write_job_resume_manifest(output_dir, resume_plan)
+
     env = CityLearnOffPolicyVecEnv(
         schema_path=args.schema_path,
         scenario=args.scenario,
@@ -125,6 +145,9 @@ def main() -> int:
     all_args.share_policy = False
     all_args.use_same_share_obs = True
     all_args.use_available_actions = False
+    if resume_plan.get("active") and resume_plan.get("model_dir"):
+        model_root = Path(str(resume_plan["model_dir"]))
+        all_args.model_dir = model_root.as_posix().rstrip("/") + "/"
 
     device = torch.device("cuda:0" if all_args.cuda else "cpu")
     torch.manual_seed(args.seed)
@@ -214,6 +237,7 @@ def main() -> int:
         "reward_profile": "MATD3",
         "reward_metadata": env.adapter.reward_metadata,
         "finite_optimizer_step_guard": finite_optimizer_guard,
+        "job_resume": resume_plan,
     }
 
     heartbeat_stop = None

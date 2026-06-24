@@ -19,6 +19,8 @@ from citylearn_v3_training_common import (
     ensure_artifact_layout,
     install_finite_optimizer_step_guard,
     resolve_output_dir,
+    discover_job_resume_plan,
+    write_job_resume_manifest,
     start_live_progress_heartbeat,
     stop_live_progress_heartbeat,
     write_training_artifacts,
@@ -80,6 +82,23 @@ def main() -> int:
 
     output_dir = resolve_output_dir(args.output_dir, "maac", args.scenario, args.seed)
     artifact_dirs = ensure_artifact_layout(output_dir)
+
+    resume_plan = discover_job_resume_plan(
+        output_dir,
+        algorithm="maac",
+        target_episodes=int(args.episodes),
+        episode_time_steps=args.episode_time_steps,
+        allow_resume=bool(getattr(args, "resume", True)),
+    )
+    if resume_plan.get("active"):
+        args.episodes = int(resume_plan["remaining_episodes"])
+        print(
+            f"[maac] RESUME ep {resume_plan['completed_episodes']}/{resume_plan['target_episodes']} "
+            f"-> {args.episodes} remaining",
+            flush=True,
+        )
+    write_job_resume_manifest(output_dir, resume_plan)
+
     env = CityLearnMAACVecEnv(
         schema_path=args.schema_path,
         scenario=args.scenario,
@@ -126,6 +145,9 @@ def main() -> int:
         attend_heads=args.attend_heads,
         reward_scale=args.reward_scale,
     )
+    if resume_plan.get("active") and resume_plan.get("maac_checkpoint"):
+        model = AttentionSAC.init_from_save(str(resume_plan["maac_checkpoint"]), load_critic=True)
+        print(f"[maac] Loaded {resume_plan['maac_checkpoint']}", flush=True)
     finite_optimizer_guard = install_finite_optimizer_step_guard(
         [
             {
@@ -144,6 +166,7 @@ def main() -> int:
         ],
         output_dir / "data" / "maac_finite_gradient_guard.jsonl",
     )
+    maac_start_episode = int(resume_plan.get("maac_start_episode") or 0) if resume_plan.get("active") else 0
     replay_buffer = ReplayBuffer(
         args.buffer_length,
         model.nagents,
@@ -184,6 +207,8 @@ def main() -> int:
         "reward_profile": "MAAC",
         "reward_metadata": env.adapter.reward_metadata,
         "finite_optimizer_step_guard": finite_optimizer_guard,
+        "job_resume": resume_plan,
+        "maac_start_episode": maac_start_episode,
     }
     heartbeat_stop = None
     heartbeat_thread = None
@@ -195,7 +220,7 @@ def main() -> int:
             initial_stage="maac_backend_starting",
             note="MAAC backend is collecting transitions or updating attention critics and policies.",
         )
-        for episode in range(args.episodes):
+        for episode in range(maac_start_episode, maac_start_episode + args.episodes):
             obs = env.reset()
             model.prep_rollouts(device="gpu" if use_gpu else "cpu")
 

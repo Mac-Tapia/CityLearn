@@ -20,6 +20,10 @@ from citylearn_v3_training_common import (
     ensure_artifact_layout,
     install_finite_optimizer_step_guard,
     resolve_output_dir,
+    discover_job_resume_plan,
+    write_job_resume_manifest,
+    load_masac_checkpoint_bundle,
+    find_masac_checkpoint_bundle,
     start_live_progress_heartbeat,
     stop_live_progress_heartbeat,
     write_training_artifacts,
@@ -120,6 +124,23 @@ def main() -> int:
     output_dir = resolve_output_dir(args.output_dir, "masac", args.scenario, args.seed)
     artifact_dirs = ensure_artifact_layout(output_dir)
     configured_episodes = int(args.episodes if args.episodes is not None else args.epochs)
+
+    resume_plan = discover_job_resume_plan(
+        output_dir,
+        algorithm="masac",
+        target_episodes=configured_episodes,
+        episode_time_steps=args.episode_time_steps,
+        allow_resume=bool(getattr(args, "resume", True)),
+    )
+    if resume_plan.get("active"):
+        configured_episodes = int(resume_plan["remaining_episodes"])
+        print(
+            f"[masac] RESUME ep {resume_plan['completed_episodes']}/{resume_plan['target_episodes']} "
+            f"-> {configured_episodes} remaining",
+            flush=True,
+        )
+    write_job_resume_manifest(output_dir, resume_plan)
+
     env = CityLearnSMACDiscreteEnv(
         schema_path=args.schema_path,
         scenario=args.scenario,
@@ -154,6 +175,7 @@ def main() -> int:
     backend_args.map = f"citylearn_v3_{args.scenario}"
     backend_args.seed = args.seed
     backend_args.n_epoch = configured_episodes
+    backend_args.load_model = False
     backend_args.evaluate_cycle = max(configured_episodes + 1, 2)
     backend_args.evaluate_epoch = 1
     backend_args.n_episodes = 1
@@ -237,6 +259,7 @@ def main() -> int:
         "reward_function": "CityLearnV3MADRLRewardFunction",
         "reward_profile": "MASAC",
         "reward_metadata": env.adapter.reward_metadata,
+        "job_resume": resume_plan,
     }
 
     heartbeat_stop = None
@@ -244,6 +267,11 @@ def main() -> int:
     try:
         runner = Runner(env, backend_args)
         learner = getattr(runner, "qmix_pg_learner", None)
+        if resume_plan.get("active") and learner is not None:
+            bundle = find_masac_checkpoint_bundle(artifact_dirs["checkpoints"] / "models")
+            if bundle:
+                load_masac_checkpoint_bundle(learner, bundle, use_cuda=bool(backend_args.cuda))
+                print("[masac] Loaded checkpoint bundle for resume", flush=True)
         if learner is not None and getattr(learner, "alpha_optimizer", None) is not None:
             for group in learner.alpha_optimizer.param_groups:
                 group["lr"] = float(args.alpha_lr)

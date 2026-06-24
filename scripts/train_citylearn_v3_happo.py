@@ -18,6 +18,8 @@ from citylearn_v3_training_common import (
     ensure_artifact_layout,
     install_harl_finite_optimizer_step_guard,
     resolve_output_dir,
+    discover_job_resume_plan,
+    write_job_resume_manifest,
     start_live_progress_heartbeat,
     stop_live_progress_heartbeat,
     write_training_artifacts,
@@ -68,6 +70,24 @@ def main() -> int:
         (args.episodes or 0) * args.episode_time_steps * rollout_threads,
     )
     configured_episodes = max(1, configured_num_env_steps // max(args.episode_time_steps, 1) // rollout_threads)
+
+    resume_plan = discover_job_resume_plan(
+        output_dir,
+        algorithm="happo",
+        target_episodes=configured_episodes,
+        episode_time_steps=args.episode_time_steps,
+        rollout_threads=rollout_threads,
+        allow_resume=bool(getattr(args, "resume", True)),
+    )
+    if resume_plan.get("active"):
+        configured_episodes = int(resume_plan["remaining_episodes"])
+        configured_num_env_steps = int(resume_plan["remaining_num_env_steps"])
+        print(
+            f"[happo] RESUME ep {resume_plan['completed_episodes']}/{resume_plan['target_episodes']} "
+            f"-> {configured_episodes} remaining",
+            flush=True,
+        )
+    write_job_resume_manifest(output_dir, resume_plan)
 
     def make_citylearn_train_env(env_name, seed, n_threads, env_args):
         def make_env(rank):
@@ -131,6 +151,9 @@ def main() -> int:
     env_args["scenario"] = f"citylearn_v3_{args.scenario}"
     env_args["state_type"] = "EP"
 
+    if resume_plan.get("active") and resume_plan.get("model_dir"):
+        algo_args["train"]["model_dir"] = str(resume_plan["model_dir"])
+
     runner_args = {"algo": "happo", "env": "gym", "exp_name": args.exp_name}
     runner = RUNNER_REGISTRY["happo"](runner_args, algo_args, env_args)
     tensorboard_audit_path = output_dir / "data" / "tensorboard_finite_filter.jsonl"
@@ -176,6 +199,7 @@ def main() -> int:
         "reward_function": "CityLearnV3MADRLRewardFunction",
         "reward_profile": "HAPPO",
         "reward_metadata": reward_metadata,
+        "job_resume": resume_plan,
     }
 
     heartbeat_stop = None
