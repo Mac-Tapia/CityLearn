@@ -623,8 +623,8 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
         args = replace_arg(args, "--buffer-size", "50000")
         args = replace_arg(args, "--hidden-size", "256")
         args = replace_arg(args, "--train-interval", "100")
-        # Reset to a short fixed delay — do NOT inherit the original stagger (600/1800/3000s)
-        # which would add 30-50 min extra wait on retry when 600s is sufficient.
+        # Reset to a short fixed delay — do NOT inherit the original stagger (600/3600/6600s)
+        # which would add 30-110 min extra wait on retry when 600s is sufficient.
         retry["startup_delay_seconds"] = 600
     elif name == "maac":
         # OOM fallback: reduce batch and buffer.
@@ -1176,16 +1176,15 @@ def run_two_phase_jobs(
     )
     p1_jobs = _patch_torch_threads(phase1_jobs, light_threads)
     p1_jobs = [{**job, "env_overrides": _perf_env} for job in p1_jobs]
-    # Stagger MATD3 in Phase 1: E1=0s, E2=600s, E3=1200s.
-    # MASAC is not running here (only 6 HAPPO/MAAC base procs ~54 GiB steady), so
-    # 3 MATD3 loading simultaneously would only peak at 54+3×15=99 GiB (59%).
-    # A light 600s gap eliminates even this transient, keeping it at ~70 GiB (42%).
+    # Stagger MATD3 in Phase 1: E1=0s, E2=3000s, E3=6000s.
+    # Use same 3000s gap as two_phase_concurrent to ensure each MATD3 warmup
+    # (~2920s) completes and buffer migrates to SSD before the next one loads.
     _p1_matd3_delay = 0
     p1_jobs_staggered = []
     for _j in p1_jobs:
         if _j["name"] == "matd3":
             _j = {**_j, "startup_delay_seconds": _p1_matd3_delay}
-            _p1_matd3_delay += 600
+            _p1_matd3_delay += 3000   # was 600
         p1_jobs_staggered.append(_j)
     p1_jobs = p1_jobs_staggered
     overall_rc = run_parallel_jobs(
@@ -1335,31 +1334,34 @@ def run_two_phase_concurrent_jobs(
         ]
     p2_jobs = [{**job, "env_overrides": _perf_env} for job in p2_jobs]
 
-    # Stagger MATD3 starts: E1 at 600s, E2 at 1800s, E3 at 3000s.
+    # Stagger MATD3 starts: E1=600s, E2=3600s, E3=6600s (3000s gap).
     #
-    # Root cause of OOM: CityLearn env loading for 17 buildings × 2 years peaks at
-    # ~12-15 GiB RAM per MATD3 process.  With a 130s inter-job gap (E1=600/E2=730/E3=860),
-    # E1 and E2 both load their envs simultaneously (loading takes ~10-15 min); their
-    # combined peak (~30 GiB) plus the 9 steady-state processes (~81 GiB) and OS
-    # overhead pushes past the 167 GiB limit → SIGKILL.
+    # Observed OOM at t≈35min: MATD3/E2 started loading its CityLearn env while
+    # MATD3/E1 was still in warmup (buffer 1.2 GiB in RAM).  Env loading peaks at
+    # ~18 GiB RAM transiently (CSV→pandas→numpy conversion doubles live data size).
+    # With 10 steady-state processes (~145 GiB) + 18 GiB loading peak → 163+ GiB
+    # > 167 GiB limit → OOM SIGKILL.
     #
-    # Fix: 1200s (20 min) gap ensures each MATD3 has fully completed env initialization
-    # before the next one starts.  RAM breakdown at the worst-case moment (t=3000s
-    # when E3 starts, E1+E2 are in their 2.8h warmup with buffer still in RAM):
-    #   Others (HAPPO×3 + MAAC×3 + MASAC×3 steady):       81.0 GiB
-    #   MATD3/E1 warmup  (env 9 GiB + buf 1.8 GiB):       10.8 GiB
-    #   MATD3/E2 warmup  (env 9 GiB + buf 1.8 GiB):       10.8 GiB
-    #   MATD3/E3 env-loading peak (no buffer yet):         15.0 GiB
-    #   ─────────────────────────────────────────────────  ────────
-    #   Total peak:                                       117.6 GiB / 167 GiB = 70%
-    # After all warmups + install_disk_replay_buffer: 81 + 3×9 = 108 GiB (65%).
-    # Wall-clock overhead: E3's 50 min wait is <0.2% of the 40h training time.
+    # Root fix: each MATD3 starts only AFTER the previous one finishes its 1-episode
+    # warmup (~2920s at ~3 env-steps/sec) and migrates its buffer to SSD.
+    # Gap of 3000s ≈ 50 min gives 80s slack after the ~2920s warmup.
+    #
+    # RAM breakdown at worst-case moments:
+    #   t=3600s (E2 starts loading, E1 done with warmup → buf on SSD):
+    #     Others (HAPPO×3 + MAAC×3 + MASAC×3):           81.0 GiB
+    #     MATD3/E1 (env only, buf on SSD):                 9.0 GiB
+    #     MATD3/E2 env-loading peak:                      18.0 GiB
+    #     ──────────────────────────────────────────────  ────────
+    #     Total peak:                                    ~108 GiB base + overhead ≈ 155 GiB ✓
+    #   t=6600s (E3 starts loading, E2 done → buf on SSD; same profile):  ≈155 GiB ✓
+    #   Steady-state (all buffers on SSD): 81 + 3×9 = 108 GiB (65%).
+    # Wall-clock cost: E3 delayed by 110min total, but training runs 40h → <0.5% overhead.
     _matd3_delay = 600
     staggered = []
     for job in (p1_jobs + p2_jobs):
         if job["name"] == "matd3":
             job = {**job, "startup_delay_seconds": _matd3_delay}
-            _matd3_delay += 1200
+            _matd3_delay += 3000   # was 1200: must cover full warmup ~2920s + SSD migration
         staggered.append(job)
     all_jobs = staggered
 
@@ -1368,16 +1370,16 @@ def run_two_phase_concurrent_jobs(
     masac_buf_gpu_gib = len(phase2_jobs) * 6.85   # float32 on GPU (was 13.7 GiB float64 in RAM)
     matd3_buf_disk_gib = sum(
         1 for j in all_jobs if j.get("name") == "matd3"
-    ) * 1.8   # MlpPolicyBuffer on SSD (150K × 12 KB/entry ≈ 1.8 GiB/job)
+    ) * 1.2   # MlpPolicyBuffer on SSD (100K × 12 KB/entry ≈ 1.2 GiB/job)
 
     print(
         f"\n[launcher] ═══ CONCURRENT (HAPPO+MATD3+MAAC+MASAC): "
         f"{n_total} jobs × 1 torch-thread "
-        f"| sys-RAM ~118 GiB / 167 GiB (70% peak at t=3000s) "
+        f"| sys-RAM ~155 GiB / 167 GiB peak (MATD3 loading) "
         f"| GPU ~37 GiB / 80 GiB (46%)"
         f" | SSD ~{matd3_buf_disk_gib:.0f} GiB (MATD3 buf) "
         f"| MASAC buf={masac_buf_gpu_gib:.0f} GiB on GPU, MATD3 buf={matd3_buf_disk_gib:.0f} GiB on SSD "
-        f"| MATD3 stagger=600s/E1+1200s/job (only 1 MATD3 loading env at a time) ═══",
+        f"| MATD3 stagger=600/3600/6600s (E_n waits for E_n-1 warmup+SSD migration) ═══",
         flush=True,
     )
 
@@ -1558,11 +1560,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     #   batch_size=4096 → larger batches exploit A100 throughput.
     #   hidden_size=512 → larger actor/critic network for 17-agent 748-dim shared obs.
     #   train_interval=50 → 2× more frequent updates = better GPU utilization.
-    #   OOM stagger: E1=600s, E2=1800s, E3=3000s (1200s gap) ensures only 1 MATD3
-    #   is in its env-loading peak (~12-15 GiB transient) at a time. Combined with
-    #   the 150K buffer reduction: peak sys-RAM ≤ 117 GiB / 167 GiB (70%) at any point.
+    #   OOM stagger: E1=600s, E2=3600s, E3=6600s (3000s gap). Each MATD3 waits for
+    #   the previous one to finish its ~2920s warmup and migrate its buffer to SSD
+    #   before starting env-loading (~18 GiB transient peak). Peak RAM ≤ 155 GiB.
     parser.add_argument("--matd3-batch-size", default=4096, type=int)          # was 512
-    parser.add_argument("--matd3-buffer-size", default=150000, type=int)       # was 400000; 150K→1.8 GiB RAM during warmup
+    parser.add_argument("--matd3-buffer-size", default=100000, type=int)       # was 400000→150000; 100K→1.2 GiB RAM during warmup
     parser.add_argument("--matd3-hidden-size", default=512, type=int)          # was 256
     parser.add_argument("--matd3-lr", default="3e-4", type=str)
     parser.add_argument("--matd3-train-interval", default=50, type=int)        # was 100
