@@ -178,6 +178,7 @@ examples/*
 !examples/*.py
 !examples/*.ipynb
 !examples/pyrightconfig.json
+!examples/.pylintrc
 
 # ignore folder
 .ignore

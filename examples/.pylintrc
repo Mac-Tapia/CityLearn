@@ -1,0 +1,36 @@
+# Pylint config for CityLearn/examples Jupyter notebooks.
+# These codes are disabled because they produce structural false positives when
+# Pylint analyses notebook cells as a concatenated Python file:
+#
+#   reimported          (W0404) — each cell imports independently; expected in notebooks
+#   redefined-outer-name(W0621) — cell-level variables naturally shadow each other
+#   function-redefined  (E0102) — utility functions repeated across independent cells
+#   import-error        (E0401) — google.colab, IPython not available in local env
+#   no-name-in-module   (E0611) — google.colab.drive not resolvable locally
+#   unused-import       (W0611) — side-effect imports (google.colab for detection)
+#   unspecified-encoding(W1514) — tutorial code omits encoding for readability
+#   broad-exception-caught(W0718) — try/except Exception is intentional in notebooks
+#   subprocess-run-check(W1510) — explicit check= often omitted in tutorial scripts
+#   missing-module-docstring(C0114) — notebooks use markdown cells for docs
+#   missing-function-docstring(C0116)
+#   invalid-name        (C0103) — short names like f, g, ln are fine in notebooks
+#   line-too-long       (C0301) — formatted output lines can exceed 100 chars
+
+[MASTER]
+ignored-modules=google.colab,google
+
+[MESSAGES CONTROL]
+disable=
+    reimported,
+    redefined-outer-name,
+    function-redefined,
+    import-error,
+    no-name-in-module,
+    unused-import,
+    unspecified-encoding,
+    broad-exception-caught,
+    subprocess-run-check,
+    missing-module-docstring,
+    missing-function-docstring,
+    invalid-name,
+    line-too-long
