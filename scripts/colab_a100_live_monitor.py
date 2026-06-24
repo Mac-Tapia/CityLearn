@@ -14,6 +14,9 @@ from typing import Dict, Iterable, Mapping, Optional, Sequence
 
 
 ALGORITHMS = ("happo", "masac", "matd3", "maac")
+TWO_PHASE_P1 = frozenset({"happo", "masac"})
+TWO_PHASE_P2 = frozenset({"matd3", "maac"})
+EST_MIN_PER_EPISODE_DEFAULT = 12.0
 
 
 def project_root() -> Path:
@@ -128,6 +131,118 @@ def active_job(status: Mapping[str, object], root: Path) -> Optional[Mapping[str
             latest_mtime = mtime
             latest_job = job
     return latest_job
+
+
+def _job_is_done(job: Mapping[str, object]) -> bool:
+    if job.get("planned_only"):
+        return False
+    if job.get("skipped"):
+        return True
+    return job.get("exit_code") == 0
+
+
+def _job_is_running(job: Mapping[str, object]) -> bool:
+    return job.get("completed_at") is None and not job.get("planned_only") and not job.get("skipped")
+
+
+def infer_two_phase(status: Mapping[str, object]) -> Optional[int]:
+    jobs = list(status.get("jobs", []))
+    if not jobs:
+        return None
+    p1 = [j for j in jobs if str(j.get("name")) in TWO_PHASE_P1]
+    p2 = [j for j in jobs if str(j.get("name")) in TWO_PHASE_P2]
+    if not p1 or not p2:
+        return None
+    if any(not _job_is_done(j) for j in p1):
+        return 1
+    if any(not _job_is_done(j) for j in p2):
+        return 2
+    return 0
+
+
+def estimate_phase_eta_minutes(
+    status: Mapping[str, object],
+    root: Path,
+    *,
+    est_min_per_episode: float,
+) -> Optional[float]:
+    episodes = int(status.get("episodes") or 0)
+    if episodes <= 0:
+        return None
+    phase = infer_two_phase(status)
+    if phase is None or phase == 0:
+        return 0.0 if phase == 0 else None
+
+    phase_algos = TWO_PHASE_P1 if phase == 1 else TWO_PHASE_P2
+    jobs = [
+        j
+        for j in status.get("jobs", [])
+        if str(j.get("name")) in phase_algos and not _job_is_done(j)
+    ]
+    if not jobs:
+        return 0.0
+
+    remaining_eps: List[int] = []
+    for job in jobs:
+        if not _job_is_running(job):
+            remaining_eps.append(episodes)
+            continue
+        run_dir = path_for_job(root, str(job.get("output_dir") or ""))
+        progress = read_json(run_dir / "live_progress.json")
+        if progress:
+            current_ep = int(progress.get("episode") or 0) + 1
+            remaining_eps.append(max(0, episodes - current_ep + 1))
+        else:
+            remaining_eps.append(episodes)
+    if not remaining_eps:
+        return 0.0
+    return max(remaining_eps) * est_min_per_episode
+
+
+def print_parallelization(status: Mapping[str, object], root: Path) -> None:
+    par = dict(status.get("parallelization") or {})
+    exec_mode = str(par.get("execution_mode") or status.get("execution") or "?")
+    est_min_ep = float(par.get("est_min_per_episode") or EST_MIN_PER_EPISODE_DEFAULT)
+    episodes = int(status.get("episodes") or 0)
+    est_phase_h = float(par.get("est_phase_wall_hours") or (episodes * est_min_ep / 60.0 if episodes else 0))
+    est_total_h = float(par.get("est_total_wall_hours") or (est_phase_h * 2 if est_phase_h else 0))
+
+    jobs = list(status.get("jobs", []))
+    running = sum(1 for j in jobs if _job_is_running(j))
+    done = sum(1 for j in jobs if _job_is_done(j))
+    phase = infer_two_phase(status)
+
+    print("")
+    print("Paralelismo y tiempos")
+    print(f"  execution_mode : {exec_mode}")
+    if exec_mode == "two_phase_happo_masac":
+        if phase == 1:
+            phase_label = "Fase 1/2 (HAPPO+MASAC x3, 6 paralelos, sin stagger)"
+        elif phase == 2:
+            phase_label = "Fase 2/2 (MATD3+MAAC x3, 6 paralelos, sin stagger)"
+        elif phase == 0:
+            phase_label = "Completado (ambas fases)"
+        else:
+            phase_label = "two_phase_happo_masac (fase por determinar)"
+        print(f"  fase           : {phase_label}")
+        print(f"  jobs           : {running} activos | {done}/12 completados")
+        print(
+            f"  est. tiempo    : ~{est_min_ep:.0f} min/episodio | "
+            f"~{est_phase_h:.0f} h/fase | ~{est_total_h:.0f} h total (wall)"
+        )
+        eta_min = estimate_phase_eta_minutes(status, root, est_min_per_episode=est_min_ep)
+        if eta_min is not None and eta_min > 0 and phase in (1, 2):
+            eta_h = eta_min / 60.0
+            if phase == 1:
+                print(f"  ETA fase 1     : ~{eta_h:.1f} h (~{eta_min:.0f} min)")
+                print(f"  ETA total      : ~{eta_h + est_phase_h:.1f} h (fase actual + fase 2)")
+            else:
+                print(f"  ETA fase 2     : ~{eta_h:.1f} h (~{eta_min:.0f} min)")
+        elif phase == 0:
+            print("  ETA            : entrenamiento completado")
+    else:
+        print(f"  strategy       : {par.get('strategy', '?')}")
+        print(f"  jobs activos   : {running}")
 
 
 def print_status(status: Mapping[str, object], root: Path) -> None:
@@ -331,6 +446,7 @@ def render_once(output_root: Path, log_tail: int) -> None:
         return
 
     print_status(status, root)
+    print_parallelization(status, root)
     print_progress(status, root)
     print_gpu()
     print_artifacts(output_root)

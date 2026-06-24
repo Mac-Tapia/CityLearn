@@ -929,7 +929,8 @@ def run_two_phase_happo_masac_jobs(
     p1_labels = " + ".join(a.upper() for a in TWO_PHASE_P1_HM)
     print(
         f"\n[launcher] === PHASE 1/2 ({p1_labels}): {len(phase1_jobs)} jobs, "
-        f"torch_threads={phase_threads}, MASAC cuda_frac={masac_cuda_fraction} ===",
+        f"torch_threads={phase_threads}, MASAC cuda_frac={masac_cuda_fraction}, "
+        f"all start simultaneously (no stagger) ===",
         flush=True,
     )
     p1_jobs = _patch_torch_threads(phase1_jobs, phase_threads)
@@ -957,23 +958,16 @@ def run_two_phase_happo_masac_jobs(
     p2_labels = " + ".join(a.upper() for a in TWO_PHASE_P2_HM)
     print(
         f"\n[launcher] === PHASE 2/2 ({p2_labels}): {len(phase2_jobs)} jobs, "
-        f"torch_threads={phase_threads}, MATD3 stagger 600/3600/6600s ===",
+        f"torch_threads={phase_threads}, all start simultaneously (no stagger) ===",
         flush=True,
     )
     p2_jobs = _patch_torch_threads(phase2_jobs, phase_threads)
     p2_jobs = [{**job, "env_overrides": _perf_env} for job in p2_jobs]
-    _matd3_delay = 600
-    p2_staggered: List[Dict[str, object]] = []
-    for job in p2_jobs:
-        if job["name"] == "matd3":
-            job = {**job, "startup_delay_seconds": _matd3_delay}
-            _matd3_delay += 3000
-        p2_staggered.append(job)
 
     rc2 = run_parallel_jobs(
         root=root, manifest=manifest, status_path=status_path,
-        jobs=p2_staggered, output_root=output_root, log_dir=log_dir,
-        args=args, max_workers=len(p2_staggered),
+        jobs=p2_jobs, output_root=output_root, log_dir=log_dir,
+        args=args, max_workers=len(p2_jobs),
     )
     if rc2 != 0:
         overall_rc = rc2
@@ -1018,11 +1012,14 @@ def make_manifest(
             "two_phase_torch_threads": getattr(args, "two_phase_torch_threads", 2),
             "two_phase_masac_cuda_fraction": getattr(args, "two_phase_masac_cuda_fraction", 0.26),
             "strategy": (
-                "two_phase_happo_masac: Phase1=HAPPO+MASAC x3 (6 parallel); "
-                "Phase2=MATD3+MAAC x3 (6 parallel, MATD3 stagger)."
+                "two_phase_happo_masac: Phase1=HAPPO+MASAC x3 (6 parallel, no stagger); "
+                "Phase2=MATD3+MAAC x3 (6 parallel, no stagger)."
                 if getattr(args, "execution_mode", "") == "two_phase_happo_masac"
                 else f"Run {args.parallel_scenarios} scenarios per algorithm concurrently; algorithms are sequential."
             ),
+            "est_min_per_episode": 12,
+            "est_phase_wall_hours": round(args.episodes * 12 / 60, 1),
+            "est_total_wall_hours": round(args.episodes * 12 / 60 * 2, 1),
         },
         "active_project_environment": dict(env_info),
         "gpu_optimization": {
