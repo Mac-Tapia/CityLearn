@@ -153,7 +153,7 @@ def cmd_rescue(args: argparse.Namespace, root: Path) -> int:
         archive_root = resolve_path(root, args.dest)
     else:
         stamp = source_run.name.replace("madrl_v3_", "happo_")
-        archive_root = resolve_path(root, f"outputs/rescued_{stamp}")
+        archive_root = resolve_path(root, f"outputs/runs/rescued_{stamp}")
 
     scenarios = list(args.scenarios or SCENARIOS)
     print(f"[rescue] source={source_run}")
