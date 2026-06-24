@@ -14,6 +14,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 
 ALGORITHMS = ("happo", "masac", "matd3", "maac")
+MONITOR_PROTOCOL_ID = "two_phase_happo_masac_v3"
 TWO_PHASE_P1 = frozenset({"happo", "masac"})
 TWO_PHASE_P2 = frozenset({"matd3", "maac"})
 EST_MIN_PER_EPISODE_DEFAULT = 12.0
@@ -492,12 +493,24 @@ def render_once(output_root: Path, log_tail: int) -> None:
     status = read_json(status_path)
     print("=" * 72)
     print(f"CITYLEARN v3 MADRL - MONITOR COLAB A100 | {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"protocol={MONITOR_PROTOCOL_ID}")
     print("=" * 72)
     print(f"OutputRoot: {output_root}")
 
     if not status:
         print(f"No existe estado: {status_path}")
         return
+
+    exec_mode = execution_mode(status)
+    if exec_mode != "two_phase_happo_masac":
+        print("")
+        print("!" * 72)
+        print("  *** WARNING: execution_mode != two_phase_happo_masac ***")
+        print(f"  Detectado: {exec_mode!r}  |  Esperado: 'two_phase_happo_masac'")
+        print("  Colab puede estar usando scripts ANTIGUOS (layout 9+3 con stagger).")
+        print("  Deten el entrenamiento y re-ejecuta celdas 1.2 -> 1.5 -> 2.1 -> 6.1 -> 7.0 -> 7.1.")
+        print("!" * 72)
+        print("")
 
     print_status(status, root)
     print_parallelization(status, root)

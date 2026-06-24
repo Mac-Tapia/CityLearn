@@ -31,6 +31,7 @@ SCENARIOS = ("E1", "E2", "E3")
 HEAVY_ALGORITHMS = {"masac", "maac"}
 
 # two_phase_happo_masac: Phase1 HAPPO+MASAC x3, Phase2 MATD3+MAAC x3 (Colab A100 80GB).
+LAUNCHER_PROTOCOL_ID = "two_phase_happo_masac_v3"
 TWO_PHASE_P1_HM = ("happo", "masac")
 TWO_PHASE_P2_HM = ("matd3", "maac")
 
@@ -1170,6 +1171,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    print(
+        f"[launcher] protocol={LAUNCHER_PROTOCOL_ID} execution_mode={args.execution_mode}",
+        flush=True,
+    )
     root = project_root()
     env_info = configure_environment(root, args)
 
