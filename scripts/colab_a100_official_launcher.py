@@ -30,6 +30,10 @@ CITYLEARN_V2_BENCHMARKS = ("PPO", "SAC", "A2C")
 SCENARIOS = ("E1", "E2", "E3")
 HEAVY_ALGORITHMS = {"masac", "maac"}
 
+# two_phase_happo_masac: Phase1 HAPPO+MASAC x3, Phase2 MATD3+MAAC x3 (Colab A100 80GB).
+TWO_PHASE_P1_HM = ("happo", "masac")
+TWO_PHASE_P2_HM = ("matd3", "maac")
+
 _MANIFEST_LOCK = threading.Lock()
 DEFAULT_SCHEMA = "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json"
 DEFAULT_OUTPUT_ROOT = "outputs/colab_madrl_a100_official"
@@ -765,6 +769,14 @@ def run_one_job(
     }
     append_job_record(manifest, status_path, record)
 
+    delay = float(job.get("startup_delay_seconds") or 0)
+    if delay > 0:
+        print(f"DELAY {name.upper()}/{scenario} {delay:.0f}s (stagger)", flush=True)
+        time.sleep(delay)
+
+    env = os.environ.copy()
+    env.update(dict(job.get("env_overrides") or {}))
+
     print(f"START {name.upper()}/{scenario} attempt={attempt} log={log_path}", flush=True)
     with log_path.open("w", encoding="utf-8") as stdout_f, err_path.open("w", encoding="utf-8") as stderr_f:
         proc = subprocess.Popen(
@@ -773,7 +785,7 @@ def run_one_job(
             stdout=stdout_f,
             stderr=stderr_f,
             text=True,
-            env=os.environ.copy(),
+            env=env,
         )
 
         last_monitor = 0.0
@@ -839,6 +851,135 @@ def run_job_with_retry(
     )
 
 
+def _patch_torch_threads(jobs: List[Dict[str, object]], n_threads: int) -> List[Dict[str, object]]:
+    patched: List[Dict[str, object]] = []
+    for job in jobs:
+        args = replace_arg([str(a) for a in job["args"]], "--torch-threads", str(n_threads))
+        patched.append({**job, "args": args})
+    return patched
+
+
+def run_parallel_jobs(
+    *,
+    root: Path,
+    manifest: Dict[str, object],
+    status_path: Path,
+    jobs: List[Dict[str, object]],
+    output_root: Path,
+    log_dir: Path,
+    args: argparse.Namespace,
+    max_workers: int,
+) -> int:
+    """Run jobs concurrently; returns first non-zero exit code (0 if all succeed)."""
+    if not jobs:
+        return 0
+    workers = max(1, min(int(max_workers), len(jobs)))
+    overall_rc = 0
+    if workers == 1:
+        for job in jobs:
+            ec = run_job_with_retry(
+                root=root, manifest=manifest, status_path=status_path,
+                job=job, output_root=output_root, log_dir=log_dir, args=args,
+            )
+            if ec != 0:
+                overall_rc = ec
+        return overall_rc
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(
+                run_job_with_retry,
+                root=root, manifest=manifest, status_path=status_path,
+                job=job, output_root=output_root, log_dir=log_dir, args=args,
+            ): job
+            for job in jobs
+        }
+        for fut in as_completed(futures):
+            ec = int(fut.result())
+            if ec != 0:
+                overall_rc = ec
+    return overall_rc
+
+
+def run_two_phase_happo_masac_jobs(
+    *,
+    root: Path,
+    manifest: Dict[str, object],
+    status_path: Path,
+    jobs: List[Dict[str, object]],
+    output_root: Path,
+    log_dir: Path,
+    args: argparse.Namespace,
+) -> int:
+    """Phase1 HAPPO+MASAC x3 parallel, then Phase2 MATD3+MAAC x3 parallel (A100 80GB / 167 GiB RAM)."""
+    phase1_jobs = [j for j in jobs if j["name"] in TWO_PHASE_P1_HM]
+    phase2_jobs = [j for j in jobs if j["name"] in TWO_PHASE_P2_HM]
+
+    phase_threads = int(args.two_phase_torch_threads)
+    masac_cuda_fraction = float(args.two_phase_masac_cuda_fraction)
+
+    _perf_env = {
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+        "MALLOC_ARENA_MAX": "2",
+    }
+
+    p1_labels = " + ".join(a.upper() for a in TWO_PHASE_P1_HM)
+    print(
+        f"\n[launcher] === PHASE 1/2 ({p1_labels}): {len(phase1_jobs)} jobs, "
+        f"torch_threads={phase_threads}, MASAC cuda_frac={masac_cuda_fraction} ===",
+        flush=True,
+    )
+    p1_jobs = _patch_torch_threads(phase1_jobs, phase_threads)
+    p1_jobs = [{**job, "env_overrides": _perf_env} for job in p1_jobs]
+    p1_patched: List[Dict[str, object]] = []
+    for job in p1_jobs:
+        if job["name"] == "masac":
+            patched_args = [str(a) for a in job["args"]]
+            for flag, val in [
+                ("--masac-preload-batch-device", "cuda"),
+                ("--cuda-memory-fraction", str(masac_cuda_fraction)),
+            ]:
+                patched_args = replace_arg(patched_args, flag, val)
+            job = {**job, "args": patched_args}
+        p1_patched.append(job)
+
+    overall_rc = run_parallel_jobs(
+        root=root, manifest=manifest, status_path=status_path,
+        jobs=p1_patched, output_root=output_root, log_dir=log_dir,
+        args=args, max_workers=len(p1_patched),
+    )
+    if overall_rc != 0:
+        print("[launcher] Phase 1 had failures — proceeding to Phase 2.", flush=True)
+
+    p2_labels = " + ".join(a.upper() for a in TWO_PHASE_P2_HM)
+    print(
+        f"\n[launcher] === PHASE 2/2 ({p2_labels}): {len(phase2_jobs)} jobs, "
+        f"torch_threads={phase_threads}, MATD3 stagger 600/3600/6600s ===",
+        flush=True,
+    )
+    p2_jobs = _patch_torch_threads(phase2_jobs, phase_threads)
+    p2_jobs = [{**job, "env_overrides": _perf_env} for job in p2_jobs]
+    _matd3_delay = 600
+    p2_staggered: List[Dict[str, object]] = []
+    for job in p2_jobs:
+        if job["name"] == "matd3":
+            job = {**job, "startup_delay_seconds": _matd3_delay}
+            _matd3_delay += 3000
+        p2_staggered.append(job)
+
+    rc2 = run_parallel_jobs(
+        root=root, manifest=manifest, status_path=status_path,
+        jobs=p2_staggered, output_root=output_root, log_dir=log_dir,
+        args=args, max_workers=len(p2_staggered),
+    )
+    if rc2 != 0:
+        overall_rc = rc2
+    return overall_rc
+
+
 def make_manifest(
     *,
     args: argparse.Namespace,
@@ -868,12 +1009,20 @@ def make_manifest(
         "torch": torch_info.get("torch_version"),
         "cuda": bool(args.cuda),
         "algorithm_family": "MADRL",
-        "execution": "parallel_scenarios_colab_a100" if args.parallel_scenarios > 1 else "sequential_colab_a100",
+        "execution": getattr(args, "execution_mode", "algo_sequential"),
         "parallelization": {
+            "execution_mode": getattr(args, "execution_mode", "algo_sequential"),
             "requested": args.parallel_scenarios > 1,
             "effective": args.parallel_scenarios > 1,
             "parallel_scenarios": args.parallel_scenarios,
-            "strategy": f"Run {args.parallel_scenarios} scenarios per algorithm concurrently; algorithms are sequential.",
+            "two_phase_torch_threads": getattr(args, "two_phase_torch_threads", 2),
+            "two_phase_masac_cuda_fraction": getattr(args, "two_phase_masac_cuda_fraction", 0.26),
+            "strategy": (
+                "two_phase_happo_masac: Phase1=HAPPO+MASAC x3 (6 parallel); "
+                "Phase2=MATD3+MAAC x3 (6 parallel, MATD3 stagger)."
+                if getattr(args, "execution_mode", "") == "two_phase_happo_masac"
+                else f"Run {args.parallel_scenarios} scenarios per algorithm concurrently; algorithms are sequential."
+            ),
         },
         "active_project_environment": dict(env_info),
         "gpu_optimization": {
@@ -1000,6 +1149,27 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--maac-steps-per-update", default=100, type=int)
     parser.add_argument("--maac-num-updates", default=16, type=int,
                         help="A100-80GB: 16 gradient steps per update (2x vs 8; GPU is fast).")
+    parser.add_argument(
+        "--execution-mode",
+        default="algo_sequential",
+        choices=("algo_sequential", "two_phase_happo_masac"),
+        help=(
+            "algo_sequential: HAPPO->MASAC->MATD3->MAAC, 3 scenarios in parallel per algorithm. "
+            "two_phase_happo_masac: Phase1 HAPPO+MASAC x3, then Phase2 MATD3+MAAC x3 (Colab A100)."
+        ),
+    )
+    parser.add_argument(
+        "--two-phase-torch-threads",
+        default=2,
+        type=int,
+        help="Torch threads per job in two_phase_happo_masac (6 jobs / 12 vCPU = 2).",
+    )
+    parser.add_argument(
+        "--two-phase-masac-cuda-fraction",
+        default=0.26,
+        type=float,
+        help="CUDA memory fraction per MASAC process in Phase 1 (0.26 x 80 GiB = 20.8 GiB/job).",
+    )
     return parser.parse_args(argv)
 
 
@@ -1073,6 +1243,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         atomic_write_json(status_path, manifest)
         print(f"Dry run completed: {status_path}", flush=True)
         return 0
+
+    if args.execution_mode == "two_phase_happo_masac":
+        overall_rc = run_two_phase_happo_masac_jobs(
+            root=root,
+            manifest=manifest,
+            status_path=status_path,
+            jobs=jobs,
+            output_root=output_root,
+            log_dir=log_dir,
+            args=args,
+        )
+        manifest["status"] = "completed" if overall_rc == 0 else "failed"
+        manifest["completed_at"] = utc_now()
+        atomic_write_json(manifest_path, manifest)
+        atomic_write_json(status_path, manifest)
+        return int(overall_rc)
 
     # Group jobs by algorithm in canonical order; run N scenarios per algo concurrently.
     algo_groups: Dict[str, list] = defaultdict(list)
