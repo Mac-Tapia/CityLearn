@@ -585,6 +585,10 @@ def is_oom_failure(*paths: Path) -> bool:
         "cublas_status_alloc_failed",
         "replay buffer estimate is too large",
         "memoryerror",
+        "std::bad_alloc",
+        "cannot allocate memory",
+        "killed",
+        "oom",
     )
     for path in paths:
         if not path.exists():
@@ -946,11 +950,13 @@ def _patch_happo_a100_job(job: Mapping[str, object], args: argparse.Namespace) -
 
 
 def _patch_masac_a100_job(job: Mapping[str, object], args: argparse.Namespace) -> Dict[str, object]:
-    """Off-policy SAC+QMIX: maximize GPU replay + Tensor Core batch training."""
+    """Off-policy SAC+QMIX: CPU replay in 6-parallel (167 GiB RAM); GPU for batches only."""
     return _patch_job_args(
         job,
         {
-            "--masac-preload-batch-device": "cuda",
+            # 3x GPU replay (~16 GiB/job) OOMs on A100 when all MASAC train together.
+            # CPU replay + cuda batches: ~50 GiB RAM + ~6-12 GiB VRAM total (stable 6-parallel).
+            "--masac-preload-batch-device": "cpu",
             "--cuda-memory-fraction": str(_phase_cuda_fraction(args)),
             "--buffer-size": str(args.six_job_masac_buffer_size),
             "--max-replay-buffer-gib": str(args.six_job_masac_max_replay_gib),
