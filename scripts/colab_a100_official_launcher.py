@@ -578,7 +578,14 @@ def completed_artifact_exists(root: Path, job_output_dir: str) -> bool:
 
 
 def is_oom_failure(*paths: Path) -> bool:
-    needles = ("cuda out of memory", "torch.outofmemoryerror", "outofmemoryerror", "cublas_status_alloc_failed")
+    needles = (
+        "cuda out of memory",
+        "torch.outofmemoryerror",
+        "outofmemoryerror",
+        "cublas_status_alloc_failed",
+        "replay buffer estimate is too large",
+        "memoryerror",
+    )
     for path in paths:
         if not path.exists():
             continue
@@ -1145,7 +1152,7 @@ def make_manifest(
             "two_phase_torch_threads": getattr(args, "two_phase_torch_threads", 2),
             "six_job_cuda_fraction": getattr(args, "six_job_cuda_fraction", 0.12),
             "six_job_masac_buffer_size": getattr(args, "six_job_masac_buffer_size", 12),
-            "six_job_masac_max_replay_gib": getattr(args, "six_job_masac_max_replay_gib", 16.0),
+            "six_job_masac_max_replay_gib": getattr(args, "six_job_masac_max_replay_gib", 18.0),
             "six_job_masac_critic_batch_size": getattr(args, "six_job_masac_critic_batch_size", 1024),
             "two_phase_masac_cuda_fraction": getattr(args, "six_job_cuda_fraction", 0.12),
             "strategy": (
@@ -1246,7 +1253,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="HAPPO [512,512]; stable with n_rollout_threads=2 on A100.")
     parser.add_argument("--happo-n-rollout-threads", default=2, type=int,
                         help="Parallel env rollouts per HAPPO job (SubprocVecEnv; 3 jobs×2=6 envs).")
-    parser.add_argument("--masac-max-replay-buffer-gib", default=16.0, type=float)
+    parser.add_argument("--masac-max-replay-buffer-gib", default=18.0, type=float)
     parser.add_argument("--masac-buffer-size", default=12, type=int,
                         help="Episodes in replay buffer (MASAC sub-phase; ~16 GiB/job on GPU).")
     parser.add_argument("--masac-critic-batch-size", default=1024, type=int,
@@ -1307,9 +1314,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--six-job-masac-max-replay-gib",
-        default=16.0,
+        default=18.0,
         type=float,
-        help="MASAC replay cap GiB per job in 6-job phase.",
+        help="MASAC replay cap GiB per job in 6-job phase (must exceed buffer estimate).",
     )
     parser.add_argument(
         "--six-job-masac-critic-batch-size",
@@ -1331,7 +1338,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--three-job-masac-max-replay-gib",
-        default=16.0,
+        default=18.0,
         type=float,
         help="Deprecated alias for --six-job-masac-max-replay-gib.",
     )
@@ -1348,6 +1355,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Deprecated alias for --six-job-cuda-fraction.",
     )
     return parser.parse_args(argv)
+
+
+def _sync_six_job_masac_defaults(args: argparse.Namespace) -> None:
+    """Keep build_jobs and phase patchers aligned on six-job MASAC caps."""
+    args.masac_buffer_size = int(getattr(args, "six_job_masac_buffer_size", args.masac_buffer_size))
+    args.masac_max_replay_buffer_gib = float(
+        getattr(args, "six_job_masac_max_replay_gib", args.masac_max_replay_buffer_gib)
+    )
+    args.masac_critic_batch_size = int(
+        getattr(args, "six_job_masac_critic_batch_size", args.masac_critic_batch_size)
+    )
 
 
 def _load_protocol_guard():
@@ -1380,6 +1398,7 @@ def _assert_launcher_self() -> None:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    _sync_six_job_masac_defaults(args)
     _assert_launcher_self()
     script_path = Path(__file__).resolve()
     print(

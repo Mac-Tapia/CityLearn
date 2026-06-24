@@ -201,6 +201,7 @@ def main() -> int:
     backend_args.buffer_size = max(int(args.buffer_size), 2)
     backend_args.gamma = float(args.gamma)
     backend_args.use_rnn = bool(args.use_recurrent_policy)
+    requested_buffer_size = int(backend_args.buffer_size)
     estimated_replay_buffer_gib = estimate_replay_buffer_gib(
         buffer_size=backend_args.buffer_size,
         episode_limit=backend_args.episode_limit,
@@ -209,8 +210,25 @@ def main() -> int:
         obs_shape=backend_args.obs_shape,
         state_shape=backend_args.state_shape,
     )
+    max_replay_gib = float(args.max_replay_buffer_gib)
+    while estimated_replay_buffer_gib > max_replay_gib and backend_args.buffer_size > 2:
+        backend_args.buffer_size -= 1
+        estimated_replay_buffer_gib = estimate_replay_buffer_gib(
+            buffer_size=backend_args.buffer_size,
+            episode_limit=backend_args.episode_limit,
+            n_agents=backend_args.n_agents,
+            n_actions=backend_args.n_actions,
+            obs_shape=backend_args.obs_shape,
+            state_shape=backend_args.state_shape,
+        )
+    if backend_args.buffer_size != requested_buffer_size:
+        print(
+            f"[masac] buffer_size clamped {requested_buffer_size} -> {backend_args.buffer_size} "
+            f"(replay estimate {estimated_replay_buffer_gib:.2f} GiB <= cap {max_replay_gib:.2f} GiB)",
+            flush=True,
+        )
 
-    if estimated_replay_buffer_gib > float(args.max_replay_buffer_gib):
+    if estimated_replay_buffer_gib > max_replay_gib:
         raise MemoryError(
             "MASAC replay buffer estimate is too large: "
             f"{estimated_replay_buffer_gib:.2f} GiB > {args.max_replay_buffer_gib:.2f} GiB. "
