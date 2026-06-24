@@ -18,7 +18,6 @@ import subprocess
 import sys
 import threading
 import time
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1004,9 +1003,9 @@ def make_manifest(
         "torch": torch_info.get("torch_version"),
         "cuda": bool(args.cuda),
         "algorithm_family": "MADRL",
-        "execution": getattr(args, "execution_mode", "algo_sequential"),
+        "execution": "two_phase_happo_masac",
         "parallelization": {
-            "execution_mode": getattr(args, "execution_mode", "algo_sequential"),
+            "execution_mode": "two_phase_happo_masac",
             "requested": args.parallel_scenarios > 1,
             "effective": args.parallel_scenarios > 1,
             "parallel_scenarios": args.parallel_scenarios,
@@ -1015,8 +1014,6 @@ def make_manifest(
             "strategy": (
                 "two_phase_happo_masac: Phase1=HAPPO+MASAC x3 (6 parallel, no stagger); "
                 "Phase2=MATD3+MAAC x3 (6 parallel, no stagger)."
-                if getattr(args, "execution_mode", "") == "two_phase_happo_masac"
-                else f"Run {args.parallel_scenarios} scenarios per algorithm concurrently; algorithms are sequential."
             ),
             "est_min_per_episode": 12,
             "est_phase_wall_hours": round(args.episodes * 12 / 60, 1),
@@ -1110,8 +1107,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--happo-hidden-size", default=512, type=int,
                         help="HAPPO [512,512] speed profile; ~11 FPS/job with n_rollout_threads=1 in two_phase.")
     parser.add_argument("--happo-n-rollout-threads", default=1, type=int,
-                        help="Env rollouts per HAPPO job. Use 1 for two_phase (6 jobs/fase); "
-                             "4 only for algo_sequential with 3 HAPPO-only scenarios.")
+                        help="Env rollouts per HAPPO job. Use 1 for two_phase (6 jobs/fase).")
     parser.add_argument("--masac-max-replay-buffer-gib", default=11.0, type=float)
     parser.add_argument("--masac-buffer-size", default=8, type=int,
                         help="Episodes in replay buffer. 8 ep ~11 GiB on GPU (axis mode, 8760 steps).")
@@ -1128,7 +1124,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--masac-hyper-hidden-dim", default=512, type=int,
                         help="Hypernetwork hidden dim for QMIX weights.")
     parser.add_argument("--masac-preload-batch-device", default="cuda", choices=("auto", "cuda", "cpu"),
-                        help="cuda for two_phase Phase1 (buffer on GPU); cpu for algo_sequential 40-ep runs.")
+                        help="cuda for two_phase Phase1 (MASAC replay buffer on GPU).")
     parser.add_argument("--matd3-batch-size", default=1024, type=int,
                         help="A100-80GB: Tensor Cores optimal at batch>=512.")
     parser.add_argument("--matd3-buffer-size", default=2000000, type=int,
@@ -1148,11 +1144,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--execution-mode",
         default="two_phase_happo_masac",
-        choices=("algo_sequential", "two_phase_happo_masac"),
-        help=(
-            "algo_sequential: HAPPO->MASAC->MATD3->MAAC, 3 scenarios in parallel per algorithm. "
-            "two_phase_happo_masac: Phase1 HAPPO+MASAC x3, then Phase2 MATD3+MAAC x3 (Colab A100)."
-        ),
+        choices=("two_phase_happo_masac",),
+        help="Colab A100 official: Phase1 HAPPO+MASAC x3, then Phase2 MATD3+MAAC x3 (no stagger).",
     )
     parser.add_argument(
         "--two-phase-torch-threads",
@@ -1244,76 +1237,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Dry run completed: {status_path}", flush=True)
         return 0
 
-    if args.execution_mode == "two_phase_happo_masac":
-        overall_rc = run_two_phase_happo_masac_jobs(
-            root=root,
-            manifest=manifest,
-            status_path=status_path,
-            jobs=jobs,
-            output_root=output_root,
-            log_dir=log_dir,
-            args=args,
+    if args.execution_mode != "two_phase_happo_masac":
+        raise ValueError(
+            f"Unsupported execution_mode={args.execution_mode!r}. "
+            "Colab A100 launcher only supports two_phase_happo_masac."
         )
-        manifest["status"] = "completed" if overall_rc == 0 else "failed"
-        manifest["completed_at"] = utc_now()
-        atomic_write_json(manifest_path, manifest)
-        atomic_write_json(status_path, manifest)
-        return int(overall_rc)
 
-    # Group jobs by algorithm in canonical order; run N scenarios per algo concurrently.
-    algo_groups: Dict[str, list] = defaultdict(list)
-    for job in jobs:
-        algo_groups[str(job["name"])].append(job)
-
-    max_p = max(1, int(args.parallel_scenarios))
-    if max_p > 1:
-        print(f"[launcher] parallel_scenarios={max_p} — running {max_p} scenarios concurrently per algorithm.", flush=True)
-
-    def _run_group(algo_jobs: list, n_parallel: int) -> int:
-        """Run a list of jobs with up to n_parallel concurrent workers. Returns 0 or first failing exit code."""
-        if n_parallel <= 1:
-            for job in algo_jobs:
-                ec = run_job_with_retry(
-                    root=root, manifest=manifest, status_path=status_path,
-                    job=job, output_root=output_root, log_dir=log_dir, args=args,
-                )
-                if ec != 0:
-                    return int(ec)
-            return 0
-        with ThreadPoolExecutor(max_workers=n_parallel) as pool:
-            futures = {
-                pool.submit(
-                    run_job_with_retry,
-                    root=root, manifest=manifest, status_path=status_path,
-                    job=job, output_root=output_root, log_dir=log_dir, args=args,
-                ): job
-                for job in algo_jobs
-            }
-            for fut in as_completed(futures):
-                ec = fut.result()
-                if ec != 0:
-                    return int(ec)
-        return 0
-
-    for algo in ALGORITHMS:
-        group = algo_groups.get(algo, [])
-        if not group:
-            continue
-        print(f"[launcher] {algo.upper()} — {len(group)} scenario(s) with n_parallel={min(max_p, len(group))}", flush=True)
-        exit_code = _run_group(group, min(max_p, len(group)))
-        if exit_code != 0:
-            manifest["status"] = "failed"
-            manifest["completed_at"] = utc_now()
-            atomic_write_json(manifest_path, manifest)
-            atomic_write_json(status_path, manifest)
-            return int(exit_code)
-
-    manifest["status"] = "completed"
+    overall_rc = run_two_phase_happo_masac_jobs(
+        root=root,
+        manifest=manifest,
+        status_path=status_path,
+        jobs=jobs,
+        output_root=output_root,
+        log_dir=log_dir,
+        args=args,
+    )
+    manifest["status"] = "completed" if overall_rc == 0 else "failed"
     manifest["completed_at"] = utc_now()
     atomic_write_json(manifest_path, manifest)
     atomic_write_json(status_path, manifest)
-    print(f"Training chain completed: {status_path}", flush=True)
-    return 0
+    return int(overall_rc)
 
 
 if __name__ == "__main__":
