@@ -24,6 +24,7 @@ LAUNCHER_REQUIRED = (
     "LAUNCHER_PROTOCOL_ID",
     PROTOCOL_ID,
     "run_two_phase_happo_masac_jobs",
+    "FOUR_PHASE_ALGO_ORDER",
     "TWO_PHASE_P1_HM",
     "TWO_PHASE_P2_HM",
 )
@@ -31,6 +32,7 @@ LAUNCHER_REQUIRED = (
 MONITOR_REQUIRED = (
     "MONITOR_PROTOCOL_ID",
     PROTOCOL_ID,
+    "FOUR_PHASE_ORDER",
     "TWO_PHASE_P1",
     "TWO_PHASE_P2",
 )

@@ -17,7 +17,14 @@ ALGORITHMS = ("happo", "masac", "matd3", "maac")
 MONITOR_PROTOCOL_ID = "two_phase_happo_masac_v3"
 TWO_PHASE_P1 = frozenset({"happo", "masac"})
 TWO_PHASE_P2 = frozenset({"matd3", "maac"})
-EST_MIN_PER_EPISODE_DEFAULT = 12.0
+FOUR_PHASE_ORDER = ("happo", "masac", "matd3", "maac")
+EST_MIN_PER_EPISODE_DEFAULT = 11.0
+EST_MIN_PER_EPISODE_BY_ALGO = {
+    "happo": 11.0,
+    "masac": 15.0,
+    "matd3": 12.0,
+    "maac": 8.0,
+}
 
 
 def project_root() -> Path:
@@ -152,20 +159,160 @@ def execution_mode(status: Mapping[str, object]) -> str:
 
 
 def infer_two_phase(status: Mapping[str, object]) -> Optional[int]:
+    """Legacy 2-phase view: 1=on-policy block, 2=off-policy block, 0=done."""
+    sub = infer_four_phase_subphase(status)
+    if sub is None:
+        return None
+    if sub == 0:
+        return 0
+    if sub <= 2:
+        return 1
+    return 2
+
+
+def infer_four_phase_subphase(status: Mapping[str, object]) -> Optional[int]:
     if execution_mode(status) != "two_phase_happo_masac":
         return None
     jobs = list(status.get("jobs", []))
     if not jobs:
         return None
-    p1 = [j for j in jobs if str(j.get("name")) in TWO_PHASE_P1]
-    p2 = [j for j in jobs if str(j.get("name")) in TWO_PHASE_P2]
-    if not p1 or not p2:
-        return None
-    if any(not _job_is_done(j) for j in p1):
-        return 1
-    if any(not _job_is_done(j) for j in p2):
-        return 2
+    for idx, algo in enumerate(FOUR_PHASE_ORDER, 1):
+        algo_jobs = [j for j in jobs if str(j.get("name")) == algo]
+        if not algo_jobs:
+            continue
+        if any(not _job_is_done(j) for j in algo_jobs):
+            return idx
     return 0
+
+
+def _jobs_for_algo(status: Mapping[str, object], algo: str) -> List[Mapping[str, object]]:
+    return [j for j in status.get("jobs", []) if str(j.get("name")) == algo]
+
+
+def progress_fps(progress: Mapping[str, object]) -> Optional[float]:
+    raw = progress.get("fps")
+    if raw is not None:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def estimate_minutes_remaining_for_job(
+    progress: Optional[Mapping[str, object]],
+    *,
+    episodes: int,
+    episode_steps: int,
+    algo: str,
+    est_min_per_episode: float,
+) -> float:
+    if episodes <= 0 or episode_steps <= 0:
+        return 0.0
+    if not progress:
+        return episodes * est_min_per_episode
+
+    current_ep = int(progress.get("episode") or 0)
+    ep_step = int(progress.get("episode_step") or 0)
+    remaining_steps = max(0, (episodes - current_ep - 1) * episode_steps + (episode_steps - ep_step))
+
+    fps = progress_fps(progress)
+    if fps and fps > 0.1:
+        return remaining_steps / fps / 60.0
+
+    remaining_eps = max(0, episodes - current_ep)
+    prior = EST_MIN_PER_EPISODE_BY_ALGO.get(algo, est_min_per_episode)
+    return remaining_eps * prior
+
+
+def estimate_run_eta_minutes(
+    status: Mapping[str, object],
+    root: Path,
+    *,
+    est_min_per_episode: float,
+) -> Optional[float]:
+    episodes = int(status.get("episodes") or 0)
+    episode_steps = int(status.get("episode_time_steps") or 0)
+    if episodes <= 0:
+        return None
+
+    sub = infer_four_phase_subphase(status)
+    if sub is None:
+        return None
+    if sub == 0:
+        return 0.0
+
+    total_min = 0.0
+    for idx, algo in enumerate(FOUR_PHASE_ORDER, 1):
+        algo_jobs = _jobs_for_algo(status, algo)
+        if not algo_jobs:
+            continue
+        if idx < sub:
+            continue
+        if idx > sub:
+            total_min += episodes * EST_MIN_PER_EPISODE_BY_ALGO.get(algo, est_min_per_episode)
+            continue
+        phase_remaining: List[float] = []
+        for job in algo_jobs:
+            if _job_is_done(job):
+                continue
+            run_dir = path_for_job(root, str(job.get("output_dir") or ""))
+            progress = read_json(run_dir / "live_progress.json")
+            phase_remaining.append(
+                estimate_minutes_remaining_for_job(
+                    progress,
+                    episodes=episodes,
+                    episode_steps=episode_steps,
+                    algo=algo,
+                    est_min_per_episode=EST_MIN_PER_EPISODE_BY_ALGO.get(algo, est_min_per_episode),
+                )
+            )
+        if phase_remaining:
+            total_min += max(phase_remaining)
+        elif any(not _job_is_done(j) for j in algo_jobs):
+            total_min += episodes * EST_MIN_PER_EPISODE_BY_ALGO.get(algo, est_min_per_episode)
+    return total_min
+
+
+def estimate_phase_eta_minutes(
+    status: Mapping[str, object],
+    root: Path,
+    *,
+    est_min_per_episode: float,
+) -> Optional[float]:
+    """ETA for the active sub-phase only (minutes)."""
+    episodes = int(status.get("episodes") or 0)
+    episode_steps = int(status.get("episode_time_steps") or 0)
+    if episodes <= 0:
+        return None
+    sub = infer_four_phase_subphase(status)
+    if sub is None or sub == 0:
+        return 0.0 if sub == 0 else None
+
+    algo = FOUR_PHASE_ORDER[sub - 1]
+    jobs = [j for j in _jobs_for_algo(status, algo) if not _job_is_done(j)]
+    if not jobs:
+        return 0.0
+
+    remaining: List[float] = []
+    for job in jobs:
+        if not _job_is_running(job):
+            remaining.append(episodes * EST_MIN_PER_EPISODE_BY_ALGO.get(algo, est_min_per_episode))
+            continue
+        run_dir = path_for_job(root, str(job.get("output_dir") or ""))
+        progress = read_json(run_dir / "live_progress.json")
+        remaining.append(
+            estimate_minutes_remaining_for_job(
+                progress,
+                episodes=episodes,
+                episode_steps=episode_steps,
+                algo=algo,
+                est_min_per_episode=EST_MIN_PER_EPISODE_BY_ALGO.get(algo, est_min_per_episode),
+            )
+        )
+    return max(remaining) if remaining else 0.0
 
 
 def _phase_algo_set(phase: int) -> frozenset:
@@ -195,56 +342,17 @@ def _phase_job_label(job: Mapping[str, object], phase: int, current_phase: Optio
     return f"{name}/{scenario} [pendiente]"
 
 
-def estimate_phase_eta_minutes(
-    status: Mapping[str, object],
-    root: Path,
-    *,
-    est_min_per_episode: float,
-) -> Optional[float]:
-    episodes = int(status.get("episodes") or 0)
-    if episodes <= 0:
-        return None
-    phase = infer_two_phase(status)
-    if phase is None or phase == 0:
-        return 0.0 if phase == 0 else None
-
-    phase_algos = TWO_PHASE_P1 if phase == 1 else TWO_PHASE_P2
-    jobs = [
-        j
-        for j in status.get("jobs", [])
-        if str(j.get("name")) in phase_algos and not _job_is_done(j)
-    ]
-    if not jobs:
-        return 0.0
-
-    remaining_eps: List[int] = []
-    for job in jobs:
-        if not _job_is_running(job):
-            remaining_eps.append(episodes)
-            continue
-        run_dir = path_for_job(root, str(job.get("output_dir") or ""))
-        progress = read_json(run_dir / "live_progress.json")
-        if progress:
-            current_ep = int(progress.get("episode") or 0) + 1
-            remaining_eps.append(max(0, episodes - current_ep + 1))
-        else:
-            remaining_eps.append(episodes)
-    if not remaining_eps:
-        return 0.0
-    return max(remaining_eps) * est_min_per_episode
-
-
 def print_parallelization(status: Mapping[str, object], root: Path) -> None:
     par = dict(status.get("parallelization") or {})
     exec_mode = execution_mode(status)
     est_min_ep = float(par.get("est_min_per_episode") or EST_MIN_PER_EPISODE_DEFAULT)
     episodes = int(status.get("episodes") or 0)
     est_phase_h = float(par.get("est_phase_wall_hours") or (episodes * est_min_ep / 60.0 if episodes else 0))
-    est_total_h = float(par.get("est_total_wall_hours") or (est_phase_h * 2 if est_phase_h else 0))
+    est_total_h = float(par.get("est_total_wall_hours") or est_phase_h)
 
     jobs = list(status.get("jobs", []))
     done = sum(1 for j in jobs if _job_is_done(j))
-    phase = infer_two_phase(status)
+    sub = infer_four_phase_subphase(status)
 
     print("")
     print("Paralelismo y tiempos")
@@ -253,45 +361,42 @@ def print_parallelization(status: Mapping[str, object], root: Path) -> None:
     if strategy:
         print(f"  strategy       : {strategy}")
     if exec_mode == "two_phase_happo_masac":
-        if phase == 1:
-            phase_label = "Fase 1/2 — HAPPO+MASAC x3 (6 paralelos, sin stagger)"
-        elif phase == 2:
-            phase_label = "Fase 2/2 — MATD3+MAAC x3 (6 paralelos, sin stagger)"
-        elif phase == 0:
-            phase_label = "Completado (ambas fases)"
+        if sub == 0:
+            phase_label = "Completado (4 sub-fases)"
+        elif sub is not None:
+            algo = FOUR_PHASE_ORDER[sub - 1].upper()
+            phase_label = f"Sub-fase {sub}/4 — {algo}×3 (3 paralelos, sin stagger)"
         else:
             phase_label = "two_phase_happo_masac (fase por determinar)"
         print(f"  fase           : {phase_label}")
-        if phase in (1, 2):
-            phase_jobs = _jobs_in_phase(status, phase)
+        if sub in (1, 2, 3, 4):
+            algo = FOUR_PHASE_ORDER[sub - 1]
+            phase_jobs = _jobs_for_algo(status, algo)
             phase_running = sum(1 for j in phase_jobs if _job_is_running(j))
             phase_done = sum(1 for j in phase_jobs if _job_is_done(j))
-            print(f"  jobs fase      : {phase_running} activos | {phase_done}/6 completados en fase")
-            active = [_phase_job_label(j, phase, phase) for j in phase_jobs if _job_is_running(j)]
+            print(f"  jobs sub-fase  : {phase_running} activos | {phase_done}/3 completados")
+            active = [f"{j['name'].upper()}/{j['scenario']} [activo]" for j in phase_jobs if _job_is_running(j)]
             if active:
                 print(f"  activos        : {', '.join(active)}")
-            if phase == 1:
-                queued = [
-                    _phase_job_label(j, 2, phase)
-                    for j in _jobs_in_phase(status, 2)
-                    if not _job_is_done(j) and not _job_is_running(j)
-                ]
-                if queued:
-                    print(f"  en cola fase 2 : {', '.join(queued[:6])}")
+            queued = []
+            for future_algo in FOUR_PHASE_ORDER[sub:]:
+                for j in _jobs_for_algo(status, future_algo):
+                    if not _job_is_done(j) and not _job_is_running(j):
+                        queued.append(f"{j['name'].upper()}/{j['scenario']}")
+            if queued:
+                print(f"  en cola        : {', '.join(queued[:6])}")
         print(f"  jobs total     : {done}/12 completados")
         print(
-            f"  est. tiempo    : ~{est_min_ep:.0f} min/episodio | "
-            f"~{est_phase_h:.0f} h/fase | ~{est_total_h:.0f} h total (wall)"
+            f"  est. tiempo    : prior ~{est_min_ep:.0f} min/ep (HAPPO) | "
+            f"~{est_total_h:.0f} h total manifest (4 sub-fases)"
         )
-        eta_min = estimate_phase_eta_minutes(status, root, est_min_per_episode=est_min_ep)
-        if eta_min is not None and eta_min > 0 and phase in (1, 2):
-            eta_h = eta_min / 60.0
-            if phase == 1:
-                print(f"  ETA fase 1     : ~{eta_h:.1f} h (~{eta_min:.0f} min)")
-                print(f"  ETA total      : ~{eta_h + est_phase_h:.1f} h (fase actual + fase 2)")
-            else:
-                print(f"  ETA fase 2     : ~{eta_h:.1f} h (~{eta_min:.0f} min)")
-        elif phase == 0:
+        eta_sub_min = estimate_phase_eta_minutes(status, root, est_min_per_episode=est_min_ep)
+        eta_total_min = estimate_run_eta_minutes(status, root, est_min_per_episode=est_min_ep)
+        if sub in (1, 2, 3, 4) and eta_sub_min is not None and eta_sub_min > 0:
+            print(f"  ETA sub-fase   : ~{eta_sub_min / 60.0:.1f} h (FPS medido si disponible)")
+        if sub in (1, 2, 3, 4) and eta_total_min is not None and eta_total_min > 0:
+            print(f"  ETA total      : ~{eta_total_min / 60.0:.1f} h restantes")
+        elif sub == 0:
             print("  ETA            : entrenamiento completado")
     else:
         running = sum(1 for j in jobs if _job_is_running(j))

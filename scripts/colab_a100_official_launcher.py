@@ -29,10 +29,18 @@ CITYLEARN_V2_BENCHMARKS = ("PPO", "SAC", "A2C")
 SCENARIOS = ("E1", "E2", "E3")
 HEAVY_ALGORITHMS = {"masac", "maac"}
 
-# two_phase_happo_masac: Phase1 HAPPO+MASAC x3, Phase2 MATD3+MAAC x3 (Colab A100 80GB).
+# two_phase_happo_masac: 4 sub-phases (HAPPO→MASAC→MATD3→MAAC), 3 jobs each (Colab A100 80GB).
 LAUNCHER_PROTOCOL_ID = "two_phase_happo_masac_v3"
 TWO_PHASE_P1_HM = ("happo", "masac")
 TWO_PHASE_P2_HM = ("matd3", "maac")
+FOUR_PHASE_ALGO_ORDER = ("happo", "masac", "matd3", "maac")
+# Wall-time priors (min/ep, 3 parallel jobs, A100) for manifest ETA when FPS not yet measured.
+EST_MIN_PER_EPISODE_BY_ALGO = {
+    "happo": 11.0,   # on-policy: n_rollout_threads=2, SubprocVecEnv
+    "masac": 15.0,   # off-policy GPU: 12 ep replay, batch 1024
+    "matd3": 12.0,   # off-policy RAM: 3M buffer, batch 2048, train_interval 50
+    "maac": 8.0,     # attention critic: 1.5M buffer, 20 updates
+}
 
 _MANIFEST_LOCK = threading.Lock()
 DEFAULT_SCHEMA = "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json"
@@ -587,27 +595,26 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
     args = [str(item) for item in retry["args"]]
 
     if name == "masac":
-        # OOM retry: ~50% of two_phase cuda defaults (8 ep / 11 GiB -> 4 ep / 5.5 GiB)
-        args = replace_arg(args, "--buffer-size", "4")
-        args = replace_arg(args, "--critic-batch-size", "256")
-        args = replace_arg(args, "--max-replay-buffer-gib", "5.5")
-        args = replace_arg(args, "--rnn-hidden-dim", "256")
-        args = replace_arg(args, "--qmix-hidden-dim", "128")
-        args = replace_arg(args, "--hyper-hidden-dim", "256")
+        args = replace_arg(args, "--buffer-size", "6")
+        args = replace_arg(args, "--critic-batch-size", "512")
+        args = replace_arg(args, "--max-replay-buffer-gib", "8.0")
+        args = replace_arg(args, "--rnn-hidden-dim", "384")
+        args = replace_arg(args, "--qmix-hidden-dim", "192")
+        args = replace_arg(args, "--hyper-hidden-dim", "384")
         args = replace_arg(args, "--masac-preload-batch-device", "cpu")
     elif name == "matd3":
-        # OOM retry: ~50% of A100-80GB defaults
-        args = replace_arg(args, "--batch-size", "512")
-        args = replace_arg(args, "--buffer-size", "1000000")
+        args = replace_arg(args, "--batch-size", "1024")
+        args = replace_arg(args, "--buffer-size", "1500000")
         args = replace_arg(args, "--hidden-size", "512")
+        args = replace_arg(args, "--train-interval", "100")
     elif name == "maac":
-        # OOM retry: ~50% of A100-80GB defaults
         args = replace_arg(args, "--batch-size", "512")
-        args = replace_arg(args, "--buffer-length", "500000")
+        args = replace_arg(args, "--buffer-length", "750000")
         args = replace_arg(args, "--hidden-size", "512")
-        args = replace_arg(args, "--num-updates", "8")
+        args = replace_arg(args, "--num-updates", "12")
+        args = replace_arg(args, "--steps-per-update", "100")
     elif name == "happo":
-        args = replace_arg(args, "--hidden-size", "256")
+        args = replace_arg(args, "--hidden-size", "384")
         args = replace_arg(args, "--n-rollout-threads", "1")
     else:
         return None
@@ -901,6 +908,106 @@ def run_parallel_jobs(
     return overall_rc
 
 
+def _patch_job_cuda_fraction(job: Mapping[str, object], cuda_fraction: float) -> Dict[str, object]:
+    patched_args = replace_arg([str(a) for a in job["args"]], "--cuda-memory-fraction", cuda_fraction)
+    return {**dict(job), "args": patched_args}
+
+
+def _patch_job_args(job: Mapping[str, object], updates: Mapping[str, object]) -> Dict[str, object]:
+    patched_args = [str(a) for a in job["args"]]
+    for flag, val in updates.items():
+        patched_args = replace_arg(patched_args, flag, val)
+    return {**dict(job), "args": patched_args}
+
+
+def _patch_happo_a100_job(job: Mapping[str, object], args: argparse.Namespace) -> Dict[str, object]:
+    """On-policy: parallel rollouts (CPU) + GPU PPO updates."""
+    return _patch_job_args(
+        job,
+        {
+            "--cuda-memory-fraction": str(args.three_job_cuda_fraction),
+            "--n-rollout-threads": str(args.happo_n_rollout_threads),
+            "--hidden-size": str(args.happo_hidden_size),
+        },
+    )
+
+
+def _patch_masac_a100_job(job: Mapping[str, object], args: argparse.Namespace) -> Dict[str, object]:
+    """Off-policy SAC+QMIX: maximize GPU replay + Tensor Core batch training."""
+    return _patch_job_args(
+        job,
+        {
+            "--masac-preload-batch-device": "cuda",
+            "--cuda-memory-fraction": str(args.three_job_cuda_fraction),
+            "--buffer-size": str(args.three_job_masac_buffer_size),
+            "--max-replay-buffer-gib": str(args.three_job_masac_max_replay_gib),
+            "--critic-batch-size": str(args.three_job_masac_critic_batch_size),
+            "--critic-train-steps": str(args.masac_critic_train_steps),
+            "--actor-sample-times": str(args.masac_actor_sample_times),
+            "--rnn-hidden-dim": str(args.masac_rnn_hidden_dim),
+            "--qmix-hidden-dim": str(args.masac_qmix_hidden_dim),
+            "--hyper-hidden-dim": str(args.masac_hyper_hidden_dim),
+        },
+    )
+
+
+def _patch_matd3_a100_job(job: Mapping[str, object], args: argparse.Namespace) -> Dict[str, object]:
+    """Off-policy TD3: large RAM replay + frequent GPU gradient bursts."""
+    return _patch_job_args(
+        job,
+        {
+            "--cuda-memory-fraction": str(args.three_job_cuda_fraction),
+            "--batch-size": str(args.matd3_batch_size),
+            "--buffer-size": str(args.matd3_buffer_size),
+            "--hidden-size": str(args.matd3_hidden_size),
+            "--train-interval": str(args.matd3_train_interval),
+        },
+    )
+
+
+def _patch_maac_a100_job(job: Mapping[str, object], args: argparse.Namespace) -> Dict[str, object]:
+    """Off-policy attention SAC: RAM buffer + multi-update GPU training."""
+    return _patch_job_args(
+        job,
+        {
+            "--cuda-memory-fraction": str(args.three_job_cuda_fraction),
+            "--batch-size": str(args.maac_batch_size),
+            "--buffer-length": str(args.maac_buffer_length),
+            "--hidden-size": str(args.maac_hidden_size),
+            "--steps-per-update": str(args.maac_steps_per_update),
+            "--num-updates": str(args.maac_num_updates),
+        },
+    )
+
+
+_ALGO_A100_PATCHERS = {
+    "happo": _patch_happo_a100_job,
+    "masac": _patch_masac_a100_job,
+    "matd3": _patch_matd3_a100_job,
+    "maac": _patch_maac_a100_job,
+}
+
+
+def _prepare_four_phase_jobs(
+    jobs: List[Dict[str, object]],
+    algo_name: str,
+    *,
+    args: argparse.Namespace,
+    phase_threads: int,
+    perf_env: Mapping[str, str],
+) -> List[Dict[str, object]]:
+    phase_jobs = _patch_torch_threads([j for j in jobs if j["name"] == algo_name], phase_threads)
+    phase_jobs = [{**job, "env_overrides": dict(perf_env)} for job in phase_jobs]
+    patcher = _ALGO_A100_PATCHERS.get(algo_name, _patch_job_cuda_fraction)
+    patched: List[Dict[str, object]] = []
+    for job in phase_jobs:
+        if algo_name in _ALGO_A100_PATCHERS:
+            patched.append(patcher(job, args))
+        else:
+            patched.append(_patch_job_cuda_fraction(job, float(args.three_job_cuda_fraction)))
+    return patched
+
+
 def run_two_phase_happo_masac_jobs(
     *,
     root: Path,
@@ -911,12 +1018,9 @@ def run_two_phase_happo_masac_jobs(
     log_dir: Path,
     args: argparse.Namespace,
 ) -> int:
-    """Phase1 HAPPO+MASAC x3 parallel, then Phase2 MATD3+MAAC x3 parallel (A100 80GB / 167 GiB RAM)."""
-    phase1_jobs = [j for j in jobs if j["name"] in TWO_PHASE_P1_HM]
-    phase2_jobs = [j for j in jobs if j["name"] in TWO_PHASE_P2_HM]
-
+    """Four sub-phases (3 jobs each) to cut GPU contention and use A100 VRAM (~70 GiB budget)."""
     phase_threads = int(args.two_phase_torch_threads)
-    masac_cuda_fraction = float(args.two_phase_masac_cuda_fraction)
+    cuda_fraction = float(args.three_job_cuda_fraction)
 
     _perf_env = {
         "OMP_NUM_THREADS": "1",
@@ -926,51 +1030,68 @@ def run_two_phase_happo_masac_jobs(
         "MALLOC_ARENA_MAX": "2",
     }
 
-    p1_labels = " + ".join(a.upper() for a in TWO_PHASE_P1_HM)
-    print(
-        f"\n[launcher] === PHASE 1/2 ({p1_labels}): {len(phase1_jobs)} jobs, "
-        f"torch_threads={phase_threads}, MASAC cuda_frac={masac_cuda_fraction}, "
-        f"all start simultaneously (no stagger) ===",
-        flush=True,
-    )
-    p1_jobs = _patch_torch_threads(phase1_jobs, phase_threads)
-    p1_jobs = [{**job, "env_overrides": _perf_env} for job in p1_jobs]
-    p1_patched: List[Dict[str, object]] = []
-    for job in p1_jobs:
-        if job["name"] == "masac":
-            patched_args = [str(a) for a in job["args"]]
-            for flag, val in [
-                ("--masac-preload-batch-device", "cuda"),
-                ("--cuda-memory-fraction", str(masac_cuda_fraction)),
-            ]:
-                patched_args = replace_arg(patched_args, flag, val)
-            job = {**job, "args": patched_args}
-        p1_patched.append(job)
-
-    overall_rc = run_parallel_jobs(
-        root=root, manifest=manifest, status_path=status_path,
-        jobs=p1_patched, output_root=output_root, log_dir=log_dir,
-        args=args, max_workers=len(p1_patched),
-    )
-    if overall_rc != 0:
-        print("[launcher] Phase 1 had failures — proceeding to Phase 2.", flush=True)
-
-    p2_labels = " + ".join(a.upper() for a in TWO_PHASE_P2_HM)
-    print(
-        f"\n[launcher] === PHASE 2/2 ({p2_labels}): {len(phase2_jobs)} jobs, "
-        f"torch_threads={phase_threads}, all start simultaneously (no stagger) ===",
-        flush=True,
-    )
-    p2_jobs = _patch_torch_threads(phase2_jobs, phase_threads)
-    p2_jobs = [{**job, "env_overrides": _perf_env} for job in p2_jobs]
-
-    rc2 = run_parallel_jobs(
-        root=root, manifest=manifest, status_path=status_path,
-        jobs=p2_jobs, output_root=output_root, log_dir=log_dir,
-        args=args, max_workers=len(p2_jobs),
-    )
-    if rc2 != 0:
-        overall_rc = rc2
+    overall_rc = 0
+    n_phases = len(FOUR_PHASE_ALGO_ORDER)
+    for phase_idx, algo_name in enumerate(FOUR_PHASE_ALGO_ORDER, 1):
+        phase_jobs = _prepare_four_phase_jobs(
+            jobs,
+            algo_name,
+            args=args,
+            phase_threads=phase_threads,
+            perf_env=_perf_env,
+        )
+        if not phase_jobs:
+            continue
+        print(
+            f"\n[launcher] === SUB-PHASE {phase_idx}/{n_phases} ({algo_name.upper()}×3): "
+            f"{len(phase_jobs)} jobs, torch_threads={phase_threads}, "
+            f"cuda_frac={cuda_fraction} (~{cuda_fraction * 80:.0f} GiB/job cap), "
+            f"all start simultaneously (no stagger) ===",
+            flush=True,
+        )
+        if algo_name == "happo":
+            print(
+                f"[launcher] HAPPO: hidden={args.happo_hidden_size}, "
+                f"n_rollout_threads={args.happo_n_rollout_threads} (SubprocVecEnv)",
+                flush=True,
+            )
+        elif algo_name == "masac":
+            print(
+                f"[launcher] MASAC GPU: buffer={args.three_job_masac_buffer_size} ep, "
+                f"max_replay={args.three_job_masac_max_replay_gib} GiB, "
+                f"batch={args.three_job_masac_critic_batch_size}, "
+                f"rnn={args.masac_rnn_hidden_dim}",
+                flush=True,
+            )
+        elif algo_name == "matd3":
+            print(
+                f"[launcher] MATD3 RAM: buffer={args.matd3_buffer_size:,} transitions, "
+                f"batch={args.matd3_batch_size}, train_interval={args.matd3_train_interval}",
+                flush=True,
+            )
+        elif algo_name == "maac":
+            print(
+                f"[launcher] MAAC RAM: buffer={args.maac_buffer_length:,} steps, "
+                f"batch={args.maac_batch_size}, updates={args.maac_num_updates}/"
+                f"{args.maac_steps_per_update} steps",
+                flush=True,
+            )
+        rc = run_parallel_jobs(
+            root=root,
+            manifest=manifest,
+            status_path=status_path,
+            jobs=phase_jobs,
+            output_root=output_root,
+            log_dir=log_dir,
+            args=args,
+            max_workers=len(phase_jobs),
+        )
+        if rc != 0:
+            overall_rc = rc
+            print(
+                f"[launcher] Sub-phase {phase_idx} ({algo_name.upper()}) had failures — continuing.",
+                flush=True,
+            )
     return overall_rc
 
 
@@ -1006,18 +1127,37 @@ def make_manifest(
         "execution": "two_phase_happo_masac",
         "parallelization": {
             "execution_mode": "two_phase_happo_masac",
+            "four_phase_algo_order": list(FOUR_PHASE_ALGO_ORDER),
+            "jobs_per_subphase": 3,
             "requested": args.parallel_scenarios > 1,
             "effective": args.parallel_scenarios > 1,
             "parallel_scenarios": args.parallel_scenarios,
-            "two_phase_torch_threads": getattr(args, "two_phase_torch_threads", 2),
-            "two_phase_masac_cuda_fraction": getattr(args, "two_phase_masac_cuda_fraction", 0.26),
+            "two_phase_torch_threads": getattr(args, "two_phase_torch_threads", 4),
+            "three_job_cuda_fraction": getattr(args, "three_job_cuda_fraction", 0.30),
+            "three_job_masac_buffer_size": getattr(args, "three_job_masac_buffer_size", 10),
+            "three_job_masac_max_replay_gib": getattr(args, "three_job_masac_max_replay_gib", 14.0),
+            "three_job_masac_critic_batch_size": getattr(args, "three_job_masac_critic_batch_size", 1024),
+            "two_phase_masac_cuda_fraction": getattr(args, "three_job_cuda_fraction", 0.30),
             "strategy": (
-                "two_phase_happo_masac: Phase1=HAPPO+MASAC x3 (6 parallel, no stagger); "
-                "Phase2=MATD3+MAAC x3 (6 parallel, no stagger)."
+                "four_subphases: HAPPO×3 → MASAC×3 → MATD3×3 → MAAC×3 "
+                "(3 parallel each, no stagger; ~70 GiB VRAM budget when headroom available)"
             ),
-            "est_min_per_episode": 12,
-            "est_phase_wall_hours": round(args.episodes * 12 / 60, 1),
-            "est_total_wall_hours": round(args.episodes * 12 / 60 * 2, 1),
+            "est_min_per_episode_by_algo": dict(EST_MIN_PER_EPISODE_BY_ALGO),
+            "est_min_per_episode": 11.0,
+            "est_phase_wall_hours": round(
+                sum(
+                    args.episodes * EST_MIN_PER_EPISODE_BY_ALGO[a] / 60.0
+                    for a in FOUR_PHASE_ALGO_ORDER
+                ),
+                1,
+            ),
+            "est_total_wall_hours": round(
+                sum(
+                    args.episodes * EST_MIN_PER_EPISODE_BY_ALGO[a] / 60.0
+                    for a in FOUR_PHASE_ALGO_ORDER
+                ),
+                1,
+            ),
         },
         "active_project_environment": dict(env_info),
         "gpu_optimization": {
@@ -1101,63 +1241,89 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--oom-retry", action=argparse.BooleanOptionalAction, default=True)
 
     # ── A100-SXM4-80GB hyperparameters (two_phase_happo_masac primary) ─────────
-    # Phase1 (6 jobs): 3xHAPPO light GPU + 3xMASAC replay on GPU @ 0.26 frac (~21 GiB/job cap).
-    # Phase2 (6 jobs): 3xMATD3 + 3xMAAC; buffers mostly RAM (~14+7 GiB/job).
+    # Four sub-phases (3 jobs each): HAPPO → MASAC → MATD3 → MAAC.
+    # 3 × cuda_fraction × 80 GiB ≈ 72 GiB VRAM budget (user had ~12/80 GiB with 6 jobs).
     # Notebook cell 6.1 is the single source of truth; these defaults match launcher_base_args().
     parser.add_argument("--happo-hidden-size", default=512, type=int,
-                        help="HAPPO [512,512] speed profile; ~11 FPS/job with n_rollout_threads=1 in two_phase.")
-    parser.add_argument("--happo-n-rollout-threads", default=1, type=int,
-                        help="Env rollouts per HAPPO job. Use 1 for two_phase (6 jobs/fase).")
-    parser.add_argument("--masac-max-replay-buffer-gib", default=11.0, type=float)
-    parser.add_argument("--masac-buffer-size", default=8, type=int,
-                        help="Episodes in replay buffer. 8 ep ~11 GiB on GPU (axis mode, 8760 steps).")
-    parser.add_argument("--masac-critic-batch-size", default=512, type=int,
-                        help="A100 two_phase: 512 balances Tensor Core use and peak VRAM with cuda buffer.")
+                        help="HAPPO [512,512]; stable with n_rollout_threads=2 on A100.")
+    parser.add_argument("--happo-n-rollout-threads", default=2, type=int,
+                        help="Parallel env rollouts per HAPPO job (SubprocVecEnv; 3 jobs×2=6 envs).")
+    parser.add_argument("--masac-max-replay-buffer-gib", default=16.0, type=float)
+    parser.add_argument("--masac-buffer-size", default=12, type=int,
+                        help="Episodes in replay buffer (MASAC sub-phase; ~16 GiB/job on GPU).")
+    parser.add_argument("--masac-critic-batch-size", default=1024, type=int,
+                        help="MASAC critic batch (Tensor Cores; applied in MASAC sub-phase).")
     parser.add_argument("--masac-critic-train-steps", default=2, type=int,
-                        help="2 critic steps per env step.")
+                        help="2 critic steps per env step (sample efficiency).")
     parser.add_argument("--masac-actor-sample-times", default=10, type=int,
-                        help="10 actor updates per critic step.")
-    parser.add_argument("--masac-rnn-hidden-dim", default=512, type=int,
-                        help="GRU actor hidden dim; 512 stable with ~11 GiB GPU replay buffer.")
-    parser.add_argument("--masac-qmix-hidden-dim", default=256, type=int,
+                        help="10 actor updates per critic step (MASAC nature).")
+    parser.add_argument("--masac-rnn-hidden-dim", default=640, type=int,
+                        help="GRU actor hidden; 640 fits ~16 GiB GPU replay with batch 1024.")
+    parser.add_argument("--masac-qmix-hidden-dim", default=320, type=int,
                         help="QMIX mixing hidden dim.")
-    parser.add_argument("--masac-hyper-hidden-dim", default=512, type=int,
+    parser.add_argument("--masac-hyper-hidden-dim", default=640, type=int,
                         help="Hypernetwork hidden dim for QMIX weights.")
     parser.add_argument("--masac-preload-batch-device", default="cuda", choices=("auto", "cuda", "cpu"),
-                        help="cuda for two_phase Phase1 (MASAC replay buffer on GPU).")
-    parser.add_argument("--matd3-batch-size", default=1024, type=int,
-                        help="A100-80GB: Tensor Cores optimal at batch>=512.")
-    parser.add_argument("--matd3-buffer-size", default=2000000, type=int,
-                        help="A100-80GB: 2M transitions = 228 ep diversity; 3x~14 GiB = 42 GiB RAM.")
+                        help="cuda in MASAC sub-phase (replay on GPU).")
+    parser.add_argument("--matd3-batch-size", default=2048, type=int,
+                        help="MATD3 batch (Tensor Cores; 3 jobs share RAM not VRAM).")
+    parser.add_argument("--matd3-buffer-size", default=3000000, type=int,
+                        help="3M transitions ≈21 GiB RAM/job; 3×63 GiB << 167 GiB.")
     parser.add_argument("--matd3-hidden-size", default=1024, type=int,
-                        help="A100-80GB: actor+critic hidden 1024 (4x params vs 512).")
-    parser.add_argument("--matd3-train-interval", default=100, type=int)
+                        help="MATD3 actor+critic hidden 1024.")
+    parser.add_argument("--matd3-train-interval", default=50, type=int,
+                        help="Train every 50 env steps (more GPU utilization).")
     parser.add_argument("--maac-batch-size", default=1024, type=int,
-                        help="A100-80GB: Tensor Cores optimal at batch>=512.")
-    parser.add_argument("--maac-buffer-length", default=1000000, type=int,
-                        help="A100-80GB: 1M steps = 2x vs 500K; 3x~7 GiB = 21 GiB RAM.")
+                        help="MAAC batch (Tensor Cores).")
+    parser.add_argument("--maac-buffer-length", default=1500000, type=int,
+                        help="1.5M steps ≈10 GiB RAM/job; 3×30 GiB << 167 GiB.")
     parser.add_argument("--maac-hidden-size", default=1024, type=int,
-                        help="A100-80GB: attention critic hidden 1024 (4x params vs 512).")
-    parser.add_argument("--maac-steps-per-update", default=100, type=int)
-    parser.add_argument("--maac-num-updates", default=16, type=int,
-                        help="A100-80GB: 16 gradient steps per update (2x vs 8; GPU is fast).")
+                        help="MAAC attention critic hidden 1024.")
+    parser.add_argument("--maac-steps-per-update", default=50, type=int,
+                        help="Collect 50 steps then burst GPU updates.")
+    parser.add_argument("--maac-num-updates", default=20, type=int,
+                        help="20 gradient steps per update (exploit fast A100).")
     parser.add_argument(
         "--execution-mode",
         default="two_phase_happo_masac",
         choices=("two_phase_happo_masac",),
-        help="Colab A100 official: Phase1 HAPPO+MASAC x3, then Phase2 MATD3+MAAC x3 (no stagger).",
+        help="Colab A100 official: 4 sub-phases HAPPO→MASAC→MATD3→MAAC (3 parallel each, no stagger).",
     )
     parser.add_argument(
         "--two-phase-torch-threads",
-        default=2,
+        default=4,
         type=int,
-        help="Torch threads per job in two_phase_happo_masac (6 jobs / 12 vCPU = 2).",
+        help="Torch threads per job in four_subphases (3 jobs / 12 vCPU = 4).",
+    )
+    parser.add_argument(
+        "--three-job-cuda-fraction",
+        default=0.30,
+        type=float,
+        help="CUDA memory fraction per process when 3 jobs share the GPU (0.30×80≈24 GiB/job).",
+    )
+    parser.add_argument(
+        "--three-job-masac-buffer-size",
+        default=12,
+        type=int,
+        help="MASAC replay episodes in MASAC-only sub-phase (~16 GiB/job with axis/8760).",
+    )
+    parser.add_argument(
+        "--three-job-masac-max-replay-gib",
+        default=16.0,
+        type=float,
+        help="MASAC replay cap GiB per job in MASAC-only sub-phase.",
+    )
+    parser.add_argument(
+        "--three-job-masac-critic-batch-size",
+        default=1024,
+        type=int,
+        help="MASAC critic batch in MASAC-only sub-phase (Tensor Cores).",
     )
     parser.add_argument(
         "--two-phase-masac-cuda-fraction",
-        default=0.26,
+        default=0.30,
         type=float,
-        help="CUDA memory fraction per MASAC process in Phase 1 (0.26 x 80 GiB = 20.8 GiB/job).",
+        help="Deprecated alias for --three-job-cuda-fraction (MASAC sub-phase).",
     )
     return parser.parse_args(argv)
 

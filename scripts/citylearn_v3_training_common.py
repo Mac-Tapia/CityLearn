@@ -2689,6 +2689,9 @@ class CityLearnV3BackendAdapter:
             for _ in self.agents
         ]
         self._live_progress_lock = threading.Lock()
+        self._live_fps_last_step: Optional[int] = None
+        self._live_fps_last_mono: Optional[float] = None
+        self._live_fps_ema: Optional[float] = None
 
         self._last_observations: Dict[str, np.ndarray] = {}
         self.global_step = 0
@@ -3181,8 +3184,24 @@ class CityLearnV3BackendAdapter:
                 if _vals:
                     _cstats[f"reward_component_{_k}_mean"] = float(np.mean(_vals))
 
+        global_step = int(timeseries_row["global_step"])
+        now_mono = time.monotonic()
+        fps: Optional[float] = self._live_fps_ema
+        if self._live_fps_last_step is not None and self._live_fps_last_mono is not None:
+            step_delta = global_step - self._live_fps_last_step
+            time_delta = now_mono - self._live_fps_last_mono
+            if step_delta > 0 and time_delta > 0.05:
+                instant_fps = step_delta / time_delta
+                if self._live_fps_ema is None:
+                    self._live_fps_ema = instant_fps
+                else:
+                    self._live_fps_ema = 0.65 * self._live_fps_ema + 0.35 * instant_fps
+                fps = self._live_fps_ema
+        self._live_fps_last_step = global_step
+        self._live_fps_last_mono = now_mono
+
         payload = {
-            "global_step": int(timeseries_row["global_step"]),
+            "global_step": global_step,
             "episode": int(timeseries_row["episode"]),
             "episode_step": int(timeseries_row["episode_step"]),
             "time_step": int(timeseries_row["time_step"]),
@@ -3214,6 +3233,9 @@ class CityLearnV3BackendAdapter:
             "reward_component_ev_mean": _cstats.get("reward_component_ev_mean"),
             "reward_team_reward": _breakdown.get("team_reward"),
             "reward_district_import_kwh": _breakdown.get("district_import"),
+            "fps": fps,
+            "mean_return": episode_reward_mean_cumulative,
+            "episode_time_steps": self.episode_time_steps,
             "live_status": "env_step",
             "live_status_updated_at": datetime.now(timezone.utc).isoformat(),
             "backend_training_active": False,
