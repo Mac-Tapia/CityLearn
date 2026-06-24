@@ -623,6 +623,9 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
         args = replace_arg(args, "--buffer-size", "50000")
         args = replace_arg(args, "--hidden-size", "256")
         args = replace_arg(args, "--train-interval", "100")
+        # Reset to a short fixed delay — do NOT inherit the original stagger (600/1800/3000s)
+        # which would add 30-50 min extra wait on retry when 600s is sufficient.
+        retry["startup_delay_seconds"] = 600
     elif name == "maac":
         # OOM fallback: reduce batch and buffer.
         args = replace_arg(args, "--batch-size", "256")
@@ -1315,21 +1318,27 @@ def run_two_phase_concurrent_jobs(
         ]
     p2_jobs = [{**job, "env_overrides": _perf_env} for job in p2_jobs]
 
-    # Stagger MATD3 starts: E1 at 600s, E2 at 730s, E3 at 860s.
-    # Previous 300/420/540s delays: E1+E2 still get OOM-killed (exit=-9) while
-    # E3 at 540s survived.  Root cause: at t<540s the 9 concurrent processes
-    # (HAPPO×3 + MASAC×3 + MAAC×3) still have transient peak RAM from dataset
-    # loading and initial gradient allocation that, combined with the new MATD3
-    # env load (~10-12 GiB), pushes past the 167 GiB Colab limit.
-    # Starting all MATD3 jobs after 600s gives the other processes time to
-    # reach steady state.  130s inter-job gap (vs 120s) adds a safety margin
-    # between concurrent MATD3 env loads.
+    # Stagger MATD3 starts: E1 at 600s, E2 at 1800s, E3 at 3000s.
+    #
+    # Root cause of OOM: CityLearn env loading for 17 buildings × 2 years peaks at
+    # ~12-15 GiB RAM per MATD3 process.  With a 130s inter-job gap (E1=600/E2=730/E3=860),
+    # E1 and E2 both load their envs simultaneously (loading takes ~10-15 min); their
+    # combined peak (~24-30 GiB) plus the 9 steady-state processes (~81 GiB) and OS
+    # overhead pushes past the 167 GiB limit → SIGKILL.
+    #
+    # Fix: 1200s (20 min) gap ensures each MATD3 has fully completed env initialization
+    # before the next one starts.  Peak RAM at any transition:
+    #   t=600s  (E1 starts): 81 GiB (others) + 12 GiB (E1 peak) = 93 GiB  (56%)
+    #   t=1800s (E2 starts): 81 + 9 (E1 steady) + 12 (E2 peak)  = 102 GiB (61%)
+    #   t=3000s (E3 starts): 81 + 9 + 9 + 12                    = 111 GiB (66%)
+    # All transitions are below 167 GiB.  Wall-clock overhead: E3's 50 min wait is
+    # negligible vs the 40h training time.
     _matd3_delay = 600
     staggered = []
     for job in (p1_jobs + p2_jobs):
         if job["name"] == "matd3":
             job = {**job, "startup_delay_seconds": _matd3_delay}
-            _matd3_delay += 130
+            _matd3_delay += 1200
         staggered.append(job)
     all_jobs = staggered
 
@@ -1343,11 +1352,11 @@ def run_two_phase_concurrent_jobs(
     print(
         f"\n[launcher] ═══ CONCURRENT (HAPPO+MATD3+MAAC+MASAC): "
         f"{n_total} jobs × 1 torch-thread "
-        f"| sys-RAM ~87 GiB / 167 GiB (52%)"
-        f" | GPU ~37 GiB / 80 GiB (46%)"
+        f"| sys-RAM ~111 GiB / 167 GiB (66% peak) "
+        f"| GPU ~37 GiB / 80 GiB (46%)"
         f" | SSD ~{matd3_buf_disk_gib:.0f} GiB (MATD3 buf) "
         f"| MASAC buf={masac_buf_gpu_gib:.0f} GiB on GPU, MATD3 buf={matd3_buf_disk_gib:.0f} GiB on SSD "
-        f"| MATD3 stagger=600s/E1+130s/job (steady-state RAM after concurrent init) ═══",
+        f"| MATD3 stagger=600s/E1+1200s/job (only 1 MATD3 loading env at a time) ═══",
         flush=True,
     )
 
@@ -1525,6 +1534,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     #   hot transitions in RAM after first access (near-DRAM speed in steady-state).
     #   hidden_size=512 → larger actor/critic network for 17-agent 748-dim shared obs.
     #   train_interval=50 → 2× more frequent updates = better GPU utilization.
+    #   OOM fix: MATD3 env loading peaks ~12-15 GiB RAM.  Jobs are staggered 1200s apart
+    #   (E1=600s, E2=1800s, E3=3000s) so only 1 MATD3 is in its init peak at a time.
+    #   The buffer/hidden/batch settings below do NOT affect system RAM (buffer is on SSD,
+    #   model weights are on GPU VRAM); the stagger is the primary OOM mitigation.
     parser.add_argument("--matd3-batch-size", default=4096, type=int)          # was 512
     parser.add_argument("--matd3-buffer-size", default=400000, type=int)       # was 6000
     parser.add_argument("--matd3-hidden-size", default=512, type=int)          # was 256
