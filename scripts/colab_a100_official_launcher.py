@@ -262,18 +262,26 @@ def validate_gpu(args: argparse.Namespace) -> Dict[str, object]:
     if args.cuda and not gpu.get("available"):
         raise RuntimeError(f"CUDA requested but GPU preflight failed: {gpu.get('error')}")
 
-    # Accept A100 or H100: both expose the same TF32 / expandable_segments memory profile
-    # used by this launcher. H100 (Colab Pro+) gives ~2x vCPUs for the CPU-bound CityLearn sim.
+    # Accept any datacenter GPU with enough VRAM (A100/H100/H200/RTX PRO 6000 Blackwell/etc.).
+    # All expose the TF32 / expandable_segments memory profile this launcher uses. The real
+    # requirement is VRAM headroom for 6 jobs/phase, not a specific model name.
     _gpu_name = str(gpu.get("name", ""))
-    _supported = ("A100" in _gpu_name) or ("H100" in _gpu_name)
-    if args.require_a100 and not _supported:
+    _vram = float(gpu.get("memory_total_gib") or 0.0)
+    _known = ("A100", "H100", "H200", "RTX PRO 6000", "BLACKWELL", "A40", "L40")
+    _name_known = any(k in _gpu_name.upper() for k in _known)
+
+    if args.require_a100 and _vram < 39.0:
         raise RuntimeError(
-            "A100 or H100 GPU required. Current GPU is "
-            f"{gpu.get('name', 'not detected')}. Select Runtime > Change runtime type > A100/H100."
+            f"GPU preflight expected >=39 GiB VRAM, got {_vram} GiB ({_gpu_name or 'not detected'}). "
+            "Select Runtime > Change runtime type > A100 / H100 / RTX PRO 6000."
         )
 
-    if args.require_a100 and float(gpu.get("memory_total_gib") or 0.0) < 39.0:
-        raise RuntimeError(f"A100/H100 preflight expected >=39 GiB VRAM, got {gpu.get('memory_total_gib')} GiB.")
+    if args.require_a100 and not _name_known:
+        # Capable VRAM but unrecognized model: allow and log rather than hard-fail.
+        print(
+            f"[launcher] GPU '{_gpu_name}' not in known list but has {_vram:.0f} GiB VRAM (>=39) -> accepted.",
+            flush=True,
+        )
 
     return gpu
 
