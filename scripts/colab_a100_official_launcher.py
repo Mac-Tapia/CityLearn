@@ -1240,7 +1240,7 @@ def make_manifest(
             "six_job_cuda_fraction": cuda_frac,
             "six_job_masac_buffer_size": getattr(args, "six_job_masac_buffer_size", 12),
             "six_job_masac_max_replay_gib": getattr(args, "six_job_masac_max_replay_gib", 18.0),
-            "six_job_masac_critic_batch_size": getattr(args, "six_job_masac_critic_batch_size", 1024),
+            "six_job_masac_critic_batch_size": getattr(args, "six_job_masac_critic_batch_size", 1),
             "six_job_masac_cuda_fraction": masac_frac,
             "two_phase_masac_cuda_fraction": masac_frac,
             "gpu_vram_gib": vram_gib,
