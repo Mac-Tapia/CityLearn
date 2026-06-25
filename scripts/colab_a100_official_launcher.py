@@ -1040,8 +1040,15 @@ def run_two_phase_happo_masac_jobs(
     args: argparse.Namespace,
 ) -> int:
     """Two phases (6 jobs each): HAPPO+MASAC×3 → MATD3+MAAC×3 on A100 (~70 GiB VRAM budget)."""
-    phase_threads = int(args.two_phase_torch_threads)
     cuda_fraction = _phase_cuda_fraction(args)
+
+    # Per-phase CPU budget on a 12-vCPU Colab A100 (6 jobs/phase, no oversubscription):
+    #   Phase 1 (HAPPO+MASAC): HAPPO adds n_rollout_threads SubprocVecEnv workers, so
+    #     demand = 3×(torch + rollout) + 3×torch. With torch=1, rollout=2 → 3×3 + 3×1 = 12.
+    #   Phase 2 (MATD3+MAAC): single-env off-policy (no rollout), so torch=2 → 6×2 = 12.
+    fallback = int(args.two_phase_torch_threads)
+    p1_threads = int(getattr(args, "two_phase_p1_torch_threads", None) or fallback)
+    p2_threads = int(getattr(args, "two_phase_p2_torch_threads", None) or fallback)
 
     _perf_env = {
         "OMP_NUM_THREADS": "1",
@@ -1053,10 +1060,10 @@ def run_two_phase_happo_masac_jobs(
 
     overall_rc = 0
     phase_specs = (
-        (1, TWO_PHASE_P1_HM, "HAPPO+MASAC"),
-        (2, TWO_PHASE_P2_HM, "MATD3+MAAC"),
+        (1, TWO_PHASE_P1_HM, "HAPPO+MASAC", p1_threads),
+        (2, TWO_PHASE_P2_HM, "MATD3+MAAC", p2_threads),
     )
-    for phase_idx, algo_names, label in phase_specs:
+    for phase_idx, algo_names, label, phase_threads in phase_specs:
         phase_jobs = _prepare_two_phase_jobs(
             jobs,
             algo_names,
@@ -1156,6 +1163,8 @@ def make_manifest(
             "effective": args.parallel_scenarios > 1,
             "parallel_scenarios": args.parallel_scenarios,
             "two_phase_torch_threads": getattr(args, "two_phase_torch_threads", 2),
+            "two_phase_p1_torch_threads": getattr(args, "two_phase_p1_torch_threads", 1),
+            "two_phase_p2_torch_threads": getattr(args, "two_phase_p2_torch_threads", 2),
             "six_job_cuda_fraction": getattr(args, "six_job_cuda_fraction", 0.12),
             "six_job_masac_buffer_size": getattr(args, "six_job_masac_buffer_size", 12),
             "six_job_masac_max_replay_gib": getattr(args, "six_job_masac_max_replay_gib", 18.0),
@@ -1304,7 +1313,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--two-phase-torch-threads",
         default=2,
         type=int,
-        help="Torch threads per job in two_phase (6 jobs / 12 vCPU = 2).",
+        help="Fallback torch threads per job in two_phase when per-phase values are unset.",
+    )
+    parser.add_argument(
+        "--two-phase-p1-torch-threads",
+        default=1,
+        type=int,
+        help="Phase 1 (HAPPO+MASAC) torch threads/job. HAPPO adds rollout workers, so "
+        "1 keeps 3×(1+rollout)+3×1 ≈ 12 vCPU without oversubscription.",
+    )
+    parser.add_argument(
+        "--two-phase-p2-torch-threads",
+        default=2,
+        type=int,
+        help="Phase 2 (MATD3+MAAC) torch threads/job. Single-env off-policy (no rollout), "
+        "so 2 fills 6×2 = 12 vCPU during GPU update bursts.",
     )
     parser.add_argument(
         "--six-job-cuda-fraction",
