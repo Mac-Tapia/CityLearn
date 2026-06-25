@@ -396,6 +396,15 @@ def replace_arg(args: List[str], flag: str, value: object) -> List[str]:
     return output
 
 
+def arg_value(args: Sequence[str], flag: str, default: Optional[object] = None) -> Optional[str]:
+    items = [str(item) for item in args]
+    if flag in items:
+        idx = items.index(flag)
+        if idx + 1 < len(items):
+            return items[idx + 1]
+    return None if default is None else str(default)
+
+
 def output_base(output_root: Path, algorithm: str) -> Path:
     return output_root / algorithm
 
@@ -624,6 +633,8 @@ def is_oom_failure(*paths: Path) -> bool:
         "memoryerror",
         "std::bad_alloc",
         "cannot allocate memory",
+        "exceeds the memory limit",
+        "exceeds allowed",
         "killed",
         "oom",
     )
@@ -645,6 +656,7 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
     args = [str(item) for item in retry["args"]]
 
     if name == "masac":
+        cur_frac = float(arg_value(args, "--cuda-memory-fraction", "0.14") or 0.14)
         args = replace_arg(args, "--buffer-size", "6")
         args = replace_arg(args, "--critic-batch-size", "512")
         args = replace_arg(args, "--max-replay-buffer-gib", "8.0")
@@ -652,6 +664,7 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
         args = replace_arg(args, "--qmix-hidden-dim", "192")
         args = replace_arg(args, "--hyper-hidden-dim", "384")
         args = replace_arg(args, "--masac-preload-batch-device", "cpu")
+        args = replace_arg(args, "--cuda-memory-fraction", str(min(0.28, round(cur_frac * 1.35, 3))))
     elif name == "matd3":
         args = replace_arg(args, "--batch-size", "1024")
         args = replace_arg(args, "--buffer-size", "1500000")
@@ -974,6 +987,20 @@ def _phase_cuda_fraction(args: argparse.Namespace) -> float:
     return float(getattr(args, "six_job_cuda_fraction", None) or args.three_job_cuda_fraction)
 
 
+def _masac_cuda_fraction(args: argparse.Namespace) -> float:
+    """MASAC critic/QMIX bursts need a higher per-process cap than HAPPO."""
+    explicit = getattr(args, "six_job_masac_cuda_fraction", None)
+    if explicit is not None:
+        return float(explicit)
+    base = _phase_cuda_fraction(args)
+    vram_gib = float(getattr(args, "_detected_vram_gib", 0.0) or 0.0)
+    if vram_gib >= 90.0:
+        return max(base, 0.22)
+    if vram_gib >= 75.0:
+        return max(base, 0.18)
+    return max(base, 0.16)
+
+
 def _patch_happo_a100_job(job: Mapping[str, object], args: argparse.Namespace) -> Dict[str, object]:
     """On-policy: parallel rollouts (CPU) + GPU PPO updates."""
     return _patch_job_args(
@@ -994,7 +1021,7 @@ def _patch_masac_a100_job(job: Mapping[str, object], args: argparse.Namespace) -
             # 3x GPU replay (~16 GiB/job) OOMs on A100 when all MASAC train together.
             # CPU replay + cuda batches: ~50 GiB RAM + ~6-12 GiB VRAM total (stable 6-parallel).
             "--masac-preload-batch-device": "cpu",
-            "--cuda-memory-fraction": str(_phase_cuda_fraction(args)),
+            "--cuda-memory-fraction": str(_masac_cuda_fraction(args)),
             "--buffer-size": str(args.six_job_masac_buffer_size),
             "--max-replay-buffer-gib": str(args.six_job_masac_max_replay_gib),
             "--critic-batch-size": str(args.six_job_masac_critic_batch_size),
@@ -1078,6 +1105,8 @@ def run_two_phase_happo_masac_jobs(
 ) -> int:
     """Two phases (6 jobs each): HAPPO+MASAC×3 → MATD3+MAAC×3 on A100 (~70 GiB VRAM budget)."""
     cuda_fraction = _phase_cuda_fraction(args)
+    masac_cuda_fraction = _masac_cuda_fraction(args)
+    vram_gib = float(getattr(args, "_detected_vram_gib", 0.0) or 80.0)
 
     # Per-phase CPU budget on a 12-vCPU Colab A100 (6 jobs/phase, no oversubscription):
     #   Phase 1 (HAPPO+MASAC): HAPPO adds n_rollout_threads SubprocVecEnv workers, so
@@ -1113,7 +1142,9 @@ def run_two_phase_happo_masac_jobs(
         print(
             f"\n[launcher] === PHASE {phase_idx}/2 ({label}×3 = {len(phase_jobs)} parallel): "
             f"torch_threads={phase_threads}, cuda_frac={cuda_fraction} "
-            f"(~{cuda_fraction * 80:.0f} GiB/job cap), all start simultaneously (no stagger) ===",
+            f"(HAPPO/MATD3 ~{cuda_fraction * vram_gib:.0f} GiB/job cap), "
+            f"MASAC cuda_frac={masac_cuda_fraction} (~{masac_cuda_fraction * vram_gib:.0f} GiB/job), "
+            f"all start simultaneously (no stagger) ===",
             flush=True,
         )
         if "happo" in algo_names:
@@ -1127,7 +1158,8 @@ def run_two_phase_happo_masac_jobs(
                 f"[launcher] MASAC GPU: buffer={args.six_job_masac_buffer_size} ep, "
                 f"max_replay={args.six_job_masac_max_replay_gib} GiB, "
                 f"batch={args.six_job_masac_critic_batch_size}, "
-                f"rnn={args.masac_rnn_hidden_dim}",
+                f"rnn={args.masac_rnn_hidden_dim}, "
+                f"cuda_frac={masac_cuda_fraction} (~{masac_cuda_fraction * vram_gib:.0f} GiB/job cap)",
                 flush=True,
             )
         if "matd3" in algo_names:
@@ -1175,6 +1207,9 @@ def make_manifest(
     import_info: Optional[Mapping[str, object]],
 ) -> Dict[str, object]:
     scenarios = scenario_list(args.scenario)
+    vram_gib = float(gpu_info.get("memory_total_gib") or getattr(args, "_detected_vram_gib", 0.0) or 80.0)
+    cuda_frac = float(getattr(args, "six_job_cuda_fraction", 0.14) or 0.14)
+    masac_frac = _masac_cuda_fraction(args)
     return {
         "started_at": utc_now(),
         "completed_at": None,
@@ -1202,14 +1237,18 @@ def make_manifest(
             "two_phase_torch_threads": getattr(args, "two_phase_torch_threads", 2),
             "two_phase_p1_torch_threads": getattr(args, "two_phase_p1_torch_threads", 1),
             "two_phase_p2_torch_threads": getattr(args, "two_phase_p2_torch_threads", 2),
-            "six_job_cuda_fraction": getattr(args, "six_job_cuda_fraction", 0.12),
+            "six_job_cuda_fraction": cuda_frac,
             "six_job_masac_buffer_size": getattr(args, "six_job_masac_buffer_size", 12),
             "six_job_masac_max_replay_gib": getattr(args, "six_job_masac_max_replay_gib", 18.0),
             "six_job_masac_critic_batch_size": getattr(args, "six_job_masac_critic_batch_size", 1024),
-            "two_phase_masac_cuda_fraction": getattr(args, "six_job_cuda_fraction", 0.12),
+            "six_job_masac_cuda_fraction": masac_frac,
+            "two_phase_masac_cuda_fraction": masac_frac,
+            "gpu_vram_gib": vram_gib,
             "strategy": (
                 "two_phase_happo_masac: Phase1=HAPPO+MASAC x3 (6 parallel, no stagger); "
-                "Phase2=MATD3+MAAC x3 (6 parallel, no stagger); ~70 GiB VRAM budget"
+                "Phase2=MATD3+MAAC x3 (6 parallel, no stagger); "
+                f"VRAM {vram_gib:.0f} GiB | HAPPO cap {cuda_frac * vram_gib:.0f} GiB/job | "
+                f"MASAC cap {masac_frac * vram_gib:.0f} GiB/job"
             ),
             "est_min_per_episode_by_algo": dict(EST_MIN_PER_EPISODE_BY_ALGO),
             "est_min_per_episode": EST_MIN_PER_EPISODE_PHASE,
@@ -1370,7 +1409,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--six-job-cuda-fraction",
         default=0.14,
         type=float,
-        help="CUDA memory fraction per process when 6 jobs share the GPU (0.14x96 ~13.4 GiB/job cap).",
+        help="Per-process VRAM cap for HAPPO/MATD3/MAAC (fraction of total VRAM).",
+    )
+    parser.add_argument(
+        "--six-job-masac-cuda-fraction",
+        default=None,
+        type=float,
+        help="Per-process VRAM cap for MASAC only (higher than HAPPO; critic batch 768 needs ~18-21 GiB on 96GB GPUs).",
     )
     parser.add_argument(
         "--six-job-masac-buffer-size",
@@ -1492,6 +1537,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     schema_arg = path_for_status(root, schema_resolved)
 
     gpu_info = validate_gpu(args)
+    setattr(args, "_detected_vram_gib", float(gpu_info.get("memory_total_gib") or 0.0))
     torch_info = validate_torch(args)
     import_info = smoke_imports() if args.smoke_imports else None
 
