@@ -262,14 +262,18 @@ def validate_gpu(args: argparse.Namespace) -> Dict[str, object]:
     if args.cuda and not gpu.get("available"):
         raise RuntimeError(f"CUDA requested but GPU preflight failed: {gpu.get('error')}")
 
-    if args.require_a100 and "A100" not in str(gpu.get("name", "")):
+    # Accept A100 or H100: both expose the same TF32 / expandable_segments memory profile
+    # used by this launcher. H100 (Colab Pro+) gives ~2x vCPUs for the CPU-bound CityLearn sim.
+    _gpu_name = str(gpu.get("name", ""))
+    _supported = ("A100" in _gpu_name) or ("H100" in _gpu_name)
+    if args.require_a100 and not _supported:
         raise RuntimeError(
-            "A100 GPU required. Current GPU is "
-            f"{gpu.get('name', 'not detected')}. Select Runtime > Change runtime type > A100."
+            "A100 or H100 GPU required. Current GPU is "
+            f"{gpu.get('name', 'not detected')}. Select Runtime > Change runtime type > A100/H100."
         )
 
     if args.require_a100 and float(gpu.get("memory_total_gib") or 0.0) < 39.0:
-        raise RuntimeError(f"A100 preflight expected >=39 GiB VRAM, got {gpu.get('memory_total_gib')} GiB.")
+        raise RuntimeError(f"A100/H100 preflight expected >=39 GiB VRAM, got {gpu.get('memory_total_gib')} GiB.")
 
     return gpu
 
