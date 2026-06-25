@@ -1283,7 +1283,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--masac-max-replay-buffer-gib", default=12.0, type=float)
     parser.add_argument("--masac-buffer-size", default=8, type=int,
                         help="Episodes in replay buffer (MASAC sub-phase; ~11 GiB/job RAM with axis/8760).")
-    parser.add_argument("--masac-critic-batch-size", default=512, type=int,
+    parser.add_argument("--masac-critic-batch-size", default=768, type=int,
                         help="MASAC critic batch (Tensor Cores; applied in MASAC sub-phase).")
     parser.add_argument("--masac-critic-train-steps", default=2, type=int,
                         help="2 critic steps per env step (sample efficiency).")
@@ -1297,7 +1297,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="Hypernetwork hidden dim for QMIX weights.")
     parser.add_argument("--masac-preload-batch-device", default="cuda", choices=("auto", "cuda", "cpu"),
                         help="cuda in MASAC sub-phase (replay on GPU).")
-    parser.add_argument("--matd3-batch-size", default=1024, type=int,
+    parser.add_argument("--matd3-batch-size", default=1280, type=int,
                         help="MATD3 batch (Tensor Cores; 3 jobs share RAM not VRAM).")
     parser.add_argument("--matd3-buffer-size", default=2000000, type=int,
                         help="2M transitions ~14 GiB RAM/job; 3x42 GiB << 167 GiB.")
@@ -1305,7 +1305,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="MATD3 actor+critic hidden 768 (stable 6-parallel phase 2).")
     parser.add_argument("--matd3-train-interval", default=50, type=int,
                         help="Train every 50 env steps (more GPU utilization).")
-    parser.add_argument("--maac-batch-size", default=512, type=int,
+    parser.add_argument("--maac-batch-size", default=768, type=int,
                         help="MAAC batch (Tensor Cores).")
     parser.add_argument("--maac-buffer-length", default=1000000, type=int,
                         help="1M steps ~7 GiB RAM/job; 3x21 GiB << 167 GiB.")
@@ -1343,9 +1343,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--six-job-cuda-fraction",
-        default=0.12,
+        default=0.14,
         type=float,
-        help="CUDA memory fraction per process when 6 jobs share the GPU (0.12x80 ~9.6 GiB/job cap).",
+        help="CUDA memory fraction per process when 6 jobs share the GPU (0.14x96 ~13.4 GiB/job cap).",
     )
     parser.add_argument(
         "--six-job-masac-buffer-size",
@@ -1361,7 +1361,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--six-job-masac-critic-batch-size",
-        default=512,
+        default=768,
         type=int,
         help="MASAC critic batch in 6-job phase (Tensor Cores).",
     )
