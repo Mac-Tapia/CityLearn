@@ -1353,7 +1353,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="Critic passes per env epoch (1 for 8760-step episodes in 6-parallel).")
     parser.add_argument("--masac-actor-sample-times", default=1, type=int,
                         help="Actor samples per env epoch (backend caps at 1 for CityLearn).")
-                        help="10 actor updates per critic step (MASAC nature).")
     parser.add_argument("--masac-rnn-hidden-dim", default=640, type=int,
                         help="GRU actor hidden; 640 fits ~16 GiB GPU replay with batch 1024.")
     parser.add_argument("--masac-qmix-hidden-dim", default=320, type=int,
