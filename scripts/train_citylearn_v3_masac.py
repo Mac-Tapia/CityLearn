@@ -50,7 +50,12 @@ def parse_args():
         help="Abort before backend startup if MASAC replay buffer would exceed this estimate.",
     )
     parser.add_argument("--buffer-size", default=20, type=int)
-    parser.add_argument("--critic-batch-size", default=64, type=int)
+    parser.add_argument(
+        "--critic-batch-size",
+        default=1,
+        type=int,
+        help="Episodes sampled per QMIX critic update (NOT GPU transition batch; use 1 for 8760-step CityLearn).",
+    )
     parser.add_argument("--critic-train-steps", default=1, type=int)
     parser.add_argument("--actor-sample-times", default=5, type=int)
     parser.add_argument(
@@ -191,6 +196,28 @@ def main() -> int:
     backend_args.critic_batch_size = max(1, int(args.critic_batch_size))
     backend_args.critic_train_steps = max(1, int(args.critic_train_steps))
     backend_args.actor_sample_times = max(1, int(args.actor_sample_times))
+    # QMIX/MASAC critic_batch_size = episodes per update (Rashid et al. 2018: 32 ep x 60-120 steps SMAC).
+    # CityLearn 8760-step episodes unroll the full horizon on GPU -> cap at 1 episode.
+    if backend_args.episode_limit >= 1000:
+        if backend_args.critic_batch_size > 1:
+            print(
+                f"[masac] critic_batch_size clamped {backend_args.critic_batch_size} -> 1 "
+                f"(episodes not transitions; episode_limit={backend_args.episode_limit})",
+                flush=True,
+            )
+            backend_args.critic_batch_size = 1
+        if backend_args.critic_train_steps > 1:
+            print(
+                f"[masac] critic_train_steps clamped {backend_args.critic_train_steps} -> 1 "
+                f"(8760-step QMIX unroll; avoids synchronized GPU spikes in 6-parallel)",
+                flush=True,
+            )
+            backend_args.critic_train_steps = 1
+    else:
+        backend_args.critic_batch_size = min(
+            backend_args.critic_batch_size,
+            max(1, int(backend_args.buffer_size)),
+        )
     backend_args.citylearn_preload_batch_device = args.masac_preload_batch_device
     backend_args.actor_lr = float(args.actor_lr)
     backend_args.critic_lr = float(args.critic_lr)

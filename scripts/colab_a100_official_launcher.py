@@ -658,7 +658,7 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
     if name == "masac":
         cur_frac = float(arg_value(args, "--cuda-memory-fraction", "0.14") or 0.14)
         args = replace_arg(args, "--buffer-size", "6")
-        args = replace_arg(args, "--critic-batch-size", "512")
+        args = replace_arg(args, "--critic-batch-size", "1")
         args = replace_arg(args, "--max-replay-buffer-gib", "8.0")
         args = replace_arg(args, "--rnn-hidden-dim", "384")
         args = replace_arg(args, "--qmix-hidden-dim", "192")
@@ -1347,11 +1347,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--masac-max-replay-buffer-gib", default=12.0, type=float)
     parser.add_argument("--masac-buffer-size", default=8, type=int,
                         help="Episodes in replay buffer (MASAC sub-phase; ~11 GiB/job RAM with axis/8760).")
-    parser.add_argument("--masac-critic-batch-size", default=768, type=int,
-                        help="MASAC critic batch (Tensor Cores; applied in MASAC sub-phase).")
-    parser.add_argument("--masac-critic-train-steps", default=2, type=int,
-                        help="2 critic steps per env step (sample efficiency).")
-    parser.add_argument("--masac-actor-sample-times", default=10, type=int,
+    parser.add_argument("--masac-critic-batch-size", default=1, type=int,
+                        help="MASAC episodes per QMIX update (NOT transitions; use 1 for 8760-step CityLearn).")
+    parser.add_argument("--masac-critic-train-steps", default=1, type=int,
+                        help="Critic passes per env epoch (1 for 8760-step episodes in 6-parallel).")
+    parser.add_argument("--masac-actor-sample-times", default=1, type=int,
+                        help="Actor samples per env epoch (backend caps at 1 for CityLearn).")
                         help="10 actor updates per critic step (MASAC nature).")
     parser.add_argument("--masac-rnn-hidden-dim", default=640, type=int,
                         help="GRU actor hidden; 640 fits ~16 GiB GPU replay with batch 1024.")
@@ -1415,7 +1416,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--six-job-masac-cuda-fraction",
         default=None,
         type=float,
-        help="Per-process VRAM cap for MASAC only (higher than HAPPO; critic batch 768 needs ~18-21 GiB on 96GB GPUs).",
+        help="Per-process VRAM cap for MASAC only (higher than HAPPO; QMIX unrolls 8760 steps/episode on GPU).",
     )
     parser.add_argument(
         "--six-job-masac-buffer-size",
@@ -1431,9 +1432,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--six-job-masac-critic-batch-size",
-        default=768,
+        default=1,
         type=int,
-        help="MASAC critic batch in 6-job phase (Tensor Cores).",
+        help="MASAC episodes per QMIX update in 6-job phase (1 for CityLearn 8760-step episodes).",
     )
     parser.add_argument(
         "--three-job-cuda-fraction",
@@ -1455,7 +1456,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--three-job-masac-critic-batch-size",
-        default=1024,
+        default=1,
         type=int,
         help="Deprecated alias for --six-job-masac-critic-batch-size.",
     )
