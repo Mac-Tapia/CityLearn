@@ -225,6 +225,22 @@ def main() -> int:
     backend_args.rnn_hidden_dim = max(1, int(args.rnn_hidden_dim))
     backend_args.qmix_hidden_dim = max(1, int(args.qmix_hidden_dim))
     backend_args.hyper_hidden_dim = max(1, int(args.hyper_hidden_dim))
+    # 8760-step QMIX stacks (1, T, n_agents, n_actions) on GPU; proven Iquitos profile uses 64/32/64.
+    if backend_args.episode_limit >= 1000:
+        caps = (
+            ("rnn_hidden_dim", 64),
+            ("qmix_hidden_dim", 32),
+            ("hyper_hidden_dim", 64),
+        )
+        for attr, cap in caps:
+            current = int(getattr(backend_args, attr))
+            if current > cap:
+                print(
+                    f"[masac] {attr} clamped {current} -> {cap} "
+                    f"(8760-step QMIX train_critic VRAM; see launch_citylearn_v3_iquitos_training.ps1)",
+                    flush=True,
+                )
+                setattr(backend_args, attr, cap)
     backend_args.buffer_size = max(int(args.buffer_size), 2)
     backend_args.gamma = float(args.gamma)
     backend_args.use_rnn = bool(args.use_recurrent_policy)

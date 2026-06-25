@@ -657,12 +657,12 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
 
     if name == "masac":
         cur_frac = float(arg_value(args, "--cuda-memory-fraction", "0.14") or 0.14)
-        args = replace_arg(args, "--buffer-size", "6")
+        args = replace_arg(args, "--buffer-size", "2")
         args = replace_arg(args, "--critic-batch-size", "1")
-        args = replace_arg(args, "--max-replay-buffer-gib", "8.0")
-        args = replace_arg(args, "--rnn-hidden-dim", "384")
-        args = replace_arg(args, "--qmix-hidden-dim", "192")
-        args = replace_arg(args, "--hyper-hidden-dim", "384")
+        args = replace_arg(args, "--max-replay-buffer-gib", "6.0")
+        args = replace_arg(args, "--rnn-hidden-dim", "64")
+        args = replace_arg(args, "--qmix-hidden-dim", "32")
+        args = replace_arg(args, "--hyper-hidden-dim", "64")
         args = replace_arg(args, "--masac-preload-batch-device", "cpu")
         args = replace_arg(args, "--cuda-memory-fraction", str(min(0.28, round(cur_frac * 1.35, 3))))
     elif name == "matd3":
@@ -1344,23 +1344,23 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="HAPPO [512,512]; stable with n_rollout_threads=2 on A100.")
     parser.add_argument("--happo-n-rollout-threads", default=2, type=int,
                         help="Parallel env rollouts per HAPPO job (SubprocVecEnv; 3 jobs×2=6 envs).")
-    parser.add_argument("--masac-max-replay-buffer-gib", default=12.0, type=float)
-    parser.add_argument("--masac-buffer-size", default=8, type=int,
-                        help="Episodes in replay buffer (MASAC sub-phase; ~11 GiB/job RAM with axis/8760).")
+    parser.add_argument("--masac-max-replay-buffer-gib", default=8.0, type=float)
+    parser.add_argument("--masac-buffer-size", default=2, type=int,
+                        help="Episodes in replay buffer (2 = stable Iquitos profile for 8760-step QMIX).")
     parser.add_argument("--masac-critic-batch-size", default=1, type=int,
                         help="MASAC episodes per QMIX update (NOT transitions; use 1 for 8760-step CityLearn).")
     parser.add_argument("--masac-critic-train-steps", default=1, type=int,
                         help="Critic passes per env epoch (1 for 8760-step episodes in 6-parallel).")
     parser.add_argument("--masac-actor-sample-times", default=1, type=int,
                         help="Actor samples per env epoch (backend caps at 1 for CityLearn).")
-    parser.add_argument("--masac-rnn-hidden-dim", default=640, type=int,
-                        help="GRU actor hidden; 640 fits ~16 GiB GPU replay with batch 1024.")
-    parser.add_argument("--masac-qmix-hidden-dim", default=320, type=int,
-                        help="QMIX mixing hidden dim.")
-    parser.add_argument("--masac-hyper-hidden-dim", default=640, type=int,
+    parser.add_argument("--masac-rnn-hidden-dim", default=64, type=int,
+                        help="GRU hidden; 64 is stable for 8760-step CityLearn QMIX in 6-parallel.")
+    parser.add_argument("--masac-qmix-hidden-dim", default=32, type=int,
+                        help="QMIX mixing hidden dim (32 for long CityLearn episodes).")
+    parser.add_argument("--masac-hyper-hidden-dim", default=64, type=int,
                         help="Hypernetwork hidden dim for QMIX weights.")
-    parser.add_argument("--masac-preload-batch-device", default="cuda", choices=("auto", "cuda", "cpu"),
-                        help="cuda in MASAC sub-phase (replay on GPU).")
+    parser.add_argument("--masac-preload-batch-device", default="cpu", choices=("auto", "cuda", "cpu"),
+                        help="cpu for 6-parallel (replay RAM); cuda only for single-job runs.")
     parser.add_argument("--matd3-batch-size", default=1280, type=int,
                         help="MATD3 batch (Tensor Cores; 3 jobs share RAM not VRAM).")
     parser.add_argument("--matd3-buffer-size", default=2000000, type=int,
@@ -1419,13 +1419,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--six-job-masac-buffer-size",
-        default=8,
+        default=2,
         type=int,
-        help="MASAC replay episodes in 6-job phase (~11 GiB/job RAM with axis/8760).",
+        help="MASAC replay episodes in 6-job phase (2 = stable Iquitos profile).",
     )
     parser.add_argument(
         "--six-job-masac-max-replay-gib",
-        default=12.0,
+        default=8.0,
         type=float,
         help="MASAC replay cap GiB per job in 6-job phase (must exceed buffer estimate).",
     )
