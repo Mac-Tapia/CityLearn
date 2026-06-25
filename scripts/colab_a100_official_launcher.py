@@ -301,6 +301,28 @@ def validate_torch(args: argparse.Namespace) -> Dict[str, object]:
 
     if cuda_available:
         torch.cuda.set_device(0)
+        device_name = torch.cuda.get_device_name(0)
+        capability = torch.cuda.get_device_capability(0)
+        cuda_runtime = str(getattr(torch.version, "cuda", "") or "")
+        needs_cu128 = capability[0] >= 12 or any(
+            k in device_name.upper() for k in ("BLACKWELL", "RTX PRO 6000", "RTX 50")
+        )
+        if needs_cu128 and not cuda_runtime.startswith("12.8"):
+            raise RuntimeError(
+                f"GPU {device_name} (sm_{capability[0]}{capability[1]}) requiere PyTorch cu128. "
+                f"Instalado: torch {torch.__version__} CUDA {cuda_runtime}. "
+                "Re-ejecuta celda 1.3 del notebook (auto-instala cu128) o usa runtime A100/H100."
+            )
+        try:
+            probe = torch.zeros(1, device="cuda")
+            _ = (probe + 1).item()
+            torch.cuda.synchronize()
+        except Exception as exc:
+            raise RuntimeError(
+                f"PyTorch no puede ejecutar kernels CUDA en {device_name}: {exc}. "
+                "Blackwell (sm_120) necesita: pip install torch torchvision "
+                "--index-url https://download.pytorch.org/whl/cu128"
+            ) from exc
         try:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
@@ -316,6 +338,9 @@ def validate_torch(args: argparse.Namespace) -> Dict[str, object]:
         "cuda_available": cuda_available,
         "cuda_enabled": bool(args.cuda and cuda_available),
         "device_name": torch.cuda.get_device_name(0) if cuda_available else None,
+        "device_capability": list(torch.cuda.get_device_capability(0)) if cuda_available else None,
+        "cuda_runtime": getattr(torch.version, "cuda", None),
+        "kernel_smoke_ok": bool(cuda_available),
         "device_total_memory_gib": (
             torch.cuda.get_device_properties(0).total_memory / (1024**3) if cuda_available else None
         ),
