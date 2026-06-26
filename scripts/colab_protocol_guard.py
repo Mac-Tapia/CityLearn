@@ -140,6 +140,51 @@ def sniff_monitor_stdout(stdout: str) -> None:
         )
 
 
+def validate_parallelization_strategy(strategy: str, *, parallelization: Optional[dict] = None) -> None:
+    """Validate launcher manifest strategy for two_phase_happo_masac (incl. dynamic backfill)."""
+
+    strategy = str(strategy or "")
+    par = dict(parallelization or {})
+    dynamic_backfill = bool(par.get("dynamic_backfill", True))
+    if dynamic_backfill:
+        required = ("dynamic_backfill", "HAPPO+MASAC", "cap=6")
+        missing = [token for token in required if token not in strategy]
+        if missing:
+            raise RuntimeError(
+                f"strategy dynamic_backfill invalida: faltan {missing} en {strategy!r}"
+            )
+    else:
+        required = ("Phase1=HAPPO+MASAC", "6 parallel")
+        missing = [token for token in required if token not in strategy]
+        if "no stagger" not in strategy.lower():
+            missing.append("no stagger")
+        if missing:
+            raise RuntimeError(f"strategy secuencial invalida: faltan {missing} en {strategy!r}")
+    for algo in ("HAPPO", "MASAC", "MATD3", "MAAC"):
+        if algo not in strategy.upper():
+            raise RuntimeError(f"strategy sin algoritmo {algo}: {strategy!r}")
+
+
+def validate_dry_run_status(status: dict) -> None:
+    """Validate official_full_status.json from launcher --dry-run."""
+
+    if status.get("status") != "dry_run":
+        raise RuntimeError(f"status esperado dry_run, obtuvo {status.get('status')!r}")
+    if status.get("execution") != "two_phase_happo_masac":
+        raise RuntimeError(
+            f"execution={status.get('execution')!r} — falta --execution-mode two_phase_happo_masac"
+        )
+    par = dict(status.get("parallelization") or {})
+    validate_parallelization_strategy(par.get("strategy", ""), parallelization=par)
+    if not status.get("training_config", {}).get("a100_ready"):
+        raise RuntimeError("training_config.a100_ready no es True")
+    jobs = list(status.get("jobs") or [])
+    if len(jobs) != 12:
+        raise RuntimeError(f"se esperaban 12 jobs, obtuvo {len(jobs)}")
+    if any(float(j.get("startup_delay_seconds") or 0) > 0 for j in jobs):
+        raise RuntimeError("stagger detectado (startup_delay_seconds > 0) — layout legacy")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
