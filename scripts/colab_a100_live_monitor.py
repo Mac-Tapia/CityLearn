@@ -158,6 +158,53 @@ def execution_mode(status: Mapping[str, object]) -> str:
     return str(par.get("execution_mode") or status.get("execution") or "?")
 
 
+def dynamic_backfill_enabled(status: Mapping[str, object]) -> bool:
+    par = dict(status.get("parallelization") or {})
+    return bool(par.get("dynamic_backfill", True))
+
+
+def estimate_backfill_eta_minutes(
+    status: Mapping[str, object],
+    root: Path,
+    *,
+    est_min_per_episode: float,
+) -> Optional[float]:
+    """Makespan ETA for dynamic backfill: phase 2 overlaps phase 1 as slots free.
+
+    Returns max(longest single remaining, total remaining work / concurrency_cap),
+    a standard makespan estimate that is honest for the 6-slot dynamic scheduler.
+    """
+
+    episodes = int(status.get("episodes") or 0)
+    episode_steps = int(status.get("episode_time_steps") or 0)
+    if episodes <= 0:
+        return None
+    cap = int(dict(status.get("parallelization") or {}).get("jobs_per_phase", 6) or 6)
+    remaining: List[float] = []
+    for job in status.get("jobs", []):
+        if _job_is_done(job):
+            continue
+        algo = str(job.get("name") or "")
+        prior = EST_MIN_PER_EPISODE_BY_ALGO.get(algo, est_min_per_episode)
+        if not _job_is_running(job):
+            remaining.append(episodes * prior)
+            continue
+        run_dir = path_for_job(root, str(job.get("output_dir") or ""))
+        progress = read_json(run_dir / "live_progress.json")
+        remaining.append(
+            estimate_minutes_remaining_for_job(
+                progress,
+                episodes=episodes,
+                episode_steps=episode_steps,
+                algo=algo,
+                est_min_per_episode=prior,
+            )
+        )
+    if not remaining:
+        return 0.0
+    return max(max(remaining), sum(remaining) / max(cap, 1))
+
+
 def infer_two_phase(status: Mapping[str, object]) -> Optional[int]:
     """1=HAPPO+MASAC block, 2=MATD3+MAAC block, 0=done."""
     if execution_mode(status) != "two_phase_happo_masac":
@@ -396,6 +443,33 @@ def print_parallelization(status: Mapping[str, object], root: Path) -> None:
     if strategy:
         print(f"  strategy       : {strategy}")
     if exec_mode == "two_phase_happo_masac":
+        backfill = dynamic_backfill_enabled(status)
+        if backfill:
+            p1_done = sum(1 for j in jobs if str(j.get("name")) in TWO_PHASE_P1 and _job_is_done(j))
+            p2_run = sum(
+                1
+                for j in jobs
+                if str(j.get("name")) in TWO_PHASE_P2 and _job_is_running(j)
+            )
+            running_total = sum(1 for j in jobs if _job_is_running(j))
+            if phase == 0:
+                print("  modo           : backfill dinámico — completado (12/12)")
+            else:
+                print(
+                    f"  modo           : backfill dinámico (cap 6) — fase1 HAPPO+MASAC {p1_done}/6 ok | "
+                    f"fase2 MATD3+MAAC {p2_run} activos | {running_total} activos total"
+                )
+            eta_total_min = estimate_backfill_eta_minutes(status, root, est_min_per_episode=est_min_ep)
+            print(f"  jobs total     : {done}/12 completados")
+            print(
+                f"  est. tiempo    : prior ~{est_min_ep:.0f} min/ep | "
+                f"~{est_total_h:.0f} h (límite superior secuencial)"
+            )
+            if eta_total_min is not None and eta_total_min > 0:
+                print(f"  ETA total      : ~{eta_total_min / 60.0:.1f} h restantes (makespan FPS)")
+            elif phase == 0:
+                print("  ETA            : entrenamiento completado")
+            return
         if phase == 0:
             phase_label = "Completado (2 fases)"
         elif phase == 1:

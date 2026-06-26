@@ -316,6 +316,11 @@ def _train_critic(self: Any, batch: dict[str, Any], max_episode_len: int, train_
     if train_step % save_every == 0:
         try:
             self.save_model(train_step)
+            # Flush the freshly written checkpoint to durable storage so an abrupt
+            # Colab disconnect cannot discard it before Google Drive syncs.
+            _sync = getattr(os, "sync", None)
+            if callable(_sync):
+                _sync()
         except Exception as exc:  # pragma: no cover - checkpointing must not crash training
             print(f"[masac] periodic checkpoint skipped at step {train_step}: {exc}", flush=True)
 

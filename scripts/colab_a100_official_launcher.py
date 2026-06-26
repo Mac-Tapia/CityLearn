@@ -1378,15 +1378,28 @@ def make_manifest(
             "two_phase_masac_cuda_fraction": masac_frac,
             "gpu_vram_gib": vram_gib,
             "strategy": (
-                "two_phase_happo_masac: Phase1=HAPPO+MASAC x3 (6 parallel, no stagger); "
-                "Phase2=MATD3+MAAC x3 (6 parallel, no stagger); "
-                f"VRAM {vram_gib:.0f} GiB | HAPPO cap {cuda_frac * vram_gib:.0f} GiB/job | "
-                f"MASAC cap {masac_frac * vram_gib:.0f} GiB/job"
+                (
+                    "dynamic_backfill: start 6 (HAPPO+MASAC x3); backfill MATD3+MAAC "
+                    "lightest-first as each slot frees (no wait for all phase 1); "
+                    f"cap=6 | VRAM {vram_gib:.0f} GiB | HAPPO/MATD3/MAAC cap "
+                    f"{cuda_frac * vram_gib:.0f} GiB/job | MASAC cap {masac_frac * vram_gib:.0f} GiB/job"
+                )
+                if bool(getattr(args, "dynamic_backfill", True))
+                else (
+                    "two_phase_happo_masac: Phase1=HAPPO+MASAC x3 (6 parallel, no stagger); "
+                    "Phase2=MATD3+MAAC x3 (6 parallel, no stagger); "
+                    f"VRAM {vram_gib:.0f} GiB | HAPPO cap {cuda_frac * vram_gib:.0f} GiB/job | "
+                    f"MASAC cap {masac_frac * vram_gib:.0f} GiB/job"
+                )
             ),
             "est_min_per_episode_by_algo": dict(EST_MIN_PER_EPISODE_BY_ALGO),
             "est_min_per_episode": EST_MIN_PER_EPISODE_PHASE,
             "est_phase_wall_hours": round(args.episodes * EST_MIN_PER_EPISODE_PHASE / 60.0, 1),
+            # Sequential upper bound (2 phases). With dynamic_backfill the real makespan
+            # is lower because phase 2 overlaps phase 1 as slots free; live dashboards
+            # report the FPS-based makespan ETA.
             "est_total_wall_hours": round(2 * args.episodes * EST_MIN_PER_EPISODE_PHASE / 60.0, 1),
+            "est_total_wall_hours_is_upper_bound": bool(getattr(args, "dynamic_backfill", True)),
         },
         "active_project_environment": dict(env_info),
         "gpu_optimization": {

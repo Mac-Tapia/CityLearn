@@ -337,6 +337,9 @@ def start_live_progress_heartbeat(
                 adapter.write_live_heartbeat(stage=active_stage, note=note)
             except Exception:
                 pass
+            # Flush buffered checkpoint/live_progress writes to Drive so an abrupt
+            # Colab disconnect cannot discard recent resumable progress.
+            flush_filesystem_buffers()
 
     thread = threading.Thread(
         target=heartbeat_loop,
@@ -355,6 +358,44 @@ def stop_live_progress_heartbeat(stop_event, thread, *, timeout_seconds: float =
 
     if thread is not None:
         thread.join(timeout=timeout_seconds)
+
+
+def flush_filesystem_buffers() -> None:
+    """Force OS-level flush of buffered writes to durable storage.
+
+    On Colab the Google Drive FUSE mount buffers writes asynchronously, so an
+    abrupt runtime crash/disconnect can silently discard recently written
+    checkpoints and ``live_progress.json`` before they reach Drive's backend.
+    ``os.sync()`` flushes every dirty buffer (including the FUSE backend) so the
+    resumable artifacts survive an interruption. No-op on platforms without
+    ``os.sync`` (e.g. Windows during local validation).
+    """
+
+    sync = getattr(os, "sync", None)
+    if not callable(sync):
+        return
+    try:
+        sync()
+    except Exception:
+        pass
+
+
+def fsync_file(path: Path) -> None:
+    """Best-effort durable flush of a single file to disk/Drive."""
+
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except (OSError, ValueError):
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _artifact_layout_payload(dirs: Mapping[str, Path]) -> Dict[str, str]:
@@ -878,7 +919,13 @@ def discover_job_resume_plan(
         completed = max(completed, maac_start)
 
     has_checkpoint = model_dir is not None or maac_ckpt is not None
-    if completed <= 0 and not has_checkpoint:
+    if not has_checkpoint:
+        # Without restorable weights a "resume" would silently train fewer episodes
+        # from a random init and corrupt the experiment. Restart fresh instead. This
+        # also covers the Colab case where a crash lost checkpoints before Drive synced.
+        plan["note"] = (
+            "live_progress_without_weights_restart_fresh" if completed > 0 else "fresh_start"
+        )
         return plan
 
     remaining = max(0, target_episodes - completed)
@@ -2340,6 +2387,9 @@ def write_minimal_results_json(
     }
     results_path = data_dir / "results.json"
     _write_json_mirrors([results_path, output_dir / "results.json"], payload)
+    fsync_file(results_path)
+    fsync_file(output_dir / "results.json")
+    flush_filesystem_buffers()
     print(f"[{algorithm.lower()}] wrote minimal salvage results.json -> {results_path}", flush=True)
     return results_path
 
@@ -2504,6 +2554,9 @@ def write_training_artifacts(
     results_path = data_dir / "results.json"
     root_results_path = output_dir / "results.json"
     _write_json_mirrors([results_path, root_results_path], results)
+    fsync_file(results_path)
+    fsync_file(root_results_path)
+    flush_filesystem_buffers()
     comparison_dir = _write_statistical_comparison_artifacts(
         output_dir=output_dir,
         algorithm=algorithm,
@@ -3569,6 +3622,7 @@ class CityLearnV3BackendAdapter:
             f"{self.live_progress_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
         )
         tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        fsync_file(tmp_path)
 
         try:
             tmp_path.replace(self.live_progress_path)
@@ -3578,6 +3632,8 @@ class CityLearnV3BackendAdapter:
                 tmp_path.replace(self.live_progress_path)
             except PermissionError:
                 tmp_path.unlink(missing_ok=True)
+                return
+        fsync_file(self.live_progress_path)
 
     def kpi_summary(self) -> Dict[str, object]:
         return {
