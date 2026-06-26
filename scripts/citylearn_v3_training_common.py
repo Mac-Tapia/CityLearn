@@ -19,6 +19,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+# Force a headless matplotlib backend for every MADRL training script. Some external
+# backends (e.g. external/MARL MASAC runner_msac.py) import matplotlib.pyplot at module
+# load and call plt.savefig() at the end of run(). Inside Colab's headless Popen
+# subprocesses an interactive backend raises and silently discards the whole
+# finalization (no checkpoint, no results.json). Setting Agg here — imported by all
+# train scripts before any backend — makes plotting safe for the entire pipeline.
+os.environ.setdefault("MPLBACKEND", "Agg")
+try:  # pragma: no cover - defensive: matplotlib may be absent in minimal envs
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+except Exception:
+    pass
+
 import numpy as np
 from gym import spaces
 
@@ -2288,6 +2302,46 @@ def _write_statistical_comparison_artifacts(
         shutil.copyfile(src, comparison_dir / dest_name)
 
     return comparison_dir
+
+
+def write_minimal_results_json(
+    *,
+    output_dir: Path,
+    algorithm: str,
+    backend: str,
+    args,
+    hyperparameters: Optional[Mapping[str, object]] = None,
+    report: Optional[Mapping[str, object]] = None,
+    error: Optional[BaseException] = None,
+) -> Path:
+    """Guarantee a valid results.json so a salvaged job counts as complete/skippable.
+
+    Used only when the standard artifact writer itself fails. Without a results.json the
+    launcher treats the job as failed and a relaunch would discard all trained progress.
+    """
+
+    output_dir = Path(output_dir)
+    data_dir = output_dir / DATA_DIR_NAME
+    data_dir.mkdir(parents=True, exist_ok=True)
+    axis_metrics = None
+    if isinstance(report, Mapping):
+        axis_metrics = report.get("project_axis_metrics")
+    payload = {
+        "algorithm": algorithm,
+        "backend": backend,
+        "scenario": getattr(args, "scenario", None),
+        "seed": getattr(args, "seed", None),
+        "episode_time_steps": getattr(args, "episode_time_steps", None),
+        "output_dir": str(output_dir),
+        "status": "completed_with_salvage",
+        "salvage_reason": (f"{type(error).__name__}: {error}" if error is not None else "artifact_writer_failed"),
+        "hyperparameters": dict(hyperparameters or {}),
+        "project_axis_metrics": axis_metrics,
+    }
+    results_path = data_dir / "results.json"
+    _write_json_mirrors([results_path, output_dir / "results.json"], payload)
+    print(f"[{algorithm.lower()}] wrote minimal salvage results.json -> {results_path}", flush=True)
+    return results_path
 
 
 def write_training_artifacts(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 
 import torch
 
@@ -22,6 +23,7 @@ from citylearn_v3_training_common import (
     write_job_resume_manifest,
     start_live_progress_heartbeat,
     stop_live_progress_heartbeat,
+    write_minimal_results_json,
     write_training_artifacts,
     write_training_summary,
 )
@@ -213,7 +215,24 @@ def main() -> int:
             initial_stage="happo_backend_starting",
             note="HAPPO backend is collecting rollouts or updating policy networks.",
         )
-        runner.run()
+        # HAPPO overwrites actor/critic .pt every eval_interval episode, so weights are
+        # always on disk. Still salvage and write artifacts on any failure so a late
+        # crash (backend tail work, Drive I/O) never discards real progress.
+        run_error: BaseException | None = None
+        try:
+            runner.run()
+        except Exception as exc:  # noqa: BLE001 - salvage on any backend failure
+            run_error = exc
+            traceback.print_exc()
+            print(
+                f"[happo] runner.run() raised {type(exc).__name__}: {exc}. "
+                "Salvaging trained model and writing artifacts so progress is not lost.",
+                flush=True,
+            )
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
         if heartbeat_adapter is not None:
             try:
                 heartbeat_adapter.write_live_heartbeat(
@@ -222,21 +241,46 @@ def main() -> int:
                 )
             except Exception:
                 pass
-        runner.save()
-        report = citylearn_v3_training_report(report_candidate)
-        artifacts = write_training_artifacts(
-            output_dir=output_dir,
-            algorithm="HAPPO",
-            backend="external/HARL",
-            args=args,
-            report=report,
-            candidate=report_candidate,
-            hyperparameters=hyperparameters,
-            extra={
-                "episodes": configured_episodes,
-                "num_env_steps": configured_num_env_steps,
-            },
-        )
+        try:
+            runner.save()
+        except Exception as exc:  # noqa: BLE001 - never let checkpointing abort finalization
+            print(f"[happo] final save() failed: {exc}", flush=True)
+        if run_error is not None:
+            hyperparameters["run_completed_with_salvage"] = True
+            hyperparameters["run_error"] = f"{type(run_error).__name__}: {run_error}"
+        try:
+            report = citylearn_v3_training_report(report_candidate)
+        except Exception as exc:  # noqa: BLE001 - keep fallback report
+            print(f"[happo] training report failed, using fallback report: {exc}", flush=True)
+        try:
+            artifacts = write_training_artifacts(
+                output_dir=output_dir,
+                algorithm="HAPPO",
+                backend="external/HARL",
+                args=args,
+                report=report,
+                candidate=report_candidate,
+                hyperparameters=hyperparameters,
+                extra={
+                    "episodes": configured_episodes,
+                    "num_env_steps": configured_num_env_steps,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - guarantee a results.json regardless
+            print(
+                f"[happo] write_training_artifacts failed ({type(exc).__name__}: {exc}); "
+                "writing minimal salvage results.json.",
+                flush=True,
+            )
+            write_minimal_results_json(
+                output_dir=output_dir,
+                algorithm="HAPPO",
+                backend="external/HARL",
+                args=args,
+                hyperparameters=hyperparameters,
+                report=report,
+                error=exc,
+            )
     finally:
         stop_live_progress_heartbeat(heartbeat_stop, heartbeat_thread)
         runner.close()

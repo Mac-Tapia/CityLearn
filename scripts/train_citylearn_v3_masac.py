@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 
 import numpy as np
 import torch
@@ -26,6 +27,7 @@ from citylearn_v3_training_common import (
     find_masac_checkpoint_bundle,
     start_live_progress_heartbeat,
     stop_live_progress_heartbeat,
+    write_minimal_results_json,
     write_training_artifacts,
     write_training_summary,
 )
@@ -219,6 +221,9 @@ def main() -> int:
             max(1, int(backend_args.buffer_size)),
         )
     backend_args.citylearn_preload_batch_device = args.masac_preload_batch_device
+    # Persist a resumable checkpoint after every QMIX critic update so an interruption
+    # near the end of training never discards trained weights (resume always possible).
+    backend_args.citylearn_masac_save_every_steps = 1
     backend_args.actor_lr = float(args.actor_lr)
     backend_args.critic_lr = float(args.critic_lr)
     backend_args.grad_norm_clip = float(args.grad_norm_clip)
@@ -369,11 +374,35 @@ def main() -> int:
             initial_stage="masac_backend_starting",
             note="MASAC backend is updating critic/actor networks between CityLearn environment steps.",
         )
-        runner.run(args.seed)
+        # The external runner finishes with a matplotlib plt() call and other tail work
+        # that can raise inside a headless subprocess. Salvage trained weights and write
+        # artifacts no matter what, so a late failure never discards real progress.
+        run_error: BaseException | None = None
+        try:
+            runner.run(args.seed)
+        except Exception as exc:  # noqa: BLE001 - salvage on any backend tail failure
+            run_error = exc
+            traceback.print_exc()
+            print(
+                f"[masac] runner.run() raised {type(exc).__name__}: {exc}. "
+                "Salvaging trained model and writing artifacts so progress is not lost.",
+                flush=True,
+            )
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
         final_train_step = max(1, int(configured_episodes) * max(1, int(backend_args.critic_train_steps)))
         if learner is not None and hasattr(learner, "save_model"):
-            learner.save_model(final_train_step)
-            hyperparameters["final_checkpoint_save_step"] = final_train_step
+            try:
+                learner.save_model(final_train_step)
+                hyperparameters["final_checkpoint_save_step"] = final_train_step
+            except Exception as exc:  # noqa: BLE001 - never let checkpointing abort finalization
+                print(f"[masac] final save_model failed: {exc}", flush=True)
+        if run_error is not None:
+            hyperparameters["run_completed_with_salvage"] = True
+            hyperparameters["run_error"] = f"{type(run_error).__name__}: {run_error}"
         try:
             env.adapter.write_live_heartbeat(
                 stage="masac_backend_finished",
@@ -381,20 +410,39 @@ def main() -> int:
             )
         except Exception:
             pass
-        report = citylearn_v3_training_report(env)
-        artifacts = write_training_artifacts(
-            output_dir=output_dir,
-            algorithm="MASAC",
-            backend="external/MADRL-MASAC",
-            args=args,
-            report=report,
-            candidate=env,
-            hyperparameters=hyperparameters,
-            extra={
-                "episodes": configured_episodes,
-                "epochs": configured_episodes,
-            },
-        )
+        try:
+            report = citylearn_v3_training_report(env)
+        except Exception as exc:  # noqa: BLE001 - keep fallback report from line above
+            print(f"[masac] training report failed, using fallback report: {exc}", flush=True)
+        try:
+            artifacts = write_training_artifacts(
+                output_dir=output_dir,
+                algorithm="MASAC",
+                backend="external/MADRL-MASAC",
+                args=args,
+                report=report,
+                candidate=env,
+                hyperparameters=hyperparameters,
+                extra={
+                    "episodes": configured_episodes,
+                    "epochs": configured_episodes,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - guarantee a results.json regardless
+            print(
+                f"[masac] write_training_artifacts failed ({type(exc).__name__}: {exc}); "
+                "writing minimal salvage results.json.",
+                flush=True,
+            )
+            write_minimal_results_json(
+                output_dir=output_dir,
+                algorithm="MASAC",
+                backend="external/MADRL-MASAC",
+                args=args,
+                hyperparameters=hyperparameters,
+                report=report,
+                error=exc,
+            )
     finally:
         stop_live_progress_heartbeat(heartbeat_stop, heartbeat_thread)
         env.close()

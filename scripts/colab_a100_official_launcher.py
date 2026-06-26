@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
@@ -1194,6 +1194,138 @@ def run_two_phase_happo_masac_jobs(
     return overall_rc
 
 
+# Backfill priority: lightest phase-2 algorithm first, then by scenario. MAAC uses a
+# smaller RAM buffer and fewer updates than MATD3, so it is the cheapest job to admit
+# the moment a phase-1 slot frees (maximizes GPU/CPU utilization without oversubscribing).
+_BACKFILL_ALGO_WEIGHT = {"maac": 0, "matd3": 1, "happo": 2, "masac": 3}
+
+
+def _job_backfill_weight(job: Mapping[str, object]) -> Tuple[int, str]:
+    name = str(job.get("name", ""))
+    scenario = str(job.get("scenario", ""))
+    return (_BACKFILL_ALGO_WEIGHT.get(name, 9), scenario)
+
+
+def run_dynamic_backfill_jobs(
+    *,
+    root: Path,
+    manifest: Dict[str, object],
+    status_path: Path,
+    jobs: List[Dict[str, object]],
+    output_root: Path,
+    log_dir: Path,
+    args: argparse.Namespace,
+) -> int:
+    """Elastic single-pool scheduler for two_phase_happo_masac.
+
+    Starts the phase-1 jobs (HAPPO+MASAC×3) and, as soon as ANY slot frees, backfills
+    the next phase-2 job (MATD3/MAAC, lightest first). Total concurrency stays capped at
+    the phase-1 width, so the validated VRAM envelope is never exceeded; the gain is that
+    phase-2 begins overlapping the tail of phase-1 instead of waiting for ALL of phase 1.
+    Falls back to the strict two-phase scheduler via run_two_phase_happo_masac_jobs.
+    """
+    cuda_fraction = _phase_cuda_fraction(args)
+    masac_cuda_fraction = _masac_cuda_fraction(args)
+    vram_gib = float(getattr(args, "_detected_vram_gib", 0.0) or 80.0)
+    fallback = int(args.two_phase_torch_threads)
+    p1_threads = int(getattr(args, "two_phase_p1_torch_threads", None) or fallback)
+    p2_threads = int(getattr(args, "two_phase_p2_torch_threads", None) or fallback)
+
+    _perf_env = {
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+        "MALLOC_ARENA_MAX": "2",
+    }
+
+    phase1_jobs = _prepare_two_phase_jobs(
+        jobs, TWO_PHASE_P1_HM, args=args, phase_threads=p1_threads, perf_env=_perf_env
+    )
+    phase2_jobs = _prepare_two_phase_jobs(
+        jobs, TWO_PHASE_P2_HM, args=args, phase_threads=p2_threads, perf_env=_perf_env
+    )
+    if not phase1_jobs and not phase2_jobs:
+        return 0
+
+    max_workers = max(1, len(phase1_jobs) or len(phase2_jobs))
+    backfill_queue = sorted(phase2_jobs, key=_job_backfill_weight)
+
+    print(
+        f"\n[launcher] === DYNAMIC BACKFILL (two_phase_happo_masac): "
+        f"start {len(phase1_jobs)} phase-1 (HAPPO+MASAC), backfill {len(backfill_queue)} "
+        f"phase-2 (MATD3+MAAC, lightest first) as slots free; concurrency cap={max_workers} "
+        f"(HAPPO/MATD3/MAAC ~{cuda_fraction * vram_gib:.0f} GiB/job, "
+        f"MASAC ~{masac_cuda_fraction * vram_gib:.0f} GiB/job) ===",
+        flush=True,
+    )
+    if backfill_queue:
+        order = ", ".join(f"{j['name'].upper()}/{j['scenario']}" for j in backfill_queue)
+        print(f"[launcher] backfill order: {order}", flush=True)
+
+    overall_rc = 0
+
+    def _submit(pool: ThreadPoolExecutor, job: Dict[str, object]):
+        return pool.submit(
+            run_job_with_retry,
+            root=root,
+            manifest=manifest,
+            status_path=status_path,
+            job=job,
+            output_root=output_root,
+            log_dir=log_dir,
+            args=args,
+        )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        pending = set()
+        future_to_job: Dict[object, Dict[str, object]] = {}
+        for job in phase1_jobs:
+            fut = _submit(pool, job)
+            pending.add(fut)
+            future_to_job[fut] = job
+        # If phase 1 has fewer jobs than workers, immediately fill spare slots.
+        while len(pending) < max_workers and backfill_queue:
+            job = backfill_queue.pop(0)
+            fut = _submit(pool, job)
+            pending.add(fut)
+            future_to_job[fut] = job
+            print(
+                f"[launcher] backfill START {job['name'].upper()}/{job['scenario']} (spare slot)",
+                flush=True,
+            )
+
+        while pending:
+            finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for fut in finished:
+                done_job = future_to_job.pop(fut, {})
+                try:
+                    ec = int(fut.result())
+                except Exception as exc:  # noqa: BLE001 - a worker crash must not abort the pool
+                    ec = 1
+                    print(
+                        f"[launcher] worker for {done_job.get('name', '?')}/"
+                        f"{done_job.get('scenario', '?')} raised {type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                if ec != 0:
+                    overall_rc = ec
+                if backfill_queue:
+                    job = backfill_queue.pop(0)
+                    new_fut = _submit(pool, job)
+                    pending.add(new_fut)
+                    future_to_job[new_fut] = job
+                    print(
+                        f"[launcher] backfill START {job['name'].upper()}/{job['scenario']} "
+                        f"(slot freed by {done_job.get('name', '?')}/{done_job.get('scenario', '?')})",
+                        flush=True,
+                    )
+
+    if overall_rc != 0:
+        print("[launcher] dynamic backfill finished with one or more job failures.", flush=True)
+    return overall_rc
+
+
 def make_manifest(
     *,
     args: argparse.Namespace,
@@ -1231,6 +1363,7 @@ def make_manifest(
             "execution_mode": "two_phase_happo_masac",
             "two_phase_algo_groups": [list(TWO_PHASE_P1_HM), list(TWO_PHASE_P2_HM)],
             "jobs_per_phase": 6,
+            "dynamic_backfill": bool(getattr(args, "dynamic_backfill", True)),
             "requested": args.parallel_scenarios > 1,
             "effective": args.parallel_scenarios > 1,
             "parallel_scenarios": args.parallel_scenarios,
@@ -1335,6 +1468,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--monitor-interval", default=120, type=int)
     parser.add_argument("--log-tail", default=4, type=int)
     parser.add_argument("--oom-retry", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--dynamic-backfill",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Elastic scheduler: backfill the lightest phase-2 job (MATD3/MAAC) as soon as a "
+        "phase-1 slot frees, instead of waiting for ALL of phase 1. Concurrency cap unchanged "
+        "(VRAM envelope preserved). Use --no-dynamic-backfill for strict two-phase barriers.",
+    )
 
     # ── A100-SXM4-80GB hyperparameters (two_phase_happo_masac primary) ─────────
     # Two phases (6 jobs each): Phase1 HAPPO+MASAC, Phase2 MATD3+MAAC.
@@ -1599,15 +1740,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "Colab A100 launcher only supports two_phase_happo_masac."
         )
 
-    overall_rc = run_two_phase_happo_masac_jobs(
-        root=root,
-        manifest=manifest,
-        status_path=status_path,
-        jobs=jobs,
-        output_root=output_root,
-        log_dir=log_dir,
-        args=args,
-    )
+    if getattr(args, "dynamic_backfill", True):
+        overall_rc = run_dynamic_backfill_jobs(
+            root=root,
+            manifest=manifest,
+            status_path=status_path,
+            jobs=jobs,
+            output_root=output_root,
+            log_dir=log_dir,
+            args=args,
+        )
+    else:
+        overall_rc = run_two_phase_happo_masac_jobs(
+            root=root,
+            manifest=manifest,
+            status_path=status_path,
+            jobs=jobs,
+            output_root=output_root,
+            log_dir=log_dir,
+            args=args,
+        )
     manifest["status"] = "completed" if overall_rc == 0 else "failed"
     manifest["completed_at"] = utc_now()
     atomic_write_json(manifest_path, manifest)

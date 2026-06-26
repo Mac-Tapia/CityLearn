@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import traceback
 
 import numpy as np
 import torch
@@ -23,6 +24,7 @@ from citylearn_v3_training_common import (
     write_job_resume_manifest,
     start_live_progress_heartbeat,
     stop_live_progress_heartbeat,
+    write_minimal_results_json,
     write_training_artifacts,
     write_training_summary,
 )
@@ -220,41 +222,60 @@ def main() -> int:
             initial_stage="maac_backend_starting",
             note="MAAC backend is collecting transitions or updating attention critics and policies.",
         )
-        for episode in range(maac_start_episode, maac_start_episode + args.episodes):
-            obs = env.reset()
-            model.prep_rollouts(device="gpu" if use_gpu else "cpu")
+        # Per-episode checkpoints already persist progress; additionally salvage and
+        # write artifacts on any failure so a late crash never discards real progress.
+        run_error: BaseException | None = None
+        try:
+            for episode in range(maac_start_episode, maac_start_episode + args.episodes):
+                obs = env.reset()
+                model.prep_rollouts(device="gpu" if use_gpu else "cpu")
 
-            for _step in range(args.episode_time_steps):
-                torch_obs = [
-                    Variable(torch.Tensor(np.vstack(obs[:, agent_i])), requires_grad=False)
-                    for agent_i in range(model.nagents)
-                ]
-                if use_gpu:
-                    torch_obs = [item.cuda() for item in torch_obs]
+                for _step in range(args.episode_time_steps):
+                    torch_obs = [
+                        Variable(torch.Tensor(np.vstack(obs[:, agent_i])), requires_grad=False)
+                        for agent_i in range(model.nagents)
+                    ]
+                    if use_gpu:
+                        torch_obs = [item.cuda() for item in torch_obs]
 
-                torch_agent_actions = model.step(torch_obs, explore=True)
-                agent_actions = [action.data.cpu().numpy() for action in torch_agent_actions]
-                env_actions = [[action[i] for action in agent_actions] for i in range(env.num_envs)]
-                next_obs, rewards, dones, infos = env.step(env_actions)
-                replay_buffer.push(obs, agent_actions, rewards, next_obs, dones)
-                obs = next_obs
-                t += env.num_envs
+                    torch_agent_actions = model.step(torch_obs, explore=True)
+                    agent_actions = [action.data.cpu().numpy() for action in torch_agent_actions]
+                    env_actions = [[action[i] for action in agent_actions] for i in range(env.num_envs)]
+                    next_obs, rewards, dones, infos = env.step(env_actions)
+                    replay_buffer.push(obs, agent_actions, rewards, next_obs, dones)
+                    obs = next_obs
+                    t += env.num_envs
 
-                if len(replay_buffer) >= args.batch_size and (t % args.steps_per_update) < env.num_envs:
-                    model.prep_training(device="gpu" if use_gpu else "cpu")
-                    for _ in range(args.num_updates):
-                        sample = replay_buffer.sample(args.batch_size, to_gpu=use_gpu, norm_rews=False)
-                        model.update_critic(sample, logger=logger)
-                        model.update_policies(sample, logger=logger)
-                        model.update_all_targets()
-                    model.prep_rollouts(device="gpu" if use_gpu else "cpu")
+                    if len(replay_buffer) >= args.batch_size and (t % args.steps_per_update) < env.num_envs:
+                        model.prep_training(device="gpu" if use_gpu else "cpu")
+                        for _ in range(args.num_updates):
+                            sample = replay_buffer.sample(args.batch_size, to_gpu=use_gpu, norm_rews=False)
+                            model.update_critic(sample, logger=logger)
+                            model.update_policies(sample, logger=logger)
+                            model.update_all_targets()
+                        model.prep_rollouts(device="gpu" if use_gpu else "cpu")
 
-                if np.all(dones):
-                    break
+                    if np.all(dones):
+                        break
 
-            model.save(artifact_dirs["checkpoints"] / f"checkpoint_episode_{episode + 1}.pt")
+                model.save(artifact_dirs["checkpoints"] / f"checkpoint_episode_{episode + 1}.pt")
+        except Exception as exc:  # noqa: BLE001 - salvage on any training failure
+            run_error = exc
+            traceback.print_exc()
+            print(
+                f"[maac] training loop raised {type(exc).__name__}: {exc}. "
+                "Salvaging trained model and writing artifacts so progress is not lost.",
+                flush=True,
+            )
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
-        model.prep_rollouts(device="cpu")
+        try:
+            model.prep_rollouts(device="cpu")
+        except Exception:
+            pass
         try:
             env.adapter.write_live_heartbeat(
                 stage="maac_backend_finished",
@@ -262,21 +283,46 @@ def main() -> int:
             )
         except Exception:
             pass
-        model.save(artifact_dirs["checkpoints"] / "model.pt")
-        report = citylearn_v3_training_report(env)
-        artifacts = write_training_artifacts(
-            output_dir=output_dir,
-            algorithm="MAAC",
-            backend="external/MAAC",
-            args=args,
-            report=report,
-            candidate=env,
-            hyperparameters=hyperparameters,
-            extra={
-                "episodes": args.episodes,
-                "environment_steps": t,
-            },
-        )
+        try:
+            model.save(artifact_dirs["checkpoints"] / "model.pt")
+        except Exception as exc:  # noqa: BLE001 - never let checkpointing abort finalization
+            print(f"[maac] final model.save failed: {exc}", flush=True)
+        if run_error is not None:
+            hyperparameters["run_completed_with_salvage"] = True
+            hyperparameters["run_error"] = f"{type(run_error).__name__}: {run_error}"
+        try:
+            report = citylearn_v3_training_report(env)
+        except Exception as exc:  # noqa: BLE001 - keep fallback report
+            print(f"[maac] training report failed, using fallback report: {exc}", flush=True)
+        try:
+            artifacts = write_training_artifacts(
+                output_dir=output_dir,
+                algorithm="MAAC",
+                backend="external/MAAC",
+                args=args,
+                report=report,
+                candidate=env,
+                hyperparameters=hyperparameters,
+                extra={
+                    "episodes": args.episodes,
+                    "environment_steps": t,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - guarantee a results.json regardless
+            print(
+                f"[maac] write_training_artifacts failed ({type(exc).__name__}: {exc}); "
+                "writing minimal salvage results.json.",
+                flush=True,
+            )
+            write_minimal_results_json(
+                output_dir=output_dir,
+                algorithm="MAAC",
+                backend="external/MAAC",
+                args=args,
+                hyperparameters=hyperparameters,
+                report=report,
+                error=exc,
+            )
     finally:
         stop_live_progress_heartbeat(heartbeat_stop, heartbeat_thread)
         env.close()

@@ -1,6 +1,6 @@
 schema_version: 2
 name: citylearn_v3_madrl_training
-updated_date: "2026-06-20"
+updated_date: "2026-06-25"
 purpose: "Canonical CityLearn v3 MADRL training overlay for the thesis project."
 version_layer: "citylearn-v3-madrl"
 simulator: "citylearn-v2"
@@ -30,8 +30,8 @@ official_training:
     - "E3"
   seed: 0
   episode_time_steps: 8760
-  episodes: 75
-  num_env_steps: 657000
+  episodes: 50
+  num_env_steps: 438000
   primary_algorithms:
     - "happo"
     - "masac"
@@ -53,7 +53,7 @@ official_training:
       ppo: "CityLearn/scripts/benchmark_citylearn_v2_ppo.py"
       sac: "CityLearn/scripts/benchmark_citylearn_v2_sac.py"
       a2c: "CityLearn/scripts/benchmark_citylearn_v2_a2c.py"
-    sb3_train_episodes: 75
+    sb3_train_episodes: 50
     schema_path: "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json"
     comparator: "CityLearn/scripts/compare_citylearn_v2_vs_v3_madrl.py"
     rule: "PPO/SAC/A2C are implemented only as CityLearn v2 central-agent Stable-Baselines3 comparison baselines on the same local Iquitos schema, not as MADRL v3 agents."
@@ -216,7 +216,7 @@ algorithms:
     action_type: "continuous"
     reward_profile: "HAPPO"
     cli:
-      num_env_steps: 657000
+      num_env_steps: 438000
       hidden_size: 384
       torch_threads: 12
       n_rollout_threads: 1
@@ -225,7 +225,7 @@ algorithms:
       live_progress_interval: 250
       cuda: true
     hyperparameters:
-      episodes: 75
+      episodes: 50
       episode_length: 8760
       n_rollout_threads: 1
       hidden_sizes:
@@ -266,8 +266,8 @@ algorithms:
       live_progress_interval: 250
       cuda: true
     hyperparameters:
-      episodes: 75
-      n_epoch: 75
+      episodes: 50
+      n_epoch: 50
       n_episodes_per_epoch: 1
       episode_limit: 8760
       action_bins: 3
@@ -293,7 +293,7 @@ algorithms:
     action_type: "continuous"
     reward_profile: "MATD3"
     cli:
-      num_env_steps: 657000
+      num_env_steps: 438000
       batch_size: 512
       buffer_size: 50000
       hidden_size: 384
@@ -302,9 +302,9 @@ algorithms:
       live_progress_interval: 250
       cuda: true
     hyperparameters:
-      episodes: 75
+      episodes: 50
       episode_length: 8760
-      num_env_steps: 657000
+      num_env_steps: 438000
       batch_size: 512
       buffer_size: 50000
       hidden_size: 384
@@ -346,7 +346,7 @@ algorithms:
       live_progress_interval: 250
       cuda: true
     hyperparameters:
-      episodes: 75
+      episodes: 50
       episode_length: 8760
       action_bins: 3
       discrete_action_mode: "axis"

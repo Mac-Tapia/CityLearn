@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,7 @@ from citylearn_v3_training_common import (
     write_job_resume_manifest,
     start_live_progress_heartbeat,
     stop_live_progress_heartbeat,
+    write_minimal_results_json,
     write_training_artifacts,
     write_training_summary,
 )
@@ -250,8 +252,24 @@ def main() -> int:
             initial_stage="matd3_backend_starting",
             note="MATD3 backend is stepping the vector environment or updating actor/critic networks.",
         )
-        while total_num_steps < all_args.num_env_steps:
-            total_num_steps = runner.run()
+        # Salvage trained weights and write artifacts no matter what, so a late failure
+        # (backend tail work, Drive I/O) never discards real training progress.
+        run_error: BaseException | None = None
+        try:
+            while total_num_steps < all_args.num_env_steps:
+                total_num_steps = runner.run()
+        except Exception as exc:  # noqa: BLE001 - salvage on any backend failure
+            run_error = exc
+            traceback.print_exc()
+            print(
+                f"[matd3] runner.run() raised {type(exc).__name__}: {exc}. "
+                "Salvaging trained model and writing artifacts so progress is not lost.",
+                flush=True,
+            )
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
         try:
             env.adapter.write_live_heartbeat(
                 stage="matd3_backend_finished",
@@ -259,22 +277,47 @@ def main() -> int:
             )
         except Exception:
             pass
-        runner.saver()
-        report = citylearn_v3_training_report(env)
-        artifacts = write_training_artifacts(
-            output_dir=output_dir,
-            algorithm="MATD3",
-            backend="external/off-policy",
-            args=args,
-            report=report,
-            candidate=env,
-            hyperparameters=hyperparameters,
-            extra={
-                "episodes": configured_episodes,
-                "num_env_steps": configured_num_env_steps,
-                "total_num_steps": total_num_steps,
-            },
-        )
+        try:
+            runner.saver()
+        except Exception as exc:  # noqa: BLE001 - never let checkpointing abort finalization
+            print(f"[matd3] final saver() failed: {exc}", flush=True)
+        if run_error is not None:
+            hyperparameters["run_completed_with_salvage"] = True
+            hyperparameters["run_error"] = f"{type(run_error).__name__}: {run_error}"
+        try:
+            report = citylearn_v3_training_report(env)
+        except Exception as exc:  # noqa: BLE001 - keep fallback report
+            print(f"[matd3] training report failed, using fallback report: {exc}", flush=True)
+        try:
+            artifacts = write_training_artifacts(
+                output_dir=output_dir,
+                algorithm="MATD3",
+                backend="external/off-policy",
+                args=args,
+                report=report,
+                candidate=env,
+                hyperparameters=hyperparameters,
+                extra={
+                    "episodes": configured_episodes,
+                    "num_env_steps": configured_num_env_steps,
+                    "total_num_steps": total_num_steps,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - guarantee a results.json regardless
+            print(
+                f"[matd3] write_training_artifacts failed ({type(exc).__name__}: {exc}); "
+                "writing minimal salvage results.json.",
+                flush=True,
+            )
+            write_minimal_results_json(
+                output_dir=output_dir,
+                algorithm="MATD3",
+                backend="external/off-policy",
+                args=args,
+                hyperparameters=hyperparameters,
+                report=report,
+                error=exc,
+            )
     finally:
         stop_live_progress_heartbeat(heartbeat_stop, heartbeat_thread)
         env.close()

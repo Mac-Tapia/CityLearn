@@ -7,7 +7,21 @@ without committing local-only changes inside the external submodule.
 
 from __future__ import annotations
 
+import os
 from typing import Any
+
+# The external MASAC runner (external/MARL) imports ``matplotlib.pyplot`` at module
+# import time and calls ``plt.savefig`` at the end of ``run()``.  Colab launches each
+# job as a headless ``Popen`` subprocess with no display, where an interactive backend
+# raises and silently discards the whole finalization (no checkpoint, no results.json).
+# Forcing the Agg file backend here (imported before ``runner_msac``) prevents that.
+os.environ.setdefault("MPLBACKEND", "Agg")
+try:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+except Exception:
+    pass
 
 import torch
 import torch.nn.functional as F
@@ -293,8 +307,17 @@ def _train_critic(self: Any, batch: dict[str, Any], max_episode_len: int, train_
     torch.nn.utils.clip_grad_norm_(self.eval_parameters_2, self.args.grad_norm_clip)
     self.optimizer_2.step()
 
-    if train_step % 10000 == 0:
-        self.save_model(train_step)
+    # Persist a resumable checkpoint frequently (default: every QMIX update) so an
+    # interruption near the end of training never discards trained weights. With
+    # critic_train_steps=1 on CityLearn, train_step increments once per epoch.
+    save_every = int(getattr(self.args, "citylearn_masac_save_every_steps", 0) or 0)
+    if save_every <= 0:
+        save_every = 10000
+    if train_step % save_every == 0:
+        try:
+            self.save_model(train_step)
+        except Exception as exc:  # pragma: no cover - checkpointing must not crash training
+            print(f"[masac] periodic checkpoint skipped at step {train_step}: {exc}", flush=True)
 
 
 def install_masac_runtime_optimizations() -> dict[str, Any]:
