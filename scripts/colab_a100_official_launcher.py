@@ -1346,13 +1346,17 @@ def run_dynamic_backfill_jobs(
     log_dir: Path,
     args: argparse.Namespace,
 ) -> int:
-    """Elastic single-pool scheduler for two_phase_happo_masac.
+    """Elastic single-pool scheduler for two_phase_happo_masac (robust 2-phase rule).
 
-    Starts the phase-1 jobs (HAPPO+MASAC×3) and, as soon as ANY slot frees, backfills
-    the next phase-2 job (MATD3/MAAC, lightest first). Total concurrency stays capped at
-    the phase-1 width, so the validated VRAM envelope is never exceeded; the gain is that
-    phase-2 begins overlapping the tail of phase-1 instead of waiting for ALL of phase 1.
-    Falls back to the strict two-phase scheduler via run_two_phase_happo_masac_jobs.
+    Hard rule enforced here (matches the launch protocol): a phase-2 job (MATD3/MAAC,
+    lightest first) may start ONLY after a phase-1 job (HAPPO/MASAC) has COMPLETED —
+    one phase-2 admission per phase-1 completion. Phase 2 therefore NEVER runs before at
+    least one phase-1 job finishes; it overlaps only the *tail* of phase 1 as each slot
+    frees. This is independent of the concurrency cap: even if the cap (RAM/VRAM budget)
+    is wider than the phase-1 set, no phase-2 job is prefilled at t=0. Total concurrency
+    additionally stays within the VRAM-aware cap so the validated envelope is never
+    exceeded. The strict barrier scheduler (run_two_phase_happo_masac_jobs) remains the
+    fallback for --no-dynamic-backfill.
     """
     cuda_fraction = _phase_cuda_fraction(args)
     masac_cuda_fraction = _masac_cuda_fraction(args)
@@ -1415,8 +1419,9 @@ def run_dynamic_backfill_jobs(
 
     print(
         f"\n[launcher] === DYNAMIC BACKFILL (two_phase_happo_masac): "
-        f"start {len(phase1_jobs)} phase-1 (HAPPO+MASAC), backfill {len(backfill_queue)} "
-        f"phase-2 (MATD3+MAAC, lightest first) as slots free; concurrency cap={max_workers} "
+        f"start {len(phase1_jobs)} phase-1 (HAPPO+MASAC); each phase-1 completion admits "
+        f"ONE phase-2 job ({len(backfill_queue)} total: MATD3+MAAC, lightest first). "
+        f"Phase 2 never starts before a phase-1 job finishes. concurrency cap={max_workers} "
         f"(HAPPO/MATD3/MAAC ~{cuda_fraction * vram_gib:.0f} GiB/job, "
         f"MASAC ~{masac_cuda_fraction * vram_gib:.0f} GiB/job) ===",
         flush=True,
@@ -1439,23 +1444,44 @@ def run_dynamic_backfill_jobs(
             args=args,
         )
 
+    phase1_total = len(phase1_jobs)
+    phase2_total = len(phase2_jobs)
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        pending = set()
+        pending: set = set()
         future_to_job: Dict[object, Dict[str, object]] = {}
+        phase1_completed = 0
+        phase2_started = 0
+
+        def _admit_phase2() -> None:
+            # ROBUST 2-PHASE RULE: admit the next lightest phase-2 job ONLY when a
+            # phase-1 job has already completed (one-for-one) AND a concurrency slot is
+            # free. The `phase2_started < phase1_completed` gate guarantees phase 2 never
+            # enters before phase 1 frees a slot, regardless of how wide the cap is.
+            nonlocal phase2_started
+            while (
+                backfill_queue
+                and len(pending) < max_workers
+                and phase2_started < phase1_completed
+            ):
+                job = backfill_queue.pop(0)
+                fut = _submit(pool, job)
+                pending.add(fut)
+                future_to_job[fut] = job
+                phase2_started += 1
+                print(
+                    f"[launcher] phase-2 START {job['name'].upper()}/{job['scenario']} "
+                    f"(lightest-first; phase-1 done={phase1_completed}/{phase1_total}, "
+                    f"phase-2 started={phase2_started}/{phase2_total})",
+                    flush=True,
+                )
+
+        # Start phase 1 ONLY. No phase-2 prefill: extras beyond the cap queue in the
+        # executor, and phase 2 waits for the first phase-1 completion (rule above).
         for job in phase1_jobs:
             fut = _submit(pool, job)
             pending.add(fut)
             future_to_job[fut] = job
-        # If phase 1 has fewer jobs than workers, immediately fill spare slots.
-        while len(pending) < max_workers and backfill_queue:
-            job = backfill_queue.pop(0)
-            fut = _submit(pool, job)
-            pending.add(fut)
-            future_to_job[fut] = job
-            print(
-                f"[launcher] backfill START {job['name'].upper()}/{job['scenario']} (spare slot)",
-                flush=True,
-            )
 
         while pending:
             finished, pending = wait(pending, return_when=FIRST_COMPLETED)
@@ -1472,16 +1498,16 @@ def run_dynamic_backfill_jobs(
                     )
                 if ec != 0:
                     overall_rc = ec
-                if backfill_queue:
-                    job = backfill_queue.pop(0)
-                    new_fut = _submit(pool, job)
-                    pending.add(new_fut)
-                    future_to_job[new_fut] = job
+                if str(done_job.get("name", "")) in TWO_PHASE_P1_HM:
+                    phase1_completed += 1
                     print(
-                        f"[launcher] backfill START {job['name'].upper()}/{job['scenario']} "
-                        f"(slot freed by {done_job.get('name', '?')}/{done_job.get('scenario', '?')})",
+                        f"[launcher] phase-1 DONE {done_job.get('name', '?').upper()}/"
+                        f"{done_job.get('scenario', '?')} "
+                        f"({phase1_completed}/{phase1_total}) — opens one phase-2 slot",
                         flush=True,
                     )
+            # Admit phase-2 jobs per the one-for-one rule after handling completions.
+            _admit_phase2()
 
     if overall_rc != 0:
         print("[launcher] dynamic backfill finished with one or more job failures.", flush=True)
@@ -1542,8 +1568,9 @@ def make_manifest(
             "gpu_vram_gib": vram_gib,
             "strategy": (
                 (
-                    "dynamic_backfill: start 6 (HAPPO+MASAC x3); backfill MATD3+MAAC "
-                    "lightest-first as each slot frees (no wait for all phase 1); "
+                    "dynamic_backfill: start 6 (HAPPO+MASAC x3); each phase-1 completion "
+                    "admits ONE phase-2 (MATD3+MAAC, lightest-first). Phase 2 never starts "
+                    "before a phase-1 job finishes (overlaps only the tail of phase 1); "
                     f"cap=6 | VRAM {vram_gib:.0f} GiB | HAPPO/MATD3/MAAC cap "
                     f"{cuda_frac * vram_gib:.0f} GiB/job | MASAC cap {masac_frac * vram_gib:.0f} GiB/job"
                 )
