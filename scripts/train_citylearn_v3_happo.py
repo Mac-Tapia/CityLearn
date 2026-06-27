@@ -128,7 +128,9 @@ def main() -> int:
                     seed=args.seed + rank * 1000,
                     episode_time_steps=args.episode_time_steps,
                     algorithm="HAPPO",
-                    live_progress_path=str(output_dir / "live_progress.json"),
+                    live_progress_path=(
+                        str(output_dir / "live_progress.json") if rank == 0 else None
+                    ),
                     live_progress_interval=args.live_progress_interval,
                     trace_record_interval=args.trace_record_interval,
                     trace_detail=args.trace_detail,
@@ -205,6 +207,13 @@ def main() -> int:
     if runner_envs:
         report_candidate = runner_envs[0]
         reward_metadata = getattr(report_candidate.adapter, "reward_metadata", {})
+        if resume_plan.get("active"):
+            _adapter = getattr(runner_envs[0], "adapter", None)
+            if _adapter is not None:
+                _preload = _adapter.preload_resume_artifacts(
+                    int(resume_plan["completed_episodes"])
+                )
+                print(f"[happo] preloaded resume artifacts: {_preload}", flush=True)
     report = citylearn_v3_training_report(None)
     artifacts = {}
     hyperparameters = {

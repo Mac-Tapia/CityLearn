@@ -162,6 +162,10 @@ def main() -> int:
         trace_detail=args.trace_detail,
         normalize_observations=args.normalize_observations,
     )
+    if resume_plan.get("active"):
+        _preload = env.adapter.preload_resume_artifacts(int(resume_plan["completed_episodes"]))
+        print(f"[masac] preloaded resume artifacts: {_preload}", flush=True)
+
     env_info = env.get_env_info()
     gpu_runtime = configure_torch_runtime(
         torch,

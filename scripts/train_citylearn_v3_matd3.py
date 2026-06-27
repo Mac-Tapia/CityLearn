@@ -113,6 +113,10 @@ def main() -> int:
         trace_detail=args.trace_detail,
         normalize_observations=args.normalize_observations,
     )
+    if resume_plan.get("active"):
+        _preload = env.adapter.preload_resume_artifacts(int(resume_plan["completed_episodes"]))
+        print(f"[matd3] preloaded resume artifacts: {_preload}", flush=True)
+
     gpu_runtime = configure_torch_runtime(
         torch,
         use_cuda=args.cuda,

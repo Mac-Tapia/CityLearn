@@ -126,6 +126,10 @@ def main() -> int:
         trace_detail=args.trace_detail,
         normalize_observations=args.normalize_observations,
     )
+    if resume_plan.get("active"):
+        _preload = env.adapter.preload_resume_artifacts(int(resume_plan["completed_episodes"]))
+        print(f"[maac] preloaded resume artifacts: {_preload}", flush=True)
+
     logger = NoOpLogger()
 
     torch.manual_seed(args.seed)

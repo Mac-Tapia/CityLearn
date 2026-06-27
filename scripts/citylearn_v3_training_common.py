@@ -662,6 +662,41 @@ def _write_csv_mirrors(paths: Sequence[Path], rows: Sequence[Mapping[str, object
         write_csv(path, rows)
 
 
+def read_csv_rows(path: Path) -> List[Dict[str, object]]:
+    """Read a CSV written by write_csv back into a list of dict rows (values as str)."""
+    path = Path(path)
+    if not path.is_file():
+        return []
+    try:
+        with path.open("r", newline="", encoding="utf-8") as file:
+            return [dict(row) for row in csv.DictReader(file)]
+    except Exception:
+        return []
+
+
+def append_csv_rows(
+    path: Path,
+    rows: Sequence[Mapping[str, object]],
+    fieldnames: Sequence[str],
+) -> None:
+    """Append rows to a CSV, writing the header first when the file is new/empty.
+
+    Used for resume-safe incremental persistence: each finished episode is flushed
+    to disk so an interrupted Colab run never loses already-trained episodes.
+    """
+    if not rows:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = (not path.exists()) or path.stat().st_size == 0
+    with path.open("a", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=list(fieldnames))
+        if write_header:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({key: _csv_safe(row.get(key)) for key in fieldnames})
+
+
 def _write_markdown_table(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -3147,6 +3182,22 @@ class CityLearnV3BackendAdapter:
         self.reset_count = 0
         self.trace_records: List[Dict[str, object]] = []
         self.timeseries_records: List[Dict[str, object]] = []
+        # Resume-safe incremental persistence: flush each finished episode to
+        # data/{timeseries,trace}.csv so an interrupted Colab run keeps every
+        # already-trained episode on Drive, and a resumed run CONTINUES the same
+        # files instead of overwriting them with only the new tail.
+        _inc_data_dir = (
+            self.live_progress_path.parent / DATA_DIR_NAME
+            if self.live_progress_path is not None
+            else None
+        )
+        self._incremental_ts_path = (_inc_data_dir / "timeseries.csv") if _inc_data_dir else None
+        self._incremental_trace_path = (_inc_data_dir / "trace.csv") if _inc_data_dir else None
+        self._ts_flushed_count = 0
+        self._trace_flushed_count = 0
+        self._ts_fieldnames: Optional[List[str]] = None
+        self._trace_fieldnames: Optional[List[str]] = None
+        self._incremental_enabled = self.live_progress_path is not None
         self.completed_episode_count = 0
         self.last_completed_episode: Optional[int] = None
         self.last_completed_global_step: Optional[int] = None
@@ -3168,6 +3219,8 @@ class CityLearnV3BackendAdapter:
         self.reset_count = 0
         self.trace_records = []
         self.timeseries_records = []
+        self._ts_flushed_count = 0
+        self._trace_flushed_count = 0
         self.completed_episode_count = 0
         self.last_completed_episode = None
         self.last_completed_global_step = None
@@ -3218,6 +3271,69 @@ class CityLearnV3BackendAdapter:
 
     def close(self) -> None:
         self.env.close()
+
+    def preload_resume_artifacts(self, completed_episodes: int) -> Dict[str, int]:
+        """Resume-safe preload: keep prior per-step rows for already COMPLETED episodes
+        so the resumed job continues timeseries.csv/trace.csv instead of restarting them.
+
+        Truncates any partial-episode tail (that episode is re-run from checkpoint),
+        rewrites the incremental CSVs to the clean kept set, and advances global_step /
+        reset_count so episode numbering stays continuous (episodes 0..N seamless).
+        """
+        summary = {"timeseries_rows": 0, "trace_rows": 0, "completed_episodes": 0}
+        completed = max(0, int(completed_episodes))
+        if not self._incremental_enabled or completed <= 0:
+            return summary
+
+        episode_length = max(int(self.episode_time_steps), 1)
+
+        # timeseries: keep only fully-completed episodes (episode < completed).
+        ts_rows = read_csv_rows(self._incremental_ts_path) if self._incremental_ts_path else []
+        kept_ts = [r for r in ts_rows if (_as_int(r.get("episode")) or 0) < completed]
+        if kept_ts:
+            self.timeseries_records = list(kept_ts)
+            self._ts_fieldnames = sorted({k for r in kept_ts for k in r.keys()})
+            self._ts_flushed_count = len(kept_ts)
+            write_csv(self._incremental_ts_path, kept_ts)  # clean truncation
+            for row in kept_ts:
+                ep = _as_int(row.get("episode"))
+                if ep is not None:
+                    self._update_reward_accumulators(int(ep), row)
+            summary["timeseries_rows"] = len(kept_ts)
+
+        # trace: same completed-episode filter.
+        trace_rows = read_csv_rows(self._incremental_trace_path) if self._incremental_trace_path else []
+        kept_trace = [r for r in trace_rows if (_as_int(r.get("episode")) or 0) < completed]
+        if kept_trace:
+            self.trace_records = list(kept_trace)
+            self._trace_fieldnames = sorted({k for r in kept_trace for k in r.keys()})
+            self._trace_flushed_count = len(kept_trace)
+            write_csv(self._incremental_trace_path, kept_trace)
+            summary["trace_rows"] = len(kept_trace)
+
+        # Continue numbering from the completed-episode boundary.
+        self.global_step = completed * episode_length
+        self.reset_count = completed
+        self.completed_episode_count = completed
+        summary["completed_episodes"] = completed
+        return summary
+
+    def _flush_incremental_artifacts(self) -> None:
+        """Append the rows produced since the last flush to the incremental CSVs."""
+        if not self._incremental_enabled:
+            return
+        if self._incremental_ts_path is not None and len(self.timeseries_records) > self._ts_flushed_count:
+            new_rows = self.timeseries_records[self._ts_flushed_count:]
+            if self._ts_fieldnames is None:
+                self._ts_fieldnames = sorted({k for r in new_rows for k in r.keys()})
+            append_csv_rows(self._incremental_ts_path, new_rows, self._ts_fieldnames)
+            self._ts_flushed_count = len(self.timeseries_records)
+        if self._incremental_trace_path is not None and len(self.trace_records) > self._trace_flushed_count:
+            new_rows = self.trace_records[self._trace_flushed_count:]
+            if self._trace_fieldnames is None:
+                self._trace_fieldnames = sorted({k for r in new_rows for k in r.keys()})
+            append_csv_rows(self._incremental_trace_path, new_rows, self._trace_fieldnames)
+            self._trace_flushed_count = len(self.trace_records)
 
     def _reward_metadata(self) -> Dict[str, object]:
         reward_function = getattr(self._core_env(), "reward_function", None)
@@ -3570,6 +3686,7 @@ class CityLearnV3BackendAdapter:
 
         if timeseries_row.get("all_done") is True:
             self._capture_completed_episode_snapshot(timeseries_row)
+            self._flush_incremental_artifacts()
 
         self.global_step += 1
 
