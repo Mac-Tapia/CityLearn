@@ -45,6 +45,12 @@ EST_MIN_PER_EPISODE_BY_ALGO = {
 EST_MIN_PER_EPISODE_PHASE = 12.0  # max(HAPPO,MASAC) ≈ 15 but MASAC often bounds phase 1
 
 _MANIFEST_LOCK = threading.Lock()
+# Single-owner monitor: with N parallel jobs each running its own proc-wait loop, every
+# job used to call print_monitor_snapshot() (a GLOBAL snapshot) every interval, so the
+# same dashboard was printed up to N times per interval with lines interleaved across
+# threads. This lock + shared timestamp lets exactly one thread print per interval.
+_MONITOR_LOCK = threading.Lock()
+_LAST_MONITOR_TS = 0.0
 DEFAULT_SCHEMA = "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json"
 DEFAULT_OUTPUT_ROOT = "outputs/colab_madrl_a100_official"
 REFERENCE_SOURCES = [
@@ -834,6 +840,21 @@ def print_monitor_snapshot(root: Path, status_path: Path, log_tail: int = 12) ->
                     print(f"    {line[:180]}", flush=True)
 
 
+def maybe_print_monitor_snapshot(
+    root: Path, status_path: Path, interval: float, log_tail: int = 12
+) -> None:
+    """Print one global monitor snapshot per interval, regardless of how many parallel
+    job threads call this. Returns immediately for every caller except the single thread
+    that wins the interval, preventing duplicated/interleaved dashboards."""
+    global _LAST_MONITOR_TS
+    now = time.time()
+    with _MONITOR_LOCK:
+        if (now - _LAST_MONITOR_TS) < max(5.0, float(interval)):
+            return
+        _LAST_MONITOR_TS = now
+        print_monitor_snapshot(root, status_path, log_tail=log_tail)
+
+
 def append_job_record(
     manifest: Dict[str, object],
     status_path: Path,
@@ -933,11 +954,11 @@ def run_one_job(
             env=env,
         )
 
-        last_monitor = 0.0
         while proc.poll() is None:
-            if args.live_monitor and (time.time() - last_monitor) >= max(5, args.monitor_interval):
-                print_monitor_snapshot(root, status_path, log_tail=args.log_tail)
-                last_monitor = time.time()
+            if args.live_monitor:
+                maybe_print_monitor_snapshot(
+                    root, status_path, args.monitor_interval, log_tail=args.log_tail
+                )
             time.sleep(5)
 
         exit_code = int(proc.returncode or 0)
@@ -1355,7 +1376,13 @@ def run_dynamic_backfill_jobs(
     if not phase1_jobs and not phase2_jobs:
         return 0
 
-    max_workers = max(1, len(phase1_jobs) or len(phase2_jobs))
+    total_jobs = len(phase1_jobs) + len(phase2_jobs)
+    auto_workers = max(1, len(phase1_jobs) or len(phase2_jobs))
+    requested_cap = int(getattr(args, "max_concurrent_jobs", 0) or 0)
+    if requested_cap > 0:
+        max_workers = max(1, min(requested_cap, total_jobs))
+    else:
+        max_workers = auto_workers
     backfill_queue = sorted(phase2_jobs, key=_job_backfill_weight)
 
     print(
@@ -1470,6 +1497,7 @@ def make_manifest(
             "execution_mode": "two_phase_happo_masac",
             "two_phase_algo_groups": [list(TWO_PHASE_P1_HM), list(TWO_PHASE_P2_HM)],
             "jobs_per_phase": 6,
+            "max_concurrent_jobs": int(getattr(args, "max_concurrent_jobs", 0) or 0),
             "dynamic_backfill": bool(getattr(args, "dynamic_backfill", True)),
             "requested": args.parallel_scenarios > 1,
             "effective": args.parallel_scenarios > 1,
@@ -1598,6 +1626,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Elastic scheduler: backfill the lightest phase-2 job (MATD3/MAAC) as soon as a "
         "phase-1 slot frees, instead of waiting for ALL of phase 1. Concurrency cap unchanged "
         "(VRAM envelope preserved). Use --no-dynamic-backfill for strict two-phase barriers.",
+    )
+    parser.add_argument(
+        "--max-concurrent-jobs",
+        default=0,
+        type=int,
+        help="Override the dynamic-backfill concurrency cap (default 0 = auto = phase width, 6). "
+        "Raising it lets phase 2 (MATD3+MAAC) overlap phase 1 (HAPPO+MASAC) to use idle vCPUs on "
+        "machines with more cores than Colab (e.g. H100 ~26 vCPU). RAM-bound: each phase-2 job is "
+        "~18 GiB resident, so keep total under system RAM (e.g. 8 jobs ~144 GiB on a 177 GiB box). "
+        "Does NOT raise per-job FPS (CityLearn env.step is single-threaded); only shortens the "
+        "sweep makespan by overlapping the two phases.",
     )
 
     # ── A100-SXM4-80GB hyperparameters (two_phase_happo_masac primary) ─────────
