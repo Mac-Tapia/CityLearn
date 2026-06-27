@@ -280,6 +280,55 @@ def configure_torch_runtime(
     }
 
 
+def effective_matd3_per_policy_buffer_size(
+    total_buffer: int,
+    *,
+    num_agents: int,
+    share_policy: bool = False,
+) -> int:
+    """Split a total replay budget across per-agent policies for MATD3.
+
+    The marlbenchmark/off-policy ``MlpReplayBuffer`` allocates one
+    ``MlpPolicyBuffer`` per policy when ``share_policy=False``. CityLearn v3
+    uses 17 decentralized actor policies, so a CLI ``--buffer-size 2000000`` would
+    otherwise allocate 17× that many transitions and OOM-kill the process.
+    """
+    total_buffer = max(1, int(total_buffer))
+    num_agents = max(1, int(num_agents))
+    if share_policy or num_agents <= 1:
+        return total_buffer
+    return max(500, total_buffer // num_agents)
+
+
+def estimate_matd3_replay_ram_gib(
+    *,
+    per_policy_buffer: int,
+    num_agents: int,
+    obs_dim: int,
+    share_obs_dim: int,
+    act_dim: int,
+    share_policy: bool = False,
+    use_same_share_obs: bool = True,
+) -> float:
+    """Conservative RAM estimate for MATD3 numpy replay buffers (GiB)."""
+    per_policy = max(1, int(per_policy_buffer))
+    n_agents = max(1, int(num_agents))
+    policies = 1 if share_policy else n_agents
+    obs_dim = max(1, int(obs_dim))
+    share_obs_dim = max(1, int(share_obs_dim))
+    act_dim = max(1, int(act_dim))
+
+    agents_per_policy = n_agents if share_policy else 1
+    share_bytes = share_obs_dim * 4 * 2 if use_same_share_obs else agents_per_policy * share_obs_dim * 4 * 2
+    bytes_per_policy_buffer = per_policy * (
+        agents_per_policy * obs_dim * 4 * 2
+        + share_bytes
+        + agents_per_policy * act_dim * 4
+        + agents_per_policy * 16
+    )
+    return (bytes_per_policy_buffer * policies) / float(1024 ** 3)
+
+
 def normalize_algorithm_dir(algorithm: str) -> str:
     """Folder name for a MADRL backend: HAPPO, MASAC, MATD3, MAAC."""
     return algorithm.strip().upper()
