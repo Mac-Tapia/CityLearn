@@ -1385,6 +1385,32 @@ def run_dynamic_backfill_jobs(
         max_workers = max(1, min(requested_cap, total_jobs))
     else:
         max_workers = auto_workers
+
+    # VRAM-aware clamp: the phase-1 set (HAPPO+MASAC) must fit on the GPU first; only
+    # admit EXTRA phase-2 jobs into the leftover VRAM headroom. A RAM-only cap (e.g.
+    # 177 GiB → 8 jobs) would otherwise prefill the spare slots with phase-2 (MAAC,
+    # lightest-first) at t=0 — i.e. phase 2 enters BEFORE any phase-1 job completes —
+    # and 8 concurrent jobs (3×HAPPO + 3×MASAC + 2×MAAC) would oversubscribe a 96 GiB
+    # GPU. Clamping to the VRAM envelope means phase-2 only enters when a phase-1 slot
+    # frees by completion (unless the GPU genuinely has room to overlap).
+    happo_job_gib = cuda_fraction * vram_gib
+    masac_job_gib = masac_cuda_fraction * vram_gib
+    n_happo_p1 = sum(1 for j in phase1_jobs if str(j.get("name", "")) == "happo")
+    n_masac_p1 = sum(1 for j in phase1_jobs if str(j.get("name", "")) == "masac")
+    phase1_vram_gib = n_happo_p1 * happo_job_gib + n_masac_p1 * masac_job_gib
+    usable_vram_gib = 0.92 * vram_gib
+    headroom_gib = usable_vram_gib - phase1_vram_gib
+    extra_phase2_slots = max(0, int(headroom_gib // max(happo_job_gib, 1e-6)))
+    vram_cap = max(1, len(phase1_jobs) + extra_phase2_slots)
+    if vram_cap < max_workers:
+        print(
+            f"[launcher] VRAM clamp: concurrency cap {max_workers} -> {vram_cap} "
+            f"(phase-1 ~{phase1_vram_gib:.0f} GiB + {extra_phase2_slots} extra phase-2 "
+            f"@ ~{happo_job_gib:.0f} GiB fits in {usable_vram_gib:.0f}/{vram_gib:.0f} GiB; "
+            f"phase-2 will backfill only as phase-1 slots free)",
+            flush=True,
+        )
+        max_workers = vram_cap
     backfill_queue = sorted(phase2_jobs, key=_job_backfill_weight)
 
     print(
@@ -1596,7 +1622,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--scenario", default="ALL")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--episode-time-steps", default=8760, type=int)
-    parser.add_argument("--episodes", default=17, type=int)
+    parser.add_argument("--episodes", default=50, type=int)
     parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--schema-path", default=DEFAULT_SCHEMA)
     parser.add_argument("--torch-threads", default=2, type=int)

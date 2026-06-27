@@ -2,7 +2,7 @@ param(
     [string]$Scenario = "ALL",
     [int]$Seed = 0,
     [int]$EpisodeTimeSteps = 8760,
-    [int]$Episodes = 17,
+    [int]$Episodes = 50,
     [string]$OutputRoot = "outputs\citylearn_v3_madrl_iquitos_official_full_cuda_v1",
     [string]$SchemaPath = "CityLearn\data\datasets\citylearn_iquitos_2023_2025\schema.json",
     [int]$TorchThreads = 12,
