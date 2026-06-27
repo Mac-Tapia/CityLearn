@@ -101,6 +101,11 @@ def main() -> int:
         )
     write_job_resume_manifest(output_dir, resume_plan)
 
+    # Resume offset injected via the adapter constructor (same pattern as HAPPO) so the
+    # live-progress/CSV adapter continues from the resumed episode instead of ep1.
+    matd3_resume_completed = (
+        int(resume_plan["completed_episodes"]) if resume_plan.get("active") else 0
+    )
     env = CityLearnOffPolicyVecEnv(
         schema_path=args.schema_path,
         scenario=args.scenario,
@@ -112,10 +117,8 @@ def main() -> int:
         trace_record_interval=args.trace_record_interval,
         trace_detail=args.trace_detail,
         normalize_observations=args.normalize_observations,
+        resume_completed_episodes=matd3_resume_completed,
     )
-    if resume_plan.get("active"):
-        _preload = env.adapter.preload_resume_artifacts(int(resume_plan["completed_episodes"]))
-        print(f"[matd3] preloaded resume artifacts: {_preload}", flush=True)
 
     gpu_runtime = configure_torch_runtime(
         torch,

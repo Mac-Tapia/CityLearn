@@ -252,3 +252,36 @@ def test_constructor_no_offset_when_zero(job_dir):
         resume_completed_episodes=0,
     )
     assert adapter.global_step == 0
+
+
+@pytest.mark.parametrize(
+    "env_cls_name,algorithm,extra",
+    [
+        ("CityLearnOffPolicyVecEnv", "MATD3", {}),
+        ("CityLearnMAACVecEnv", "MAAC", {"action_bins": 5, "discrete_action_mode": "axis"}),
+        ("CityLearnSMACDiscreteEnv", "MASAC", {"action_bins": 5, "discrete_action_mode": "axis"}),
+    ],
+)
+def test_vec_env_wrappers_propagate_resume_offset(job_dir, env_cls_name, algorithm, extra):
+    """MATD3/MAAC/MASAC inject the resume offset via the same constructor path as HAPPO.
+
+    Each single-process wrapper must forward resume_completed_episodes to the adapter so
+    global_step advances and the run continues instead of restarting at ep1.
+    """
+    _, _, live = job_dir
+    env_cls = getattr(common, env_cls_name)
+    ep_steps = 4
+    env = env_cls(
+        scenario="E1",
+        seed=0,
+        episode_time_steps=ep_steps,
+        algorithm=algorithm,
+        live_progress_path=str(live),
+        resume_completed_episodes=7,
+        **extra,
+    )
+    try:
+        assert env.adapter.global_step == 7 * ep_steps
+        assert env.adapter.completed_episode_count == 7
+    finally:
+        env.close()
