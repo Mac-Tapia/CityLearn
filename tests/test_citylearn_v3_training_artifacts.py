@@ -337,3 +337,14 @@ def test_efficient_artifact_profile_avoids_duplicate_heavy_trace_csv(tmp_path):
     assert policy["statistical_comparison_trace_csv"] is False
     assert policy["trace_is_sampled"] is True
     assert policy["trace_record_interval"] == 10
+
+
+def test_resolve_output_dir_uses_simple_madrl_scenario_layout(tmp_path):
+    from citylearn_v3_training_common import resolve_output_dir, resolve_job_run_dir
+
+    out = resolve_output_dir(str(tmp_path / "HAPPO"), "happo", "E2", 0)
+    assert out == tmp_path / "HAPPO" / "E2"
+    assert (out / "data").mkdir(exist_ok=True) or True
+
+    run = resolve_job_run_dir(tmp_path, "masac", "E3", 0)
+    assert run == tmp_path / "MASAC" / "E3"

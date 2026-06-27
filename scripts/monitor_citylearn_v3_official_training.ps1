@@ -175,7 +175,7 @@ function Get-TrainingRunDir {
         [int]$Seed
     )
 
-    return (Join-Path $OutputRootPath ("{0}\{1}_seed_{2}" -f $Algorithm.ToLowerInvariant(), $Scenario, $Seed))
+    return (Join-Path $OutputRootPath ("{0}\{1}" -f $Algorithm.ToUpperInvariant(), $Scenario))
 }
 
 function Test-TrainingResultsArtifact {

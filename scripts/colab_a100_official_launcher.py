@@ -406,11 +406,15 @@ def arg_value(args: Sequence[str], flag: str, default: Optional[object] = None) 
 
 
 def output_base(output_root: Path, algorithm: str) -> Path:
-    return output_root / algorithm
+    from citylearn_v3_training_common import normalize_algorithm_dir
+
+    return output_root / normalize_algorithm_dir(algorithm)
 
 
 def run_dir(output_root: Path, algorithm: str, scenario: str, seed: int) -> Path:
-    return output_base(output_root, algorithm) / f"{scenario}_seed_{seed}"
+    from citylearn_v3_training_common import resolve_job_run_dir
+
+    return resolve_job_run_dir(output_root, algorithm, scenario, seed)
 
 
 def common_args(

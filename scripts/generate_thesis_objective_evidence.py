@@ -515,7 +515,11 @@ def objective_manifest() -> Dict[str, Any]:
 
 
 def run_dir(output_root: Path, algorithm: str, scenario: str, seed: int) -> Path:
-    return output_root / algorithm / f"{scenario}_seed_{seed}"
+    algo = algorithm.strip().upper()
+    scen = scenario.strip().upper()
+    if int(seed) == 0:
+        return output_root / algo / scen
+    return output_root / algo / f"{scen}_s{int(seed)}"
 
 
 def table_path(run_path: Path, table_name: str) -> Path:

@@ -364,7 +364,7 @@ algorithms:
       live_progress_interval: 250
 
 artifacts:
-  per_run_directory: "outputs/<experiment>/<madrl>/<scenario>_seed_<seed>"
+  per_run_directory: "outputs/<experiment>/<MADRL>/<scenario>"
   required_files:
     - "results.json"
     - "training_summary.json"

@@ -280,9 +280,77 @@ def configure_torch_runtime(
     }
 
 
+def normalize_algorithm_dir(algorithm: str) -> str:
+    """Folder name for a MADRL backend: HAPPO, MASAC, MATD3, MAAC."""
+    return algorithm.strip().upper()
+
+
+def normalize_scenario_dir(scenario: str, seed: int = 0) -> str:
+    """Folder name for a scenario axis: E1, E2, E3 (seed 0 omits suffix)."""
+    scenario = scenario.strip().upper()
+    seed = int(seed)
+    if seed == 0:
+        return scenario
+    return f"{scenario}_s{seed}"
+
+
+def job_run_relative_parts(algorithm: str, scenario: str, seed: int = 0) -> Path:
+    """Relative path ``<MADRL>/<Escenario>`` under an output root."""
+    return Path(normalize_algorithm_dir(algorithm)) / normalize_scenario_dir(scenario, seed)
+
+
+def iter_job_run_dir_candidates(
+    base: Path,
+    algorithm: str,
+    scenario: str,
+    seed: int,
+):
+    """Possible run directories: new simple layout first, then legacy ``E1_seed_0``."""
+    base = Path(base)
+    algo_upper = normalize_algorithm_dir(algorithm)
+    algo_lower = algorithm.strip().lower()
+    scen = scenario.strip().upper()
+    seed = int(seed)
+    simple = normalize_scenario_dir(scen, seed)
+    legacy = f"{scen}_seed_{seed}"
+    patterns = (
+        base / algo_upper / simple,
+        base / algo_lower / simple,
+        base / algo_upper / legacy,
+        base / algo_lower / legacy,
+    )
+    seen = set()
+    for path in patterns:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield path
+
+
+def resolve_job_run_dir(base: Path, algorithm: str, scenario: str, seed: int) -> Path:
+    """Canonical run directory for one MADRL job; creates parents if needed."""
+    path = next(iter_job_run_dir_candidates(base, algorithm, scenario, seed))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def resolve_existing_job_run_dir(
+    base: Path,
+    algorithm: str,
+    scenario: str,
+    seed: int,
+) -> Optional[Path]:
+    """Return an existing run directory (new or legacy layout), or None."""
+    for candidate in iter_job_run_dir_candidates(base, algorithm, scenario, seed):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def resolve_output_dir(output_dir: Optional[str], algorithm: str, scenario: str, seed: int) -> Path:
-    base = Path(output_dir) if output_dir else DEFAULT_OUTPUT_ROOT / algorithm.lower()
-    path = base / f"{scenario}_seed_{seed}"
+    base = Path(output_dir) if output_dir else DEFAULT_OUTPUT_ROOT / normalize_algorithm_dir(algorithm)
+    path = base / normalize_scenario_dir(scenario, seed)
     path.mkdir(parents=True, exist_ok=True)
     return path
 

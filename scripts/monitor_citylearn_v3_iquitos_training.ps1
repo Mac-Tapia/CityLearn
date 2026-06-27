@@ -118,7 +118,7 @@ function Show-Status {
     $scenarios = @("E1", "E2", "E3")
     foreach ($algo in $algos) {
         foreach ($sc in $scenarios) {
-            $progressPath = Join-Path $OutputRootPath "$algo\${sc}_seed_$($status.seed)\live_progress.json"
+            $progressPath = Join-Path $OutputRootPath "$($algo.ToUpper())\$sc\live_progress.json"
             if (Test-Path $progressPath) {
                 try {
                     $prog = Get-Content $progressPath -Raw | ConvertFrom-Json

@@ -112,8 +112,24 @@ def job_state(status: Mapping[str, object], algorithm: str, scenario: str, root:
             return "skipped/done" if job.get("skipped") else "done"
         return "failed"
 
+    from citylearn_v3_training_common import resolve_existing_job_run_dir
+
     output_root = path_for_job(root, str(status.get("output_root", "")))
-    run_dir = output_root / algorithm / f"{scenario}_seed_{int(status.get('seed') or 0)}"
+    run_dir = resolve_existing_job_run_dir(
+        output_root,
+        algorithm,
+        scenario,
+        int(status.get("seed") or 0),
+    )
+    if run_dir is None:
+        from citylearn_v3_training_common import resolve_job_run_dir
+
+        run_dir = resolve_job_run_dir(
+            output_root,
+            algorithm,
+            scenario,
+            int(status.get("seed") or 0),
+        )
     if result_artifact_exists(run_dir):
         return "done/artifact"
     return "queued"

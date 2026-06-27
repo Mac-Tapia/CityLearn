@@ -49,7 +49,17 @@ def resolve_path(root: Path, value: str) -> Path:
 
 
 def happo_job_dir(run_root: Path, scenario: str) -> Path:
-    return run_root / "happo" / f"{scenario}_seed_{SEED}"
+    import sys
+
+    scripts = Path(__file__).resolve().parent
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    from citylearn_v3_training_common import resolve_existing_job_run_dir, resolve_job_run_dir
+
+    existing = resolve_existing_job_run_dir(run_root, "happo", scenario, SEED)
+    if existing is not None:
+        return existing
+    return resolve_job_run_dir(run_root, "happo", scenario, SEED)
 
 
 def _dir_size_bytes(path: Path) -> int:

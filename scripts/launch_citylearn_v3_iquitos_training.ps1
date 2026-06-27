@@ -486,7 +486,7 @@ function Add-SkippedTrainingJobRecord {
         $Job
     )
 
-    $jobOutputDir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
+    $jobOutputDir = Join-Path $OutputRoot "$($Job.name.ToUpper())\$($Job.scenario)"
     $skippedRecord = [ordered]@{
         name = $Job.name
         scenario = $Job.scenario
@@ -511,7 +511,7 @@ function Test-TrainingJobCompleted {
         $Job
     )
 
-    $jobOutputDir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
+    $jobOutputDir = Join-Path $OutputRoot "$($Job.name.ToUpper())\$($Job.scenario)"
     $jobResultsPath = Join-Path $ProjectRoot (Join-Path $jobOutputDir "data\results.json")
     return (Test-Path -LiteralPath $jobResultsPath)
 }
@@ -541,7 +541,7 @@ function Start-ParallelTrainingJob {
         exit_code = $null
         log = $logPath
         stderr_log = $errPath
-        output_dir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
+        output_dir = Join-Path $OutputRoot "$($Job.name.ToUpper())\$($Job.scenario)"
         command = "$Python " + ($commandArgs -join " ")
         parallel_stage = $Job.name
     }
@@ -707,7 +707,7 @@ foreach ($job in $jobs) {
         exit_code = $null
         log = $logPath
         stderr_log = $errPath
-        output_dir = Join-Path $OutputRoot "$($job.name)\$($job.scenario)_seed_$Seed"
+        output_dir = Join-Path $OutputRoot "$($job.name.ToUpper())\$($job.scenario)"
         command = "$Python " + ($commandArgs -join " ")
     }
 

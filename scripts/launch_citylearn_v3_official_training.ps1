@@ -612,7 +612,7 @@ if ($DryRun) {
             started_at = $null
             completed_at = $null
             exit_code = $null
-            output_dir = Join-Path $OutputRoot "$($job.name)\$($job.scenario)_seed_$Seed"
+            output_dir = Join-Path $OutputRoot "$($job.name.ToUpper())\$($job.scenario)"
             command = "$Python " + ($commandArgs -join " ")
             planned_only = $true
         }
@@ -742,7 +742,7 @@ function Add-SkippedTrainingJobRecord {
         [string]$Reason = "already_completed"
     )
 
-    $jobOutputDir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
+    $jobOutputDir = Join-Path $OutputRoot "$($Job.name.ToUpper())\$($Job.scenario)"
     $artifactCompleted = Test-TrainingJobCompleted -Job $Job
     $skippedRecord = [ordered]@{
         name         = $Job.name
@@ -768,7 +768,7 @@ function Test-TrainingJobCompleted {
         $Job
     )
 
-    $jobOutputDir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
+    $jobOutputDir = Join-Path $OutputRoot "$($Job.name.ToUpper())\$($Job.scenario)"
     $jobResultsPaths = @(
         (Join-Path $ProjectRoot (Join-Path $jobOutputDir "data\results.json")),
         (Join-Path $ProjectRoot (Join-Path $jobOutputDir "results.json"))
@@ -804,7 +804,7 @@ function Start-ParallelTrainingJob {
         exit_code = $null
         log = $logPath
         stderr_log = $errPath
-        output_dir = Join-Path $OutputRoot "$($Job.name)\$($Job.scenario)_seed_$Seed"
+        output_dir = Join-Path $OutputRoot "$($Job.name.ToUpper())\$($Job.scenario)"
         command = "$Python " + ($commandArgs -join " ")
         parallel_stage = $Job.name
     }
@@ -972,7 +972,7 @@ foreach ($job in $jobs) {
 
     # ── Skip if already completed ─────────────────────────────────────────────
     if ($SkipCompleted) {
-        $jobOutputDir = Join-Path $OutputRoot "$($job.name)\$($job.scenario)_seed_$Seed"
+        $jobOutputDir = Join-Path $OutputRoot "$($job.name.ToUpper())\$($job.scenario)"
         $jobResultsPath = Join-Path $ProjectRoot (Join-Path $jobOutputDir "data\results.json")
         if (Test-Path -LiteralPath $jobResultsPath) {
             Write-Host ""
@@ -1000,7 +1000,7 @@ foreach ($job in $jobs) {
         exit_code = $null
         log = $logPath
         stderr_log = $errPath
-        output_dir = Join-Path $OutputRoot "$($job.name)\$($job.scenario)_seed_$Seed"
+        output_dir = Join-Path $OutputRoot "$($job.name.ToUpper())\$($job.scenario)"
         command = "$Python " + ($commandArgs -join " ")
     }
 
