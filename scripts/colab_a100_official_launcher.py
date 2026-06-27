@@ -479,6 +479,10 @@ def build_jobs(args: argparse.Namespace, root: Path, output_root: Path, schema_a
                     str(args.happo_hidden_size),
                     "--n-rollout-threads",
                     str(args.happo_n_rollout_threads),
+                    "--num-mini-batch",
+                    str(args.happo_num_mini_batch),
+                    "--gpu-rollout-ref",
+                    str(args.happo_gpu_rollout_ref),
                     "--log-interval",
                     "1",
                     "--eval-interval",
@@ -1030,6 +1034,8 @@ def _patch_happo_a100_job(job: Mapping[str, object], args: argparse.Namespace) -
         {
             "--cuda-memory-fraction": str(_phase_cuda_fraction(args)),
             "--n-rollout-threads": str(args.happo_n_rollout_threads),
+            "--num-mini-batch": str(args.happo_num_mini_batch),
+            "--gpu-rollout-ref": str(args.happo_gpu_rollout_ref),
             "--hidden-size": str(args.happo_hidden_size),
         },
     )
@@ -1170,9 +1176,17 @@ def run_two_phase_happo_masac_jobs(
             flush=True,
         )
         if "happo" in algo_names:
+            import math as _math_happo_log
+            _roll = int(args.happo_n_rollout_threads)
+            _ref = max(1, int(getattr(args, "happo_gpu_rollout_ref", 8) or 8))
+            _nmb = int(getattr(args, "happo_num_mini_batch", 0) or 0)
+            if _nmb <= 0:
+                _nmb = max(1, _math_happo_log.ceil(_roll / _ref))
+            _nmb = min(_nmb, _roll)
             print(
                 f"[launcher] HAPPO: hidden={args.happo_hidden_size}, "
-                f"n_rollout_threads={args.happo_n_rollout_threads} (SubprocVecEnv)",
+                f"n_rollout_threads={_roll} (SubprocVecEnv, RAM), "
+                f"num_mini_batch={_nmb} (GPU minibatch ~{_ref * args.episode_time_steps} steps)",
                 flush=True,
             )
         if "masac" in algo_names:
@@ -1523,6 +1537,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="HAPPO [512,512]; stable with n_rollout_threads=2 on A100.")
     parser.add_argument("--happo-n-rollout-threads", default=2, type=int,
                         help="Parallel env rollouts per HAPPO job (SubprocVecEnv; 3 jobs×2=6 envs).")
+    parser.add_argument("--happo-num-mini-batch", default=0, type=int,
+                        help="PPO minibatches HAPPO (0=auto). Auto sube con n_rollout_threads "
+                             "para que el minibatch de GPU (VRAM) quede ~constante.")
+    parser.add_argument("--happo-gpu-rollout-ref", default=8, type=int,
+                        help="Rollouts de referencia por minibatch GPU (modo auto de num_mini_batch).")
     parser.add_argument("--masac-max-replay-buffer-gib", default=8.0, type=float)
     parser.add_argument("--masac-buffer-size", default=2, type=int,
                         help="Episodes in replay buffer (2 = stable Iquitos profile for 8760-step QMIX).")

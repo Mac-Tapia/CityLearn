@@ -38,6 +38,19 @@ def parse_args():
     parser.add_argument("--torch-threads", default=1, type=int)
     parser.add_argument("--live-heartbeat-seconds", default=30, type=int)
     parser.add_argument("--n-rollout-threads", default=1, type=int)
+    parser.add_argument(
+        "--num-mini-batch",
+        default=0,
+        type=int,
+        help="PPO minibatches para actor y critic. 0=auto: mantiene el minibatch de GPU "
+        "~constante al subir n_rollout_threads (mas RAM de sistema, misma VRAM).",
+    )
+    parser.add_argument(
+        "--gpu-rollout-ref",
+        default=8,
+        type=int,
+        help="Rollouts de referencia por minibatch GPU para el modo auto de --num-mini-batch.",
+    )
     parser.add_argument("--log-interval", default=1, type=int)
     parser.add_argument("--eval-interval", default=1, type=int)
     parser.add_argument("--actor-lr", default=1.0e-4, type=float)
@@ -66,6 +79,17 @@ def main() -> int:
     output_dir = resolve_output_dir(args.output_dir, "happo", args.scenario, args.seed)
     artifact_dirs = ensure_artifact_layout(output_dir)
     rollout_threads = max(1, int(args.n_rollout_threads))
+    # Mantener acotado el minibatch de GPU al escalar rollouts: mas workers agrandan el
+    # buffer numpy (RAM de sistema) pero num_mini_batch divide el batch -> VRAM por update
+    # ~constante. mini_batch_size = n_rollout_threads * episode_length / num_mini_batch.
+    import math as _math
+
+    gpu_rollout_ref = max(1, int(getattr(args, "gpu_rollout_ref", 8) or 8))
+    if int(getattr(args, "num_mini_batch", 0) or 0) > 0:
+        num_mini_batch = int(args.num_mini_batch)
+    else:
+        num_mini_batch = max(1, _math.ceil(rollout_threads / gpu_rollout_ref))
+    num_mini_batch = min(num_mini_batch, rollout_threads)
     configured_num_env_steps = max(
         args.num_env_steps,
         args.episode_time_steps,
@@ -146,6 +170,8 @@ def main() -> int:
     algo_args["model"]["critic_lr"] = float(args.critic_lr)
     algo_args["algo"]["use_max_grad_norm"] = True
     algo_args["algo"]["max_grad_norm"] = float(args.max_grad_norm)
+    algo_args["algo"]["actor_num_mini_batch"] = num_mini_batch
+    algo_args["algo"]["critic_num_mini_batch"] = num_mini_batch
     algo_args["algo"]["action_aggregation"] = args.action_aggregation
     algo_args["algo"]["share_param"] = False
     algo_args["algo"]["gamma"] = float(args.gamma)
@@ -190,6 +216,8 @@ def main() -> int:
         "share_param": algo_args["algo"]["share_param"],
         "ctde_state_type": env_args["state_type"],
         "n_rollout_threads": algo_args["train"]["n_rollout_threads"],
+        "actor_num_mini_batch": num_mini_batch,
+        "critic_num_mini_batch": num_mini_batch,
         "log_interval": algo_args["train"]["log_interval"],
         "checkpoint_interval_episodes": algo_args["train"]["eval_interval"],
         "live_progress_interval": args.live_progress_interval,
