@@ -210,3 +210,45 @@ def test_preload_advances_global_step_without_csv(job_dir):
     summary = adapter.preload_resume_artifacts(5)
     assert summary["timeseries_rows"] == 0
     assert adapter.global_step == 5 * 4
+
+
+def test_constructor_resume_offset_applies_in_worker(job_dir):
+    """HAPPO injects resume via the constructor (runs inside SubprocVecEnv worker).
+
+    The adapter must advance global_step/episode at construction so live_progress and
+    the incremental CSV continue the run instead of restarting at episode 0.
+    """
+    _, data, live = job_dir
+    ts_path = data / "timeseries.csv"
+    ep_steps = 8760
+    # Prior incremental CSV with 18 completed episodes (as written by a previous run).
+    prior = []
+    for ep in range(18):
+        prior.extend(_episode_rows(ep, ep_steps))
+    common.write_csv(ts_path, [{**r, "reward_mean": -0.5} for r in prior])
+
+    adapter = common.CityLearnV3BackendAdapter(
+        scenario="E1",
+        seed=0,
+        episode_time_steps=ep_steps,
+        algorithm="HAPPO",
+        live_progress_path=str(live),
+        resume_completed_episodes=18,
+    )
+    # Constructor must have applied the offset (no external preload call needed).
+    assert adapter.global_step == 18 * ep_steps
+    assert adapter.completed_episode_count == 18
+    assert len(adapter.timeseries_records) == 18 * ep_steps
+
+
+def test_constructor_no_offset_when_zero(job_dir):
+    _, _, live = job_dir
+    adapter = common.CityLearnV3BackendAdapter(
+        scenario="E1",
+        seed=0,
+        episode_time_steps=4,
+        algorithm="HAPPO",
+        live_progress_path=str(live),
+        resume_completed_episodes=0,
+    )
+    assert adapter.global_step == 0

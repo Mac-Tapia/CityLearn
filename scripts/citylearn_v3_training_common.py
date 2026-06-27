@@ -3033,6 +3033,7 @@ class CityLearnV3BackendAdapter:
         trace_record_interval: int = 1,
         trace_detail: str = "full",
         normalize_observations: bool = True,
+        resume_completed_episodes: int = 0,
     ):
         ensure_project_paths()
         from citylearn.v3 import make_citylearn_v3_env, make_citylearn_v3_project_env
@@ -3221,6 +3222,11 @@ class CityLearnV3BackendAdapter:
         self.normalization_metadata = self._normalization_metadata()
         # Install O(1) EV simulation lookup (replaces O(n_evs×n_buildings×n_chargers) scan)
         _install_ev_sim_fast_patch(self._cached_core_env)
+        # Resume offset applied INSIDE the constructor so it also runs in HAPPO's
+        # SubprocVecEnv worker processes (where the live_progress/CSV-writing adapter
+        # actually lives). Single-process backends (MASAC/MATD3/MAAC) can also use it.
+        if int(resume_completed_episodes or 0) > 0:
+            self.preload_resume_artifacts(int(resume_completed_episodes))
 
     def seed(self, seed: int) -> None:
         self.seed_value = int(seed)

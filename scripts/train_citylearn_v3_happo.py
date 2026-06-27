@@ -119,6 +119,13 @@ def main() -> int:
         )
     write_job_resume_manifest(output_dir, resume_plan)
 
+    # Resume offset for the live-progress/CSV adapter. HAPPO runs envs in SubprocVecEnv
+    # worker processes, so the offset MUST be injected via the constructor (it runs in
+    # the worker) — not after runner creation (that object lives in the main process).
+    happo_resume_completed = (
+        int(resume_plan["completed_episodes"]) if resume_plan.get("active") else 0
+    )
+
     def make_citylearn_train_env(env_name, seed, n_threads, env_args):
         def make_env(rank):
             def init_env():
@@ -135,6 +142,7 @@ def main() -> int:
                     trace_record_interval=args.trace_record_interval,
                     trace_detail=args.trace_detail,
                     normalize_observations=args.normalize_observations,
+                    resume_completed_episodes=(happo_resume_completed if rank == 0 else 0),
                 )
                 env.seed(seed + rank * 1000)
                 return env
@@ -207,13 +215,9 @@ def main() -> int:
     if runner_envs:
         report_candidate = runner_envs[0]
         reward_metadata = getattr(report_candidate.adapter, "reward_metadata", {})
-        if resume_plan.get("active"):
-            _adapter = getattr(runner_envs[0], "adapter", None)
-            if _adapter is not None:
-                _preload = _adapter.preload_resume_artifacts(
-                    int(resume_plan["completed_episodes"])
-                )
-                print(f"[happo] preloaded resume artifacts: {_preload}", flush=True)
+        # NOTE: resume preload is injected via the env constructor
+        # (resume_completed_episodes) so it also runs inside SubprocVecEnv workers.
+        # Do NOT call preload here too — that would double-apply on DummyVecEnv.
     report = citylearn_v3_training_report(None)
     artifacts = {}
     hyperparameters = {
