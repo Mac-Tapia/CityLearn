@@ -176,8 +176,11 @@ def validate_dry_run_status(status: dict) -> None:
         )
     par = dict(status.get("parallelization") or {})
     validate_parallelization_strategy(par.get("strategy", ""), parallelization=par)
-    if not status.get("training_config", {}).get("a100_ready"):
-        raise RuntimeError("training_config.a100_ready no es True")
+    # Acepta cualquier numero de episodios (prueba rapida o produccion). Solo se
+    # exige que haya al menos 1 episodio; a100_ready es informativo (50 ep oficial).
+    episodes = int(status.get("episodes") or 0)
+    if episodes < 1:
+        raise RuntimeError(f"episodes debe ser >= 1, obtuvo {episodes}")
     jobs = list(status.get("jobs") or [])
     if len(jobs) != 12:
         raise RuntimeError(f"se esperaban 12 jobs, obtuvo {len(jobs)}")

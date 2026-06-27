@@ -1444,6 +1444,9 @@ def make_manifest(
             "episodes_required": 50,
             "episode_time_steps_required": 8760,
             "a100_ready": bool(args.episodes == 50 and args.episode_time_steps == 8760),
+            "colab_dry_run_ready": bool(
+                args.episode_time_steps == 8760 and args.episodes >= 1
+            ),
             "smoke_imports": dict(import_info or {}),
         },
         "output_root": path_for_status(root, output_root),
