@@ -702,11 +702,13 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
         args = replace_arg(args, "--train-interval", "150")
         args = replace_arg(args, "--cuda-memory-fraction", str(max(0.08, round(cur_frac * 0.7, 3))))
     elif name == "maac":
+        cur_frac = float(arg_value(args, "--cuda-memory-fraction", "0.14") or 0.14)
         args = replace_arg(args, "--batch-size", "512")
         args = replace_arg(args, "--buffer-length", "750000")
         args = replace_arg(args, "--hidden-size", "512")
         args = replace_arg(args, "--num-updates", "12")
         args = replace_arg(args, "--steps-per-update", "100")
+        args = replace_arg(args, "--cuda-memory-fraction", str(max(0.08, round(cur_frac * 0.7, 3))))
     elif name == "happo":
         args = replace_arg(args, "--hidden-size", "384")
         args = replace_arg(args, "--n-rollout-threads", "1")

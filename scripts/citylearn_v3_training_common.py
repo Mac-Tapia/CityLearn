@@ -967,9 +967,21 @@ def find_maac_resume_checkpoint(checkpoints_dir: Path) -> Tuple[Optional[Path], 
             numbered.append((int(suffix), path))
         except ValueError:
             continue
+    latest = checkpoints_dir / "checkpoint_latest.pt"
     if numbered:
         episode_no, path = max(numbered, key=lambda item: item[0])
+        # A rolling intra-episode checkpoint carries warmer weights than the last
+        # episode boundary. Load it when newer, but keep episode accounting at the
+        # completed boundary so the resume target stays correct.
+        if latest.is_file():
+            try:
+                if latest.stat().st_mtime > path.stat().st_mtime:
+                    return latest, max(0, episode_no)
+            except OSError:
+                pass
         return path, max(0, episode_no)
+    if latest.is_file():
+        return latest, 0
     model_pt = checkpoints_dir / "model.pt"
     if model_pt.is_file():
         return model_pt, 0

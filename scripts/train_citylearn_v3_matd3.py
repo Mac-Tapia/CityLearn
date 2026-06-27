@@ -47,6 +47,16 @@ def parse_args():
     parser.add_argument("--gamma", default=0.9999, type=float,
                         help="Discount factor. Use 0.9999 for year-long (8760-step) episodes.")
     parser.add_argument("--train-interval", default=1, type=int)
+    parser.add_argument(
+        "--checkpoint-interval-steps",
+        default=0,
+        type=int,
+        help=(
+            "Env-step interval between intra-episode checkpoints. 0 = auto "
+            "(save twice per episode) so a mid-episode crash loses at most ~half an "
+            "episode instead of the whole one. Clamped to the episode length."
+        ),
+    )
     parser.add_argument("--num-random-episodes", default=1, type=int)
     parser.add_argument("--torch-threads", default=1, type=int)
     parser.add_argument("--live-heartbeat-seconds", default=30, type=int)
@@ -132,7 +142,12 @@ def main() -> int:
     all_args.num_random_episodes = args.num_random_episodes
     all_args.gamma = float(args.gamma)
     all_args.log_interval = max(args.episode_time_steps, 1)
-    all_args.save_interval = max(args.episode_time_steps, 1)
+    # Intra-episode checkpointing: a mid-episode crash should lose at most a fraction
+    # of an episode, not the whole 8760-step year. 0 = auto (twice per episode).
+    _ckpt_steps = int(getattr(args, "checkpoint_interval_steps", 0) or 0)
+    if _ckpt_steps <= 0:
+        _ckpt_steps = max(1, args.episode_time_steps // 2)
+    all_args.save_interval = max(1, min(_ckpt_steps, args.episode_time_steps))
     all_args.n_rollout_threads = 1
     all_args.n_eval_rollout_threads = 1
     all_args.share_policy = False

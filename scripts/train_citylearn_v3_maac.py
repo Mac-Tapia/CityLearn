@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 import traceback
 
 import numpy as np
@@ -61,6 +62,16 @@ def parse_args():
     parser.add_argument("--reward-scale", default=10.0, type=float)
     parser.add_argument("--torch-threads", default=1, type=int)
     parser.add_argument("--live-heartbeat-seconds", default=30, type=int)
+    parser.add_argument(
+        "--checkpoint-interval-seconds",
+        default=600,
+        type=int,
+        help=(
+            "Wall-clock interval for intra-episode rolling checkpoints "
+            "(checkpoint_latest.pt). 0 disables. Episodes are 8760 single-threaded "
+            "steps, so this caps how much of a long episode a crash can discard."
+        ),
+    )
     parser.add_argument("--cuda", action="store_true")
     return parser.parse_args()
 
@@ -225,6 +236,9 @@ def main() -> int:
         # Per-episode checkpoints already persist progress; additionally salvage and
         # write artifacts on any failure so a late crash never discards real progress.
         run_error: BaseException | None = None
+        ckpt_interval_s = int(getattr(args, "checkpoint_interval_seconds", 0) or 0)
+        last_ckpt_time = time.monotonic()
+        latest_ckpt_path = artifact_dirs["checkpoints"] / "checkpoint_latest.pt"
         try:
             for episode in range(maac_start_episode, maac_start_episode + args.episodes):
                 obs = env.reset()
@@ -255,10 +269,20 @@ def main() -> int:
                             model.update_all_targets()
                         model.prep_rollouts(device="gpu" if use_gpu else "cpu")
 
+                    if ckpt_interval_s > 0 and (time.monotonic() - last_ckpt_time) >= ckpt_interval_s:
+                        try:
+                            model.prep_rollouts(device="cpu")
+                            model.save(latest_ckpt_path)
+                            model.prep_rollouts(device="gpu" if use_gpu else "cpu")
+                            last_ckpt_time = time.monotonic()
+                        except Exception as ckpt_exc:  # noqa: BLE001 - never abort training on a salvage save
+                            print(f"[maac] rolling checkpoint save failed: {ckpt_exc}", flush=True)
+
                     if np.all(dones):
                         break
 
                 model.save(artifact_dirs["checkpoints"] / f"checkpoint_episode_{episode + 1}.pt")
+                last_ckpt_time = time.monotonic()
         except Exception as exc:  # noqa: BLE001 - salvage on any training failure
             run_error = exc
             traceback.print_exc()
