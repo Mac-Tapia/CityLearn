@@ -37,10 +37,10 @@ TWO_PHASE_ORDER = (TWO_PHASE_P1_HM, TWO_PHASE_P2_HM)
 FOUR_PHASE_ALGO_ORDER = ("happo", "masac", "matd3", "maac")  # monitor ETA fallback
 # Wall-time priors (min/ep, 6 parallel jobs/fase, A100) for manifest ETA when FPS not yet measured.
 EST_MIN_PER_EPISODE_BY_ALGO = {
-    "happo": 11.0,   # on-policy: n_rollout_threads=2, SubprocVecEnv
+    "happo": 14.6,   # prior FPS=10 -> 8760/10/60 ~ 14.6 min/ep (on-policy, CPU-bound)
     "masac": 15.0,   # off-policy GPU: 12 ep replay, batch 1024
-    "matd3": 12.0,   # off-policy RAM: 3M buffer, batch 2048, train_interval 50
-    "maac": 8.0,     # attention critic: 1.5M buffer, 20 updates
+    "matd3": 12.2,   # prior FPS=12 -> 8760/12/60 ~ 12.2 min/ep (v4-aligned config)
+    "maac": 12.2,    # prior FPS=12 -> 8760/12/60 ~ 12.2 min/ep
 }
 EST_MIN_PER_EPISODE_PHASE = 12.0  # max(HAPPO,MASAC) ≈ 15 but MASAC often bounds phase 1
 
@@ -483,6 +483,10 @@ def build_jobs(args: argparse.Namespace, root: Path, output_root: Path, schema_a
                     str(args.happo_num_mini_batch),
                     "--gpu-rollout-ref",
                     str(args.happo_gpu_rollout_ref),
+                    "--ppo-epoch",
+                    str(args.happo_ppo_epoch),
+                    "--critic-epoch",
+                    str(args.happo_critic_epoch),
                     "--log-interval",
                     "1",
                     "--eval-interval",
@@ -631,6 +635,17 @@ def completed_artifact_exists(root: Path, job_output_dir: str) -> bool:
     return (run_path / "data" / "results.json").exists() or (run_path / "results.json").exists()
 
 
+def is_sigkill_exit(exit_code: int) -> bool:
+    """True when the child was SIGKILL'd (Linux OOM killer leaves empty logs).
+
+    Common encodings: 137 = 128+9, 247 = (-9) & 0xFF from some wait() implementations.
+    """
+    code = int(exit_code)
+    if code < 0:
+        code = code & 0xFF
+    return code in (9, 137, 247)
+
+
 def is_oom_failure(*paths: Path) -> bool:
     needles = (
         "cuda out of memory",
@@ -674,10 +689,12 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
         args = replace_arg(args, "--masac-preload-batch-device", "cpu")
         args = replace_arg(args, "--cuda-memory-fraction", str(min(0.28, round(cur_frac * 1.35, 3))))
     elif name == "matd3":
-        args = replace_arg(args, "--batch-size", "1024")
-        args = replace_arg(args, "--buffer-size", "1500000")
-        args = replace_arg(args, "--hidden-size", "512")
-        args = replace_arg(args, "--train-interval", "100")
+        cur_frac = float(arg_value(args, "--cuda-memory-fraction", "0.14") or 0.14)
+        args = replace_arg(args, "--batch-size", "64")
+        args = replace_arg(args, "--buffer-size", "2048")
+        args = replace_arg(args, "--hidden-size", "128")
+        args = replace_arg(args, "--train-interval", "150")
+        args = replace_arg(args, "--cuda-memory-fraction", str(max(0.08, round(cur_frac * 0.7, 3))))
     elif name == "maac":
         args = replace_arg(args, "--batch-size", "512")
         args = replace_arg(args, "--buffer-length", "750000")
@@ -959,14 +976,26 @@ def run_job_with_retry(
     last_record = manifest["jobs"][-1]
     log_path = Path(str(last_record.get("log") or ""))
     err_path = Path(str(last_record.get("stderr_log") or ""))
-    if not args.oom_retry or not is_oom_failure(log_path, err_path):
+    oom_like = is_sigkill_exit(exit_code) or is_oom_failure(log_path, err_path)
+    if not args.oom_retry or not oom_like:
+        if is_sigkill_exit(exit_code) and args.oom_retry:
+            print(
+                f"[launcher] {job['name'].upper()}/{job['scenario']} exit={exit_code} "
+                "(SIGKILL/OOM-killer) but logs are empty — no retry settings for this algorithm.",
+                flush=True,
+            )
         return exit_code
 
     retry_job = make_oom_retry_job(job)
     if retry_job is None:
         return exit_code
 
-    print(f"OOM detected for {job['name'].upper()}/{job['scenario']}; retrying with conservative settings.", flush=True)
+    reason = "SIGKILL/OOM-killer" if is_sigkill_exit(exit_code) else "OOM in logs"
+    print(
+        f"{reason} for {job['name'].upper()}/{job['scenario']}; "
+        "retrying with conservative settings.",
+        flush=True,
+    )
     return run_one_job(
         root=root,
         manifest=manifest,
@@ -1069,18 +1098,21 @@ def _patch_happo_a100_job(job: Mapping[str, object], args: argparse.Namespace) -
             "--num-mini-batch": str(args.happo_num_mini_batch),
             "--gpu-rollout-ref": str(args.happo_gpu_rollout_ref),
             "--hidden-size": str(args.happo_hidden_size),
+            "--ppo-epoch": str(args.happo_ppo_epoch),
+            "--critic-epoch": str(args.happo_critic_epoch),
         },
     )
 
 
 def _patch_masac_a100_job(job: Mapping[str, object], args: argparse.Namespace) -> Dict[str, object]:
-    """Off-policy SAC+QMIX: CPU replay in 6-parallel (167 GiB RAM); GPU for batches only."""
+    """Off-policy SAC+QMIX: CPU replay (RAM) + GPU compute & batch (Blackwell 96 GiB)."""
     return _patch_job_args(
         job,
         {
-            # 3x GPU replay (~16 GiB/job) OOMs on A100 when all MASAC train together.
-            # CPU replay + cuda batches: ~50 GiB RAM + ~6-12 GiB VRAM total (stable 6-parallel).
-            "--masac-preload-batch-device": "cpu",
+            # Replay buffer stays in CPU RAM; the sampled episode batch is preloaded to GPU
+            # once ('auto', with automatic CPU fallback on OOM) so the 8760-step QMIX unroll
+            # runs on GPU without per-step CPU->GPU copies. Validated by the v4 winning run.
+            "--masac-preload-batch-device": str(args.masac_preload_batch_device),
             "--cuda-memory-fraction": str(_masac_cuda_fraction(args)),
             "--buffer-size": str(args.six_job_masac_buffer_size),
             "--max-replay-buffer-gib": str(args.six_job_masac_max_replay_gib),
@@ -1145,11 +1177,18 @@ def _prepare_two_phase_jobs(
         phase_jobs = _patch_torch_threads([j for j in jobs if j["name"] == algo_name], phase_threads)
         phase_jobs = [{**job, "env_overrides": dict(perf_env)} for job in phase_jobs]
         patcher = _ALGO_A100_PATCHERS.get(algo_name, _patch_job_cuda_fraction)
+        _matd3_stagger_s = {"E1": 0, "E2": 30, "E3": 60}
         for job in phase_jobs:
             if algo_name in _ALGO_A100_PATCHERS:
-                patched.append(patcher(job, args))
+                patched_job = patcher(job, args)
             else:
-                patched.append(_patch_job_cuda_fraction(job, cuda_fraction))
+                patched_job = _patch_job_cuda_fraction(job, cuda_fraction)
+            if algo_name == "matd3":
+                scenario = str(job.get("scenario", "")).upper()
+                delay = float(_matd3_stagger_s.get(scenario, 0))
+                if delay > 0:
+                    patched_job = {**patched_job, "startup_delay_seconds": delay}
+            patched.append(patched_job)
     return patched
 
 
@@ -1574,6 +1613,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "para que el minibatch de GPU (VRAM) quede ~constante.")
     parser.add_argument("--happo-gpu-rollout-ref", default=8, type=int,
                         help="Rollouts de referencia por minibatch GPU (modo auto de num_mini_batch).")
+    parser.add_argument("--happo-ppo-epoch", default=10, type=int,
+                        help="HAPPO PPO actor epochs/update (10 aprovecha GPU ociosa; HARL default=5).")
+    parser.add_argument("--happo-critic-epoch", default=10, type=int,
+                        help="HAPPO critic epochs/update (10 aprovecha GPU ociosa; HARL default=5).")
     parser.add_argument("--masac-max-replay-buffer-gib", default=8.0, type=float)
     parser.add_argument("--masac-buffer-size", default=2, type=int,
                         help="Episodes in replay buffer (2 = stable Iquitos profile for 8760-step QMIX).")
@@ -1589,16 +1632,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="QMIX mixing hidden dim (32 for long CityLearn episodes).")
     parser.add_argument("--masac-hyper-hidden-dim", default=64, type=int,
                         help="Hypernetwork hidden dim for QMIX weights.")
-    parser.add_argument("--masac-preload-batch-device", default="cpu", choices=("auto", "cuda", "cpu"),
-                        help="cpu for 6-parallel (replay RAM); cuda only for single-job runs.")
-    parser.add_argument("--matd3-batch-size", default=1280, type=int,
-                        help="MATD3 batch (Tensor Cores; 3 jobs share RAM not VRAM).")
-    parser.add_argument("--matd3-buffer-size", default=2000000, type=int,
-                        help="2M transitions ~14 GiB RAM/job; 3x42 GiB << 167 GiB.")
-    parser.add_argument("--matd3-hidden-size", default=768, type=int,
-                        help="MATD3 actor+critic hidden 768 (stable 6-parallel phase 2).")
-    parser.add_argument("--matd3-train-interval", default=50, type=int,
-                        help="Train every 50 env steps (more GPU utilization).")
+    parser.add_argument("--masac-preload-batch-device", default="auto", choices=("auto", "cuda", "cpu"),
+                        help="auto: replay in CPU RAM + episode batch on GPU (OOM falls back to CPU). "
+                             "Use cpu to force replay+batch on CPU; cuda to force GPU (single-job).")
+    parser.add_argument("--matd3-batch-size", default=256, type=int,
+                        help="MATD3 batch aligned to the v4 winning run (stable 3/3 exit_code=0).")
+    parser.add_argument("--matd3-buffer-size", default=4096, type=int,
+                        help="v4 stable replay: 17 separate policies x double centralized critic.")
+    parser.add_argument("--matd3-hidden-size", default=256, type=int,
+                        help="MATD3 actor+critic hidden 256 (v4 winning run).")
+    parser.add_argument("--matd3-train-interval", default=100, type=int,
+                        help="Train every 100 env steps (v4 winning run).")
     parser.add_argument("--maac-batch-size", default=768, type=int,
                         help="MAAC batch (Tensor Cores).")
     parser.add_argument("--maac-buffer-length", default=1000000, type=int,

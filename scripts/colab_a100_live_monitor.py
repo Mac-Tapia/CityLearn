@@ -20,10 +20,10 @@ TWO_PHASE_P2 = frozenset({"matd3", "maac"})
 FOUR_PHASE_ORDER = ("happo", "masac", "matd3", "maac")
 EST_MIN_PER_EPISODE_DEFAULT = 11.0
 EST_MIN_PER_EPISODE_BY_ALGO = {
-    "happo": 11.0,
+    "happo": 14.6,  # prior FPS=10 -> 8760/10/60 ~ 14.6 min/ep
     "masac": 15.0,
-    "matd3": 12.0,
-    "maac": 8.0,
+    "matd3": 12.2,  # prior FPS=12 -> 8760/12/60 ~ 12.2 min/ep
+    "maac": 12.2,   # prior FPS=12 -> 8760/12/60 ~ 12.2 min/ep
 }
 
 

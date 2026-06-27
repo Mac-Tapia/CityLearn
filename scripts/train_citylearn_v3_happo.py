@@ -51,6 +51,10 @@ def parse_args():
         type=int,
         help="Rollouts de referencia por minibatch GPU para el modo auto de --num-mini-batch.",
     )
+    parser.add_argument("--ppo-epoch", default=5, type=int,
+                        help="PPO actor epochs per update. Higher = more GPU work + sample efficiency.")
+    parser.add_argument("--critic-epoch", default=5, type=int,
+                        help="Critic epochs per update. Higher = more GPU work + sample efficiency.")
     parser.add_argument("--log-interval", default=1, type=int)
     parser.add_argument("--eval-interval", default=1, type=int)
     parser.add_argument("--actor-lr", default=1.0e-4, type=float)
@@ -172,6 +176,8 @@ def main() -> int:
     algo_args["algo"]["max_grad_norm"] = float(args.max_grad_norm)
     algo_args["algo"]["actor_num_mini_batch"] = num_mini_batch
     algo_args["algo"]["critic_num_mini_batch"] = num_mini_batch
+    algo_args["algo"]["ppo_epoch"] = max(1, int(args.ppo_epoch))
+    algo_args["algo"]["critic_epoch"] = max(1, int(args.critic_epoch))
     algo_args["algo"]["action_aggregation"] = args.action_aggregation
     algo_args["algo"]["share_param"] = False
     algo_args["algo"]["gamma"] = float(args.gamma)

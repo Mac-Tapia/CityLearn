@@ -103,16 +103,6 @@ def main() -> int:
         trace_detail=args.trace_detail,
         normalize_observations=args.normalize_observations,
     )
-    eval_env = CityLearnOffPolicyVecEnv(
-        schema_path=args.schema_path,
-        scenario=args.scenario,
-        seed=args.seed + 10000,
-        episode_time_steps=args.episode_time_steps,
-        algorithm="MATD3",
-        trace_record_interval=args.trace_record_interval,
-        trace_detail=args.trace_detail,
-        normalize_observations=args.normalize_observations,
-    )
     gpu_runtime = configure_torch_runtime(
         torch,
         use_cuda=args.cuda,
@@ -134,7 +124,6 @@ def main() -> int:
     all_args.num_env_steps = configured_num_env_steps
     all_args.episode_length = args.episode_time_steps
     all_args.batch_size = args.batch_size
-    all_args.buffer_size = args.buffer_size
     all_args.hidden_size = args.hidden_size
     all_args.lr = float(args.lr)
     all_args.max_grad_norm = float(args.max_grad_norm)
@@ -153,9 +142,18 @@ def main() -> int:
         model_root = Path(str(resume_plan["model_dir"]))
         all_args.model_dir = model_root.as_posix().rstrip("/") + "/"
 
-    device = torch.device("cuda:0" if all_args.cuda else "cpu")
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    # Replay budget: large CLI values are total across 17 policies; v4 profile (<=16k)
+    # is already per-policy capacity (see citylearn_v3_training_common docstring).
+    cli_buffer = int(args.buffer_size)
+    if cli_buffer > 16384:
+        per_policy_buffer = effective_matd3_per_policy_buffer_size(
+            cli_buffer,
+            num_agents=env.num_agents,
+            share_policy=bool(all_args.share_policy),
+        )
+    else:
+        per_policy_buffer = max(500, cli_buffer)
+    all_args.buffer_size = per_policy_buffer
 
     policy_info = {
         f"policy_{agent_id}": {
@@ -167,6 +165,34 @@ def main() -> int:
         }
         for agent_id in range(env.num_agents)
     }
+    replay_ram_gib = estimate_matd3_replay_ram_gib(
+        per_policy_buffer=per_policy_buffer,
+        num_agents=env.num_agents,
+        obs_dim=int(env.observation_space[0].shape[0]),
+        share_obs_dim=int(env.share_observation_space[0].shape[0]),
+        act_dim=int(np.sum(get_dim_from_space(env.action_space[0]))),
+        share_policy=bool(all_args.share_policy),
+        use_same_share_obs=bool(all_args.use_same_share_obs),
+    )
+    max_replay_gib = float(os.environ.get("MATD3_MAX_REPLAY_RAM_GIB", "18.0"))
+    if replay_ram_gib > max_replay_gib:
+        raise MemoryError(
+            f"MATD3 replay buffer estimate is too large: {replay_ram_gib:.1f} GiB "
+            f"(cap {max_replay_gib:.1f} GiB). Reduce --buffer-size or run fewer "
+            f"parallel MATD3 jobs."
+        )
+    print(
+        f"[matd3] replay per_policy={per_policy_buffer} (cli={cli_buffer}) "
+        f"policies={env.num_agents} est_ram={replay_ram_gib:.2f} GiB",
+        flush=True,
+    )
+
+    device = torch.device("cuda:0" if all_args.cuda else "cpu")
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+    # Skip a second CityLearn instance when eval is disabled (saves RAM in 6-parallel).
+    eval_env = env
 
     def policy_mapping_fn(agent_id):
         return f"policy_{agent_id}"
@@ -220,7 +246,8 @@ def main() -> int:
         "num_env_steps": configured_num_env_steps,
         "episode_length": args.episode_time_steps,
         "batch_size": args.batch_size,
-        "buffer_size": args.buffer_size,
+        "buffer_size": per_policy_buffer,
+        "buffer_size_cli": cli_buffer,
         "hidden_size": args.hidden_size,
         "gamma": all_args.gamma,
         "lr": all_args.lr,
@@ -323,7 +350,8 @@ def main() -> int:
     finally:
         stop_live_progress_heartbeat(heartbeat_stop, heartbeat_thread)
         env.close()
-        eval_env.close()
+        if eval_env is not env:
+            eval_env.close()
         if hasattr(runner, "writter"):
             runner.writter.export_scalars_to_json(str(Path(runner.log_dir) / "summary.json"))
             runner.writter.close()
