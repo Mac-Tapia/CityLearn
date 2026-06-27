@@ -602,22 +602,26 @@ def print_progress(status: Mapping[str, object], root: Path) -> None:
     episode_steps = int(status.get("episode_time_steps") or 0)
     episodes = int(status.get("episodes") or 0)
 
+    phase = infer_two_phase(status)
+    phase_label = {1: "Fase 1/2 (HAPPO+MASAC)", 2: "Fase 2/2 (MATD3+MAAC)"}.get(phase, "two_phase")
     print("")
-    print("Progreso, metricas y recompensas")
-    print(f"Corridas activas ({len(jobs)}): " + ", ".join(
-        f"{str(j.get('name')).upper()}/{j.get('scenario')}" for j in jobs
-    ))
+    print("=" * 76)
+    print(f"PROGRESO INDIVIDUAL POR MADRL - {phase_label} | {len(jobs)} corridas activas")
+    print("=" * 76)
 
     for job in jobs:
         run_dir = path_for_job(root, str(job.get("output_dir")))
         progress_path = run_dir / "live_progress.json"
         progress = read_json(progress_path)
-        label = f"{str(job.get('name')).upper()}/{job.get('scenario')}"
-        print(f"\n  --- {label} ---")
-        print(f"  Directorio: {job.get('output_dir')}")
+        algo = str(job.get("name")).upper()
+        label = f"{algo}/{job.get('scenario')}"
+        print("")
+        print(f"  [ {label} ] " + "-" * max(0, 60 - len(label)))
+        print(f"  | dir: {job.get('output_dir')}")
 
         if not progress:
-            print("  Progreso vivo aun no disponible; aparece despues del primer intervalo de pasos.")
+            print("  | progreso vivo aun no disponible (aparece tras el 1er intervalo de pasos).")
+            print("  " + "-" * 70)
             continue
 
         global_step = int(progress.get("global_step") or 0)
@@ -626,44 +630,93 @@ def print_progress(status: Mapping[str, object], root: Path) -> None:
         pct = round(100.0 * global_step / total_steps, 2) if total_steps else 0.0
         ep_pct = round(100.0 * episode_step / episode_steps, 2) if episode_steps else 0.0
         weights = progress.get("reward_axis_weights") or {}
+        fps = progress_fps(progress)
+        eta_min = estimate_minutes_remaining_for_job(
+            progress,
+            episodes=episodes,
+            episode_steps=episode_steps,
+            algo=str(job.get("name")).lower(),
+            est_min_per_episode=EST_MIN_PER_EPISODE_BY_ALGO.get(str(job.get("name")).lower(), EST_MIN_PER_EPISODE_DEFAULT),
+        )
 
+        print("  | PASOS")
         print(
-            "  episodio={}/{} paso_episodio={}/{} ({}%) paso_global={}/{} ({}%)".format(
-                episode,
-                episodes,
-                episode_step,
-                episode_steps,
-                ep_pct,
-                global_step,
-                total_steps,
-                pct,
-            )
-        )
-        print(f"  global_step={global_step} time_step={progress.get('time_step')} live_status={progress.get('live_status')}")
-        print(
-            "  pesos: OE1_flex={} OE2_CO2={} OE3_costo={}".format(
-                weights.get("flex"),
-                weights.get("carbon"),
-                weights.get("cost"),
-            )
-        )
-        print(f"  reward_function={progress.get('reward_function')} profile={progress.get('reward_profile')}")
-        print(
-            "  instant_reward_sum={} instant_reward_mean={}".format(
-                progress.get("instant_reward_sum"),
-                progress.get("instant_reward_mean"),
+            "  |   episodio={}/{}  paso_episodio={}/{} ({}%)".format(
+                episode, episodes, episode_step, episode_steps, ep_pct
             )
         )
         print(
-            "  episode_return_cumulative={} episode_reward_mean_cumulative={} episode_steps={}".format(
+            "  |   paso_global={}/{} ({}%)  time_step={}".format(
+                global_step, total_steps, pct, progress.get("time_step")
+            )
+        )
+        print("  | APRENDIZAJE")
+        print(
+            "  |   FPS={}  live_status={}  ETA_job=~{:.1f} h".format(
+                f"{fps:.1f}" if fps else "-",
+                progress.get("live_status"),
+                eta_min / 60.0 if eta_min else 0.0,
+            )
+        )
+        print(
+            "  |   reward_function={} profile={}".format(
+                progress.get("reward_function"), progress.get("reward_profile")
+            )
+        )
+        print("  | RECOMPENSAS / MEANS")
+        print(
+            "  |   instant: sum={} mean={}".format(
+                progress.get("instant_reward_sum"), progress.get("instant_reward_mean")
+            )
+        )
+        print(
+            "  |   episodio: return_cum={} reward_mean_cum={} steps={}".format(
                 progress.get("episode_return_cumulative"),
                 progress.get("episode_reward_mean_cumulative"),
                 progress.get("episode_steps_recorded"),
             )
         )
+        print(
+            "  |   total:    return_cum={} reward_mean_cum={} steps={}".format(
+                progress.get("total_return_cumulative"),
+                progress.get("total_reward_mean_cumulative"),
+                progress.get("total_steps_recorded"),
+            )
+        )
+        print("  | COMPONENTES (mean por eje)")
+        print(
+            "  |   flex={} carbon={} cost={} ev={} team={}".format(
+                progress.get("reward_component_flex_mean"),
+                progress.get("reward_component_carbon_mean"),
+                progress.get("reward_component_cost_mean"),
+                progress.get("reward_component_ev_mean"),
+                progress.get("reward_team_reward"),
+            )
+        )
+        print(
+            "  |   pesos OE1_flex={} OE2_CO2={} OE3_costo={}".format(
+                weights.get("flex"), weights.get("carbon"), weights.get("cost")
+            )
+        )
+        print("  | KPIs ENERGIA (instant)")
+        print(
+            "  |   cost={} co2={} net_load={} import_kwh={}".format(
+                progress.get("district_net_electricity_consumption_cost"),
+                progress.get("district_net_electricity_consumption_emission"),
+                progress.get("district_net_electricity_consumption"),
+                progress.get("reward_district_import_kwh"),
+            )
+        )
+        print(
+            "  |   price_mean={} carbon_intensity_mean={}".format(
+                progress.get("electricity_price_mean"),
+                progress.get("carbon_intensity_mean"),
+            )
+        )
         age = file_age_seconds(progress_path)
         if age is not None:
-            print(f"  live_progress: hace {age} s")
+            print(f"  | live_progress: hace {age} s")
+        print("  " + "-" * 70)
 
 
 def print_artifacts(output_root: Path, limit: int = 12) -> None:

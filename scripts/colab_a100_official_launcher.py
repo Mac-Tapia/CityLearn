@@ -747,19 +747,51 @@ def print_monitor_snapshot(root: Path, status_path: Path, log_tail: int = 12) ->
             )
             continue
         global_step = int(progress.get("global_step") or 0)
+        episode_step = int(progress.get("episode_step") or 0)
         pct = (100.0 * global_step / total_steps) if total_steps else 0.0
+        ep_pct = (100.0 * episode_step / episode_steps) if episode_steps else 0.0
         weights = progress.get("reward_axis_weights") or {}
+        try:
+            fps = float(progress.get("fps") or 0.0)
+        except (TypeError, ValueError):
+            fps = 0.0
+        # Bloque individual por MADRL: pasos, aprendizaje, means, componentes y KPIs.
+        print(f"[monitor] === {label} ===", flush=True)
         print(
-            f"[monitor] {label} ep={int(progress.get('episode') or 0) + 1}/{episodes} "
-            f"step_ep={progress.get('episode_step')}/{episode_steps} "
-            f"global={global_step}/{total_steps} ({pct:.2f}%) "
-            f"reward_mean={progress.get('episode_reward_mean_cumulative')} "
-            f"return={progress.get('episode_return_cumulative')}",
+            f"  pasos: ep={int(progress.get('episode') or 0) + 1}/{episodes} "
+            f"step_ep={episode_step}/{episode_steps} ({ep_pct:.1f}%) "
+            f"global={global_step}/{total_steps} ({pct:.2f}%)",
             flush=True,
         )
         print(
-            f"  weights flex={weights.get('flex')} carbon={weights.get('carbon')} "
-            f"cost={weights.get('cost')} live_status={progress.get('live_status')}",
+            f"  aprendizaje: fps={fps:.1f} live_status={progress.get('live_status')} "
+            f"profile={progress.get('reward_profile')}",
+            flush=True,
+        )
+        print(
+            f"  means: ep_return={progress.get('episode_return_cumulative')} "
+            f"ep_reward_mean={progress.get('episode_reward_mean_cumulative')} "
+            f"total_reward_mean={progress.get('total_reward_mean_cumulative')}",
+            flush=True,
+        )
+        print(
+            f"  componentes: flex={progress.get('reward_component_flex_mean')} "
+            f"carbon={progress.get('reward_component_carbon_mean')} "
+            f"cost={progress.get('reward_component_cost_mean')} "
+            f"ev={progress.get('reward_component_ev_mean')} "
+            f"team={progress.get('reward_team_reward')}",
+            flush=True,
+        )
+        print(
+            f"  kpis: cost={progress.get('district_net_electricity_consumption_cost')} "
+            f"co2={progress.get('district_net_electricity_consumption_emission')} "
+            f"net_load={progress.get('district_net_electricity_consumption')} "
+            f"price_mean={progress.get('electricity_price_mean')}",
+            flush=True,
+        )
+        print(
+            f"  pesos: flex={weights.get('flex')} carbon={weights.get('carbon')} "
+            f"cost={weights.get('cost')}",
             flush=True,
         )
 
