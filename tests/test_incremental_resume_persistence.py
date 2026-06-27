@@ -285,3 +285,66 @@ def test_vec_env_wrappers_propagate_resume_offset(job_dir, env_cls_name, algorit
         assert env.adapter.completed_episode_count == 7
     finally:
         env.close()
+
+
+def test_completed_from_timeseries_csv_counts_done_episodes(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    ep_steps = 8760
+    rows = []
+    for ep in range(18):
+        rows.extend(_episode_rows(ep, ep_steps))
+    # partial 19th episode (must NOT count as complete)
+    rows.extend(_episode_rows(18, ep_steps)[: ep_steps // 2])
+    common.write_csv(data / "timeseries.csv", rows)
+
+    completed = common.infer_completed_episodes_from_timeseries_csv(
+        data, episode_time_steps=ep_steps
+    )
+    assert completed == 18
+
+
+def test_completed_from_timeseries_csv_empty(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    assert common.infer_completed_episodes_from_timeseries_csv(
+        data, episode_time_steps=8760
+    ) == 0
+
+
+def test_discover_prefers_csv_when_live_progress_reset(tmp_path):
+    """Recovery path: a buggy run reset live_progress to ep1 but timeseries.csv has 18.
+
+    discover_job_resume_plan must trust the CSV count so HAPPO resumes from ep18,
+    not ep1 (which would discard already-trained episodes).
+    """
+    job = tmp_path / "HAPPO" / "E1"
+    data = job / "data"
+    ckpt = job / "checkpoints" / "models"
+    data.mkdir(parents=True)
+    ckpt.mkdir(parents=True)
+    # HAPPO checkpoint marker so resume is allowed.
+    (ckpt / "actor_agent0.pt").write_bytes(b"\x00")
+
+    ep_steps = 8760
+    rows = []
+    for ep in range(18):
+        rows.extend(_episode_rows(ep, ep_steps))
+    common.write_csv(data / "timeseries.csv", rows)
+    # Corrupted/stale live_progress: stuck at ep1.
+    (job / "live_progress.json").write_text(
+        '{"episode": 1, "global_step": 600}', encoding="utf-8"
+    )
+
+    plan = common.discover_job_resume_plan(
+        job,
+        algorithm="happo",
+        target_episodes=50,
+        episode_time_steps=ep_steps,
+        rollout_threads=1,
+    )
+    assert plan["active"] is True
+    assert plan["completed_episodes"] == 18
+    assert plan["completed_episodes_csv"] == 18
+    assert plan["completed_episodes_live"] == 1
+    assert plan["remaining_episodes"] == 32

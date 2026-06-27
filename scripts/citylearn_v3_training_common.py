@@ -958,6 +958,42 @@ def infer_completed_episodes_from_live_progress(
     return max(0, min(int(episode), 10_000))
 
 
+def infer_completed_episodes_from_timeseries_csv(
+    data_dir: Path,
+    *,
+    episode_time_steps: int,
+) -> int:
+    """Completed-episode count from the persisted incremental timeseries.csv.
+
+    live_progress.json is a single mutable snapshot that a buggy/old run can reset to
+    ep1, but timeseries.csv is the append-only record of finished episodes. An episode
+    is COMPLETE when it carries an all_done row or a full episode_time_steps row count.
+    Returns max(completed_episode_index)+1 so numbering stays continuous.
+    """
+    episode_time_steps = max(1, int(episode_time_steps))
+    path = Path(data_dir) / "timeseries.csv"
+    if not path.is_file():
+        return 0
+    try:
+        rows = read_csv_rows(path)
+    except Exception:
+        return 0
+
+    counts: Dict[int, int] = {}
+    done_eps: set = set()
+    for row in rows:
+        ep = _as_int(row.get("episode"))
+        if ep is None:
+            continue
+        counts[ep] = counts.get(ep, 0) + 1
+        flag = str(row.get("all_done", "")).strip().lower()
+        if flag in {"true", "1", "1.0", "yes"}:
+            done_eps.add(ep)
+
+    complete = {ep for ep, c in counts.items() if c >= episode_time_steps} | done_eps
+    return (max(complete) + 1) if complete else 0
+
+
 def find_harl_actor_checkpoint_dir(checkpoints_dir: Path) -> Optional[Path]:
     checkpoints_dir = Path(checkpoints_dir)
     if not checkpoints_dir.is_dir():
@@ -1069,12 +1105,20 @@ def discover_job_resume_plan(
         return plan
 
     live = read_live_progress_json(output_dir)
-    completed = 0
+    completed_live = 0
     if live:
-        completed = infer_completed_episodes_from_live_progress(
+        completed_live = infer_completed_episodes_from_live_progress(
             live,
             episode_time_steps=episode_time_steps,
         )
+    # timeseries.csv is the append-only source of truth for finished episodes and
+    # survives a buggy/old run resetting live_progress.json to ep1. Trust the larger
+    # of the two so resume never silently discards already-trained episodes.
+    completed_csv = infer_completed_episodes_from_timeseries_csv(
+        output_dir / DATA_DIR_NAME,
+        episode_time_steps=episode_time_steps,
+    )
+    completed = max(completed_live, completed_csv)
 
     algo = algorithm.lower()
     model_dir: Optional[Path] = None
@@ -1119,6 +1163,8 @@ def discover_job_resume_plan(
             "maac_checkpoint": str(maac_ckpt) if maac_ckpt else None,
             "maac_start_episode": maac_start,
             "note": "resume_from_checkpoint",
+            "completed_episodes_live": completed_live,
+            "completed_episodes_csv": completed_csv,
             "live_progress_episode": (live or {}).get("episode"),
             "live_progress_global_step": (live or {}).get("global_step"),
         }

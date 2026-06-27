@@ -129,6 +129,17 @@ def main() -> int:
     def make_citylearn_train_env(env_name, seed, n_threads, env_args):
         def make_env(rank):
             def init_env():
+                _rank_offset = happo_resume_completed if rank == 0 else 0
+                if rank == 0:
+                    # Runs INSIDE the SubprocVecEnv worker -> visible in the HAPPO log.
+                    # Deployment marker: if this line is absent, the worker is running
+                    # OLD code without the constructor-injected resume offset.
+                    print(
+                        f"[happo][worker rank0] constructor resume offset "
+                        f"resume_completed_episodes={_rank_offset} "
+                        f"(global_step will start at {_rank_offset * args.episode_time_steps})",
+                        flush=True,
+                    )
                 env = CityLearnHARLEnv(
                     schema_path=args.schema_path,
                     scenario=args.scenario,
@@ -142,8 +153,14 @@ def main() -> int:
                     trace_record_interval=args.trace_record_interval,
                     trace_detail=args.trace_detail,
                     normalize_observations=args.normalize_observations,
-                    resume_completed_episodes=(happo_resume_completed if rank == 0 else 0),
+                    resume_completed_episodes=_rank_offset,
                 )
+                if rank == 0:
+                    print(
+                        f"[happo][worker rank0] adapter.global_step="
+                        f"{env.adapter.global_step} completed={env.adapter.completed_episode_count}",
+                        flush=True,
+                    )
                 env.seed(seed + rank * 1000)
                 return env
 
