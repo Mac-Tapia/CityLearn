@@ -1596,7 +1596,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--scenario", default="ALL")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--episode-time-steps", default=8760, type=int)
-    parser.add_argument("--episodes", default=50, type=int)
+    parser.add_argument("--episodes", default=17, type=int)
     parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--schema-path", default=DEFAULT_SCHEMA)
     parser.add_argument("--torch-threads", default=2, type=int)

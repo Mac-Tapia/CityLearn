@@ -30,8 +30,8 @@ official_training:
     - "E3"
   seed: 0
   episode_time_steps: 8760
-  episodes: 50
-  num_env_steps: 438000
+  episodes: 17
+  num_env_steps: 148920
   primary_algorithms:
     - "happo"
     - "masac"
@@ -216,7 +216,7 @@ algorithms:
     action_type: "continuous"
     reward_profile: "HAPPO"
     cli:
-      num_env_steps: 438000
+      num_env_steps: 148920
       hidden_size: 384
       torch_threads: 12
       n_rollout_threads: 1
@@ -225,7 +225,7 @@ algorithms:
       live_progress_interval: 250
       cuda: true
     hyperparameters:
-      episodes: 50
+      episodes: 17
       episode_length: 8760
       n_rollout_threads: 1
       hidden_sizes:
@@ -266,8 +266,8 @@ algorithms:
       live_progress_interval: 250
       cuda: true
     hyperparameters:
-      episodes: 50
-      n_epoch: 50
+      episodes: 17
+      n_epoch: 17
       n_episodes_per_epoch: 1
       episode_limit: 8760
       action_bins: 3
@@ -293,7 +293,7 @@ algorithms:
     action_type: "continuous"
     reward_profile: "MATD3"
     cli:
-      num_env_steps: 438000
+      num_env_steps: 148920
       batch_size: 512
       buffer_size: 50000
       hidden_size: 384
@@ -302,9 +302,9 @@ algorithms:
       live_progress_interval: 250
       cuda: true
     hyperparameters:
-      episodes: 50
+      episodes: 17
       episode_length: 8760
-      num_env_steps: 438000
+      num_env_steps: 148920
       batch_size: 512
       buffer_size: 50000
       hidden_size: 384
@@ -346,7 +346,7 @@ algorithms:
       live_progress_interval: 250
       cuda: true
     hyperparameters:
-      episodes: 50
+      episodes: 17
       episode_length: 8760
       action_bins: 3
       discrete_action_mode: "axis"
