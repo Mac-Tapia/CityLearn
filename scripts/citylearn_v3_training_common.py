@@ -646,15 +646,26 @@ def _csv_safe(value):
 
 
 def write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
+    """Atomically write rows to a CSV (tmp file + replace) so a crash mid-write never
+    leaves a half-written/torn file on Drive."""
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = sorted({key for row in rows for key in row.keys()})
 
-    with path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        writer.writeheader()
-
-        for row in rows:
-            writer.writerow({key: _csv_safe(row.get(key)) for key in fieldnames})
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with tmp_path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({key: _csv_safe(row.get(key)) for key in fieldnames})
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 
 def _write_csv_mirrors(paths: Sequence[Path], rows: Sequence[Mapping[str, object]]) -> None:
@@ -674,15 +685,15 @@ def read_csv_rows(path: Path) -> List[Dict[str, object]]:
         return []
 
 
-def append_csv_rows(
+def _append_csv_rows_stable_schema(
     path: Path,
     rows: Sequence[Mapping[str, object]],
     fieldnames: Sequence[str],
 ) -> None:
-    """Append rows to a CSV, writing the header first when the file is new/empty.
+    """Append rows to a CSV using a KNOWN-STABLE header (no new keys).
 
-    Used for resume-safe incremental persistence: each finished episode is flushed
-    to disk so an interrupted Colab run never loses already-trained episodes.
+    Callers must guarantee every row's keys are a subset of `fieldnames`; schema
+    growth is handled by a full atomic rewrite in the recorder, not here.
     """
     if not rows:
         return
@@ -690,7 +701,7 @@ def append_csv_rows(
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = (not path.exists()) or path.stat().st_size == 0
     with path.open("a", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=list(fieldnames))
+        writer = csv.DictWriter(file, fieldnames=list(fieldnames), extrasaction="ignore")
         if write_header:
             writer.writeheader()
         for row in rows:
@@ -3318,22 +3329,51 @@ class CityLearnV3BackendAdapter:
         summary["completed_episodes"] = completed
         return summary
 
+    def _incremental_flush_records(
+        self,
+        *,
+        path: Optional[Path],
+        all_records: List[Dict[str, object]],
+        flushed_count: int,
+        fieldnames_ref: Optional[List[str]],
+    ) -> Tuple[int, Optional[List[str]]]:
+        """Flush new records to an incremental CSV.
+
+        - Stable schema (no new columns): fast append.
+        - Schema growth (new columns appear): full atomic rewrite from memory so
+          the on-disk file stays a valid, complete CSV for analysis.
+        """
+        if path is None or len(all_records) <= flushed_count:
+            return flushed_count, fieldnames_ref
+        new_rows = all_records[flushed_count:]
+        new_keys = sorted({k for r in new_rows for k in r.keys()})
+        if fieldnames_ref is None:
+            fieldnames_ref = new_keys
+            _append_csv_rows_stable_schema(path, new_rows, fieldnames_ref)
+        elif set(new_keys) - set(fieldnames_ref):
+            # Schema grew (e.g. trace_detail=full adds action_i columns mid-run).
+            fieldnames_ref = sorted({k for r in all_records for k in r.keys()})
+            write_csv(path, all_records)
+        else:
+            _append_csv_rows_stable_schema(path, new_rows, fieldnames_ref)
+        return len(all_records), fieldnames_ref
+
     def _flush_incremental_artifacts(self) -> None:
-        """Append the rows produced since the last flush to the incremental CSVs."""
+        """Persist finished-episode rows to data/{timeseries,trace}.csv on Drive."""
         if not self._incremental_enabled:
             return
-        if self._incremental_ts_path is not None and len(self.timeseries_records) > self._ts_flushed_count:
-            new_rows = self.timeseries_records[self._ts_flushed_count:]
-            if self._ts_fieldnames is None:
-                self._ts_fieldnames = sorted({k for r in new_rows for k in r.keys()})
-            append_csv_rows(self._incremental_ts_path, new_rows, self._ts_fieldnames)
-            self._ts_flushed_count = len(self.timeseries_records)
-        if self._incremental_trace_path is not None and len(self.trace_records) > self._trace_flushed_count:
-            new_rows = self.trace_records[self._trace_flushed_count:]
-            if self._trace_fieldnames is None:
-                self._trace_fieldnames = sorted({k for r in new_rows for k in r.keys()})
-            append_csv_rows(self._incremental_trace_path, new_rows, self._trace_fieldnames)
-            self._trace_flushed_count = len(self.trace_records)
+        self._ts_flushed_count, self._ts_fieldnames = self._incremental_flush_records(
+            path=self._incremental_ts_path,
+            all_records=self.timeseries_records,
+            flushed_count=self._ts_flushed_count,
+            fieldnames_ref=self._ts_fieldnames,
+        )
+        self._trace_flushed_count, self._trace_fieldnames = self._incremental_flush_records(
+            path=self._incremental_trace_path,
+            all_records=self.trace_records,
+            flushed_count=self._trace_flushed_count,
+            fieldnames_ref=self._trace_fieldnames,
+        )
 
     def _reward_metadata(self) -> Dict[str, object]:
         reward_function = getattr(self._core_env(), "reward_function", None)
