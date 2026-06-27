@@ -691,55 +691,71 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
     return retry
 
 
+def _job_display_order(job: Mapping[str, object]) -> tuple:
+    name = str(job.get("name", "")).lower()
+    scenario = str(job.get("scenario", "")).upper()
+    try:
+        algo_idx = ALGORITHMS.index(name)
+    except ValueError:
+        algo_idx = 99
+    try:
+        scen_idx = SCENARIOS.index(scenario)
+    except ValueError:
+        scen_idx = 99
+    return (algo_idx, scen_idx)
+
+
 def print_monitor_snapshot(root: Path, status_path: Path, log_tail: int = 12) -> None:
     status = read_json(status_path)
     if not status:
         print(f"[monitor] status not found: {status_path}", flush=True)
         return
 
-    active_jobs = [job for job in status.get("jobs", []) if job.get("completed_at") is None]
+    active_jobs = sorted(
+        [
+            job
+            for job in status.get("jobs", [])
+            if job.get("completed_at") is None and not job.get("planned_only")
+        ],
+        key=_job_display_order,
+    )
     if not active_jobs:
         print(f"[monitor] status={status.get('status')} jobs={len(status.get('jobs', []))}", flush=True)
         return
 
-    active = active_jobs[0]
-    run_path = resolve_status_path(root, str(active["output_dir"]))
-    progress = read_json(run_path / "live_progress.json")
+    total_steps = int(status.get("num_env_steps") or 0)
+    episode_steps = int(status.get("episode_time_steps") or 0)
+    episodes = int(status.get("episodes") or 0)
+
     print("", flush=True)
-    if len(active_jobs) > 1:
-        running = ", ".join(f"{j['name'].upper()}/{j['scenario']}" for j in active_jobs)
-        print(f"[monitor] parallel active ({len(active_jobs)}): {running}", flush=True)
-    print(
-        f"[monitor] {active['name'].upper()}/{active['scenario']} "
-        f"status={status.get('status')} output={active['output_dir']}",
-        flush=True,
-    )
-    if progress:
-        total_steps = int(status.get("num_env_steps") or 0)
+    running = ", ".join(f"{j['name'].upper()}/{j['scenario']}" for j in active_jobs)
+    print(f"[monitor] parallel active ({len(active_jobs)}): {running}", flush=True)
+
+    for job in active_jobs:
+        label = f"{job['name'].upper()}/{job['scenario']}"
+        run_path = resolve_status_path(root, str(job["output_dir"]))
+        progress = read_json(run_path / "live_progress.json")
+        if not progress:
+            print(
+                f"[monitor] {label} status=running output={job.get('output_dir')} "
+                "(sin live_progress aun)",
+                flush=True,
+            )
+            continue
         global_step = int(progress.get("global_step") or 0)
         pct = (100.0 * global_step / total_steps) if total_steps else 0.0
         weights = progress.get("reward_axis_weights") or {}
         print(
-            "  ep={}/{} step_ep={}/{} global={}/{} ({:.2f}%) reward_mean={} return={}".format(
-                int(progress.get("episode") or 0) + 1,
-                status.get("episodes"),
-                progress.get("episode_step"),
-                status.get("episode_time_steps"),
-                global_step,
-                total_steps,
-                pct,
-                progress.get("episode_reward_mean_cumulative"),
-                progress.get("episode_return_cumulative"),
-            ),
+            f"[monitor] {label} ep={int(progress.get('episode') or 0) + 1}/{episodes} "
+            f"step_ep={progress.get('episode_step')}/{episode_steps} "
+            f"global={global_step}/{total_steps} ({pct:.2f}%) "
+            f"reward_mean={progress.get('episode_reward_mean_cumulative')} "
+            f"return={progress.get('episode_return_cumulative')}",
             flush=True,
         )
         print(
-            "  weights flex={} carbon={} cost={} live_status={}".format(
-                weights.get("flex"),
-                weights.get("carbon"),
-                weights.get("cost"),
-                progress.get("live_status"),
-            ),
+            f"  weights flex={weights.get('flex')} carbon={weights.get('carbon')} "
+            f"cost={weights.get('cost')} live_status={progress.get('live_status')}",
             flush=True,
         )
 
@@ -754,13 +770,15 @@ def print_monitor_snapshot(root: Path, status_path: Path, log_tail: int = 12) ->
     if gpu and not gpu.startswith("ERROR:"):
         print(f"  gpu: {gpu.splitlines()[0]}", flush=True)
 
-    log_path = Path(str(active.get("log") or ""))
-    if log_path.exists():
-        lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-log_tail:]
-        if lines:
-            print("  log tail:", flush=True)
-            for line in lines[-log_tail:]:
-                print(f"    {line[:180]}", flush=True)
+    if len(active_jobs) == 1:
+        active = active_jobs[0]
+        log_path = Path(str(active.get("log") or ""))
+        if log_path.exists():
+            lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-log_tail:]
+            if lines:
+                print("  log tail:", flush=True)
+                for line in lines[-log_tail:]:
+                    print(f"    {line[:180]}", flush=True)
 
 
 def append_job_record(
