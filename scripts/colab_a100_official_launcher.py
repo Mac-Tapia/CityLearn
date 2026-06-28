@@ -1805,8 +1805,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     # Notebook Sección 6 is the single source of truth; these defaults match launcher_base_args().
     parser.add_argument("--happo-hidden-size", default=512, type=int,
                         help="HAPPO [512,512]; stable with n_rollout_threads=2 on A100.")
-    parser.add_argument("--happo-n-rollout-threads", default=2, type=int,
-                        help="Parallel env rollouts per HAPPO job (SubprocVecEnv; 3 jobs×2=6 envs).")
+    parser.add_argument("--happo-n-rollout-threads", default=None, type=int,
+                        help="Parallel env rollouts per HAPPO job (SubprocVecEnv). "
+                             "Default None = auto from usable vCPUs (12 vCPU->2, ~26 vCPU->4); explicit value wins.")
     parser.add_argument("--happo-num-mini-batch", default=0, type=int,
                         help="PPO minibatches HAPPO (0=auto). Auto sube con n_rollout_threads "
                              "para que el minibatch de GPU (VRAM) quede ~constante.")
@@ -1866,17 +1867,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--two-phase-p1-torch-threads",
-        default=1,
+        default=None,
         type=int,
         help="Phase 1 (HAPPO+MASAC) torch threads/job. HAPPO adds rollout workers, so "
-        "1 keeps 3×(1+rollout)+3×1 ≈ 12 vCPU without oversubscription.",
+        "1 keeps 3×(1+rollout)+3×1 ≈ 12 vCPU without oversubscription. "
+        "Default None = auto from usable vCPUs (12 vCPU->1, ~26 vCPU->2); explicit value wins.",
     )
     parser.add_argument(
         "--two-phase-p2-torch-threads",
-        default=2,
+        default=None,
         type=int,
         help="Phase 2 (MATD3+MAAC) torch threads/job. Single-env off-policy (no rollout), "
-        "so 2 fills 6×2 = 12 vCPU during GPU update bursts.",
+        "so 2 fills 6×2 = 12 vCPU during GPU update bursts. "
+        "Default None = auto = usable_vcpus//6 (12 vCPU->2, ~26 vCPU->4); explicit value wins.",
     )
     parser.add_argument(
         "--six-job-cuda-fraction",
@@ -1941,6 +1944,112 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _usable_vcpus() -> int:
+    """Cores actually assignable to this process (Linux/Colab honor cgroup affinity)."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
+def _resolve_auto_happo_rollout_threads(args: argparse.Namespace) -> None:
+    """Fill --happo-n-rollout-threads from usable vCPUs when left unset.
+
+    Convergence-neutral: only parallel env collection (SubprocVecEnv), not learning
+    dynamics. Mirrors the notebook ``_alloc_phase1`` rollout formula: prefer torch_t=2,
+    then pick the largest rollout with 3*(torch_t+rollout)+3*torch_t <= vcpus.
+    Backward-compatible: 12 vCPU -> 2 (today's default), ~26 vCPU -> 4.
+    """
+    if getattr(args, "happo_n_rollout_threads", None) is not None:
+        return
+
+    vcpus = _usable_vcpus()
+    best_rollout = 2
+    for torch_t in (2, 1):
+        candidate = 2
+        valid = False
+        for rollout in range(1, 17):
+            if 3 * (torch_t + rollout) + 3 * torch_t <= vcpus:
+                candidate = rollout
+                valid = True
+        if valid:
+            best_rollout = candidate
+            break
+
+    args.happo_n_rollout_threads = best_rollout
+    print(
+        f"[launcher] auto-rollout (usable_vcpus={vcpus}): "
+        f"happo_n_rollout_threads={best_rollout} (auto)",
+        flush=True,
+    )
+
+
+def _resolve_auto_two_phase_threads(args: argparse.Namespace) -> None:
+    """Fill --two-phase-p1/p2-torch-threads from usable vCPUs when left unset.
+
+    Convergence-neutral: torch CPU threads only affect intra-op math parallelism,
+    not learning dynamics (rollout count and batch sizes are untouched). The formula
+    mirrors the notebook auto-tuner and NEVER oversubscribes — including the dynamic
+    backfill OVERLAP window, where phase 2 streams in one-for-one as phase 1 frees slots
+    (run_dynamic_backfill_jobs / _run_backfill_schedule):
+      * Phase 1 = 3 HAPPO (torch + rollout workers) + 3 MASAC (torch). Pick the largest
+        torch_t in {1,2} with 3*(torch_t + rollout) + 3*torch_t <= usable_vcpus.
+      * Phase 2 = 6 single-env jobs (no rollout). Two caps apply; we take the min:
+          - isolated (all phase 1 done): 6*torch_t <= usable_vcpus -> usable_vcpus // 6.
+          - backfill overlap worst case: the lightest 3 MASAC may finish first, so up to
+            3 HAPPO stay running while 3 phase-2 jobs are admitted; require
+            3*(p1 + rollout) + 3*torch_t <= usable_vcpus
+            -> (usable_vcpus - 3*(p1 + rollout)) // 3.
+    On a 12-vCPU A100 (rollout=2, p1=1) this yields (p1=1, p2=1); on a ~26-vCPU runtime
+    (rollout=4, p1=2) it yields (p1=2, p2=2) so the worst overlap mix (3xHAPPO + 3xphase-2
+    = 24) fits in 26. An explicit CLI value (e.g. from the notebook) always wins (not None).
+    """
+    vcpus = _usable_vcpus()
+    rollout = max(1, int(getattr(args, "happo_n_rollout_threads", 2) or 2))
+
+    if getattr(args, "two_phase_p1_torch_threads", None) is None:
+        p1 = 1
+        for torch_t in (2, 1):
+            if 3 * (torch_t + rollout) + 3 * torch_t <= vcpus:
+                p1 = torch_t
+                break
+        args.two_phase_p1_torch_threads = p1
+        _p1_auto = True
+    else:
+        _p1_auto = False
+
+    p1_resolved = int(args.two_phase_p1_torch_threads)
+    happo_overlap_demand = 3 * (p1_resolved + rollout)
+
+    if getattr(args, "two_phase_p2_torch_threads", None) is None:
+        # Isolated phase-2 (6 MATD3/MAAC, no HAPPO left): 6 * p2 <= vcpus.
+        p2_isolated = max(1, vcpus // 6)
+        # Dynamic-backfill worst overlap: 3 HAPPO still running (torch+rollout each)
+        # when the last 3 MASAC finish and admit 3 phase-2 jobs one-for-one
+        # (_run_backfill_schedule gate at ~1449: phase2_started < phase1_completed).
+        p2_overlap = max(1, (vcpus - happo_overlap_demand) // 3) if happo_overlap_demand < vcpus else 1
+        args.two_phase_p2_torch_threads = min(p2_isolated, p2_overlap)
+        _p2_auto = True
+    else:
+        _p2_auto = False
+
+    if _p1_auto or _p2_auto:
+        p1_resolved = int(args.two_phase_p1_torch_threads)
+        p2_resolved = int(args.two_phase_p2_torch_threads)
+        d1 = 3 * (p1_resolved + rollout) + 3 * p1_resolved
+        d2_isolated = 6 * p2_resolved
+        d_overlap = happo_overlap_demand + 3 * p2_resolved
+        print(
+            f"[launcher] auto-threads (usable_vcpus={vcpus}): "
+            f"p1_torch={p1_resolved}{' (auto)' if _p1_auto else ' (explicit)'} "
+            f"rollout={rollout} -> phase1 demand {d1}/{vcpus} vCPU | "
+            f"p2_torch={p2_resolved}{' (auto)' if _p2_auto else ' (explicit)'} "
+            f"-> phase2 isolated {d2_isolated}/{vcpus} vCPU | "
+            f"backfill overlap worst-case {d_overlap}/{vcpus} vCPU",
+            flush=True,
+        )
+
+
 def _sync_six_job_masac_defaults(args: argparse.Namespace) -> None:
     """Keep build_jobs and phase patchers aligned on six-job MASAC caps."""
     args.masac_buffer_size = int(getattr(args, "six_job_masac_buffer_size", args.masac_buffer_size))
@@ -1982,6 +2091,8 @@ def _assert_launcher_self() -> None:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    _resolve_auto_happo_rollout_threads(args)
+    _resolve_auto_two_phase_threads(args)
     _sync_six_job_masac_defaults(args)
     _assert_launcher_self()
     script_path = Path(__file__).resolve()

@@ -4316,6 +4316,17 @@ class CityLearnV3BackendAdapter:
         return output
 
     def _record_step(self, action_dict, observations, rewards, dones, infos) -> None:
+        # Fast path for non-persisting rollout workers (HAPPO SubprocVecEnv rank>0:
+        # live_progress_path is None -> _incremental_enabled is False). Their
+        # timeseries/trace records are never flushed to disk nor read by the main
+        # process, so all per-step bookkeeping here is dead work that steals CPU from
+        # the single-thread env.step (the throughput bottleneck). Only advance
+        # global_step to keep the worker's episode counter consistent. Convergence-
+        # neutral: rewards returned to the runner come from env.step(), not from here.
+        if not self._incremental_enabled:
+            self.global_step += 1
+            return
+
         episode_length = max(int(self.episode_time_steps), 1)
         episode = int(self.global_step // episode_length)
         episode_step = int(self.global_step % episode_length)
