@@ -39,6 +39,10 @@ def verify_critical_patches(repo: Path) -> List[str]:
     common_src = train_common.read_text(encoding="utf-8")
     if "def job_counts_as_launcher_complete" not in common_src:
         problems.append("training_common sin job_counts_as_launcher_complete")
+    if "def preview_job_launcher_decision" not in common_src:
+        problems.append(
+            "training_common sin preview_job_launcher_decision (celdas 2.1b/7.1)"
+        )
 
     maac_train_src = train_maac.read_text(encoding="utf-8")
     if "job_counts_as_launcher_complete" not in maac_train_src:
@@ -78,7 +82,7 @@ def main(argv: List[str] | None = None) -> int:
 
     print(
         "[OK] parches verificados: MAAC cuda-sync + validación de corrida "
-        "+ ImportError launcher"
+        "+ preview_job_launcher_decision + ImportError launcher"
     )
     return 0
 
