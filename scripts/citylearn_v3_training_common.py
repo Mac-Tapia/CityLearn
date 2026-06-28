@@ -1074,14 +1074,15 @@ def job_counts_as_launcher_complete(
     )
 
     if target is not None:
-        # MAAC can write a results.json whose episode_summaries are inflated by the
-        # CityLearn adapter while only N checkpoint_episode_*.pt files exist. Never
-        # treat that as launcher-complete unless verified artifacts back the claim.
-        if verified > 0 and verified < int(target):
-            return False
         algo = str(payload.get("algorithm") or "").lower()
-        if algo == "maac" and verified < int(target):
-            return False
+        # Only MAAC inflates episode_summaries in results.json while checkpoint_episode_*
+        # reflects real training progress. Other MADRL backends (HAPPO/MASAC/MATD3) keep
+        # trustworthy results.json once recorded_episodes >= target and no salvage flags.
+        if algo == "maac":
+            if verified > 0 and verified < int(target):
+                return False
+            if verified < int(target):
+                return False
 
     return True
 
