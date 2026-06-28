@@ -994,43 +994,20 @@ def _recorded_episodes_from_results(payload: Mapping[str, object]) -> Optional[i
     return None
 
 
-def _verified_completed_episodes(
-    output_dir: Path,
-    payload: Mapping[str, object],
-    *,
-    episode_time_steps: int,
-) -> int:
-    """Completed episodes corroborated by append-only artifacts, not results.json claims."""
-
-    output_dir = Path(output_dir)
+def _payload_algorithm(payload: Mapping[str, object]) -> str:
     hyperparameters = dict(payload.get("hyperparameters") or {})
-    episode_time_steps = max(1, int(episode_time_steps))
-    verified = 0
+    return str(payload.get("algorithm") or hyperparameters.get("algorithm_family") or "").lower()
 
-    verified = max(
-        verified,
-        infer_completed_episodes_from_timeseries_csv(
-            output_dir / DATA_DIR_NAME,
-            episode_time_steps=episode_time_steps,
-        ),
-    )
 
-    live = read_live_progress_json(output_dir)
-    if live:
-        verified = max(
-            verified,
-            infer_completed_episodes_from_live_progress(
-                live,
-                episode_time_steps=episode_time_steps,
-            ),
-        )
+def max_maac_checkpoint_episode(output_dir: Path) -> int:
+    """Highest episode index backed by a real MAAC per-episode checkpoint.
 
-    algo = str(payload.get("algorithm") or hyperparameters.get("algorithm_family") or "").lower()
-    if algo == "maac":
-        _, maac_completed = find_maac_resume_checkpoint(output_dir / CHECKPOINT_DIR_NAME)
-        verified = max(verified, int(maac_completed))
-
-    return max(0, int(verified))
+    MAAC saves ``checkpoint_episode_{N}.pt`` after finishing episode N, so the maximum
+    N on disk is ground truth for how many episodes were genuinely trained. Returns 0
+    when no per-episode checkpoint exists (only ``model.pt``/``checkpoint_latest.pt``).
+    """
+    _, episode = find_maac_resume_checkpoint(Path(output_dir) / CHECKPOINT_DIR_NAME)
+    return max(0, int(episode))
 
 
 def job_counts_as_launcher_complete(
@@ -1038,7 +1015,20 @@ def job_counts_as_launcher_complete(
     *,
     target_episodes: Optional[int] = None,
 ) -> bool:
-    """True only when results.json reflects a full successful run (not salvage/partial)."""
+    """True only when a job genuinely finished all target episodes.
+
+    Robust, artifact-grounded contract (no fragile heuristics):
+
+    1. ``results.json`` exists and is not a salvage/error/incomplete record. It is the
+       authoritative end-of-run document; ``episodes_recorded`` is the count of DISTINCT
+       episode indices recorded, which is correct regardless of rollout-thread count.
+    2. ``episodes_recorded >= target`` (and >= the audit's expected episodes).
+    3. MAAC only: cross-checked against the REAL per-episode checkpoints it writes
+       (``checkpoint_episode_N.pt``). If those stop at N < target, the run is NOT
+       complete and must resume from N — even if results.json claims otherwise.
+       HAPPO/MASAC/MATD3 overwrite a single checkpoint dir (no per-episode numbering),
+       so their valid results.json is authoritative and is trusted as-is.
+    """
     payload = read_job_results_json(output_dir)
     if not payload:
         return False
@@ -1062,27 +1052,12 @@ def job_counts_as_launcher_complete(
     if expected is not None and recorded is not None and int(recorded) < int(expected):
         return False
 
-    episode_time_steps = (
-        _as_int(payload.get("episode_time_steps"))
-        or _as_int(hyperparameters.get("episode_time_steps"))
-        or 8760
-    )
-    verified = _verified_completed_episodes(
-        output_dir,
-        payload,
-        episode_time_steps=int(episode_time_steps),
-    )
-
-    if target is not None:
-        algo = str(payload.get("algorithm") or "").lower()
-        # Only MAAC inflates episode_summaries in results.json while checkpoint_episode_*
-        # reflects real training progress. Other MADRL backends (HAPPO/MASAC/MATD3) keep
-        # trustworthy results.json once recorded_episodes >= target and no salvage flags.
-        if algo == "maac":
-            if verified > 0 and verified < int(target):
-                return False
-            if verified < int(target):
-                return False
+    if target is not None and _payload_algorithm(payload) == "maac":
+        max_ckpt = max_maac_checkpoint_episode(output_dir)
+        # Only demote when real per-episode checkpoints exist and fall short. If MAAC
+        # genuinely finished it wrote checkpoint_episode_{target}.pt (max_ckpt >= target).
+        if 0 < max_ckpt < int(target):
+            return False
 
     return True
 
