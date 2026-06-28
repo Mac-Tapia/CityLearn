@@ -1336,6 +1336,97 @@ def _job_backfill_weight(job: Mapping[str, object]) -> Tuple[int, str]:
     return (_BACKFILL_ALGO_WEIGHT.get(name, 9), scenario)
 
 
+def _run_backfill_schedule(
+    *,
+    phase1_jobs: Sequence[Mapping[str, object]],
+    phase2_jobs: Sequence[Mapping[str, object]],
+    max_workers: int,
+    submit_fn,
+) -> int:
+    """Pure dynamic-backfill scheduler (no VRAM/args coupling, fully unit-testable).
+
+    Rule enforced (matches the launch protocol):
+      * Start ALL phase-1 jobs (HAPPO+MASAC) up to the concurrency cap; never prefill
+        phase 2 at t=0.
+      * As soon as ANY phase-1 job COMPLETES, admit exactly ONE phase-2 job (MATD3/MAAC,
+        lightest-first) — one-for-one with phase-1 completions — provided a slot is free.
+      * Phase 2 therefore never starts before a phase-1 job finishes and flows in
+        dynamically/flexibly as each subsequent slot frees.
+
+    `submit_fn(pool, job)` must return a Future yielding the job's int exit code.
+    Returns the worst (non-zero wins) exit code so a single failure surfaces.
+    """
+    max_workers = max(1, int(max_workers))
+    backfill_queue = sorted(phase2_jobs, key=_job_backfill_weight)
+    phase1_total = len(phase1_jobs)
+    phase2_total = len(phase2_jobs)
+    overall_rc = 0
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        pending: set = set()
+        future_to_job: Dict[object, Mapping[str, object]] = {}
+        phase1_completed = 0
+        phase2_started = 0
+
+        def _admit_phase2() -> None:
+            # ROBUST 2-PHASE RULE: admit the next lightest phase-2 job ONLY when a
+            # phase-1 job has already completed (one-for-one) AND a concurrency slot is
+            # free. The `phase2_started < phase1_completed` gate guarantees phase 2 never
+            # enters before phase 1 frees a slot, regardless of how wide the cap is.
+            nonlocal phase2_started
+            while (
+                backfill_queue
+                and len(pending) < max_workers
+                and phase2_started < phase1_completed
+            ):
+                job = backfill_queue.pop(0)
+                fut = submit_fn(pool, job)
+                pending.add(fut)
+                future_to_job[fut] = job
+                phase2_started += 1
+                print(
+                    f"[launcher] phase-2 START {str(job['name']).upper()}/{job['scenario']} "
+                    f"(lightest-first; phase-1 done={phase1_completed}/{phase1_total}, "
+                    f"phase-2 started={phase2_started}/{phase2_total})",
+                    flush=True,
+                )
+
+        # Start phase 1 ONLY. No phase-2 prefill: extras beyond the cap queue in the
+        # executor, and phase 2 waits for the first phase-1 completion (rule above).
+        for job in phase1_jobs:
+            fut = submit_fn(pool, job)
+            pending.add(fut)
+            future_to_job[fut] = job
+
+        while pending:
+            finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for fut in finished:
+                done_job = future_to_job.pop(fut, {})
+                try:
+                    ec = int(fut.result())
+                except Exception as exc:  # noqa: BLE001 - a worker crash must not abort the pool
+                    ec = 1
+                    print(
+                        f"[launcher] worker for {done_job.get('name', '?')}/"
+                        f"{done_job.get('scenario', '?')} raised {type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                if ec != 0:
+                    overall_rc = ec
+                if str(done_job.get("name", "")) in TWO_PHASE_P1_HM:
+                    phase1_completed += 1
+                    print(
+                        f"[launcher] phase-1 DONE {str(done_job.get('name', '?')).upper()}/"
+                        f"{done_job.get('scenario', '?')} "
+                        f"({phase1_completed}/{phase1_total}) — opens one phase-2 slot",
+                        flush=True,
+                    )
+            # Admit phase-2 jobs per the one-for-one rule after handling completions.
+            _admit_phase2()
+
+    return overall_rc
+
+
 def run_dynamic_backfill_jobs(
     *,
     root: Path,
@@ -1430,9 +1521,7 @@ def run_dynamic_backfill_jobs(
         order = ", ".join(f"{j['name'].upper()}/{j['scenario']}" for j in backfill_queue)
         print(f"[launcher] backfill order: {order}", flush=True)
 
-    overall_rc = 0
-
-    def _submit(pool: ThreadPoolExecutor, job: Dict[str, object]):
+    def _submit(pool: ThreadPoolExecutor, job: Mapping[str, object]):
         return pool.submit(
             run_job_with_retry,
             root=root,
@@ -1444,71 +1533,12 @@ def run_dynamic_backfill_jobs(
             args=args,
         )
 
-    phase1_total = len(phase1_jobs)
-    phase2_total = len(phase2_jobs)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        pending: set = set()
-        future_to_job: Dict[object, Dict[str, object]] = {}
-        phase1_completed = 0
-        phase2_started = 0
-
-        def _admit_phase2() -> None:
-            # ROBUST 2-PHASE RULE: admit the next lightest phase-2 job ONLY when a
-            # phase-1 job has already completed (one-for-one) AND a concurrency slot is
-            # free. The `phase2_started < phase1_completed` gate guarantees phase 2 never
-            # enters before phase 1 frees a slot, regardless of how wide the cap is.
-            nonlocal phase2_started
-            while (
-                backfill_queue
-                and len(pending) < max_workers
-                and phase2_started < phase1_completed
-            ):
-                job = backfill_queue.pop(0)
-                fut = _submit(pool, job)
-                pending.add(fut)
-                future_to_job[fut] = job
-                phase2_started += 1
-                print(
-                    f"[launcher] phase-2 START {job['name'].upper()}/{job['scenario']} "
-                    f"(lightest-first; phase-1 done={phase1_completed}/{phase1_total}, "
-                    f"phase-2 started={phase2_started}/{phase2_total})",
-                    flush=True,
-                )
-
-        # Start phase 1 ONLY. No phase-2 prefill: extras beyond the cap queue in the
-        # executor, and phase 2 waits for the first phase-1 completion (rule above).
-        for job in phase1_jobs:
-            fut = _submit(pool, job)
-            pending.add(fut)
-            future_to_job[fut] = job
-
-        while pending:
-            finished, pending = wait(pending, return_when=FIRST_COMPLETED)
-            for fut in finished:
-                done_job = future_to_job.pop(fut, {})
-                try:
-                    ec = int(fut.result())
-                except Exception as exc:  # noqa: BLE001 - a worker crash must not abort the pool
-                    ec = 1
-                    print(
-                        f"[launcher] worker for {done_job.get('name', '?')}/"
-                        f"{done_job.get('scenario', '?')} raised {type(exc).__name__}: {exc}",
-                        flush=True,
-                    )
-                if ec != 0:
-                    overall_rc = ec
-                if str(done_job.get("name", "")) in TWO_PHASE_P1_HM:
-                    phase1_completed += 1
-                    print(
-                        f"[launcher] phase-1 DONE {done_job.get('name', '?').upper()}/"
-                        f"{done_job.get('scenario', '?')} "
-                        f"({phase1_completed}/{phase1_total}) — opens one phase-2 slot",
-                        flush=True,
-                    )
-            # Admit phase-2 jobs per the one-for-one rule after handling completions.
-            _admit_phase2()
-
+    overall_rc = _run_backfill_schedule(
+        phase1_jobs=phase1_jobs,
+        phase2_jobs=phase2_jobs,
+        max_workers=max_workers,
+        submit_fn=_submit,
+    )
     if overall_rc != 0:
         print("[launcher] dynamic backfill finished with one or more job failures.", flush=True)
     return overall_rc
