@@ -1615,6 +1615,133 @@ def discover_job_resume_plan(
     return plan
 
 
+def resolve_job_rollout_threads(
+    output_dir: Path,
+    algorithm: str,
+    *,
+    fallback: Optional[int] = None,
+) -> int:
+    """Rollout threads for skip/resume preview; prefer persisted hyperparameters."""
+    output_dir = Path(output_dir)
+    payload = read_job_results_json(output_dir)
+    from_payload = _infer_rollout_threads(payload)
+    if algorithm.lower() == "happo":
+        if from_payload > 1:
+            return from_payload
+        if fallback is not None and int(fallback) > 0:
+            return int(fallback)
+    return max(1, from_payload)
+
+
+def preview_job_launcher_decision(
+    output_dir: Path,
+    *,
+    algorithm: str,
+    target_episodes: int,
+    episode_time_steps: int = 8760,
+    rollout_threads: Optional[int] = None,
+    allow_resume: bool = True,
+) -> Dict[str, object]:
+    """Mirror ``--skip-completed`` + intra-job resume for notebook cell 2.1b / launcher 7.2."""
+    output_dir = Path(output_dir)
+    algo = algorithm.lower()
+    target_episodes = max(1, int(target_episodes))
+    episode_time_steps = max(1, int(episode_time_steps))
+    roll = resolve_job_rollout_threads(
+        output_dir,
+        algo,
+        fallback=rollout_threads,
+    )
+
+    skip = job_counts_as_launcher_complete(output_dir, target_episodes=target_episodes)
+    blockers: List[str] = (
+        [] if skip else job_launcher_completion_blockers(output_dir, target_episodes=target_episodes)
+    )
+    plan = discover_job_resume_plan(
+        output_dir,
+        algorithm=algo,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+        rollout_threads=roll,
+        allow_resume=allow_resume,
+    )
+
+    result: Dict[str, object] = {
+        "algorithm": algorithm.upper(),
+        "output_dir": str(output_dir),
+        "target_episodes": target_episodes,
+        "rollout_threads": roll,
+        "skip": skip,
+        "blockers": blockers,
+        "plan": plan,
+        "action": "run_fresh",
+        "completed_episodes": 0,
+        "remaining_episodes": target_episodes,
+        "status_line": "PENDIENTE (fresh)",
+        "launcher_line": "",
+    }
+
+    if skip:
+        result.update(
+            {
+                "action": "skip",
+                "completed_episodes": target_episodes,
+                "remaining_episodes": 0,
+                "status_line": f"OK COMPLETO {target_episodes}/{target_episodes} ep (se omite)",
+                "launcher_line": "SKIP: existing results.json + job completo",
+            }
+        )
+        return result
+
+    name = algo.upper()
+    if blockers:
+        result["launcher_line"] = f"RUN: not skipping — {'; '.join(blockers)}"
+    else:
+        result["launcher_line"] = f"RUN {name}: fresh start"
+
+    note = str(plan.get("note") or "")
+    if plan.get("active"):
+        completed = int(plan.get("completed_episodes") or 0)
+        remaining = int(plan.get("remaining_episodes") or max(0, target_episodes - completed))
+        parts: List[str] = []
+        if algo == "maac" and plan.get("maac_checkpoint"):
+            parts.append(Path(str(plan["maac_checkpoint"])).name)
+        elif plan.get("model_dir"):
+            parts.append(f"pesos:{Path(str(plan['model_dir'])).name}")
+        gs = plan.get("completed_episodes_global_step")
+        if gs is not None:
+            parts.append(f"global_step={gs}")
+        elif plan.get("completed_episodes_csv") is not None:
+            parts.append(f"timeseries={plan['completed_episodes_csv']}")
+        if plan.get("maac_start_episode") not in (None, 0):
+            parts.append(f"ckpt_ep={plan['maac_start_episode']}")
+        src = f" [{' ; '.join(parts)}]" if parts else ""
+        result.update(
+            {
+                "action": "resume",
+                "completed_episodes": completed,
+                "remaining_episodes": remaining,
+                "status_line": f"REANUDA ep {completed}/{target_episodes} (faltan {remaining}){src}",
+            }
+        )
+        return result
+
+    if note.startswith("live_progress_without_weights"):
+        result.update(
+            {
+                "action": "restart_fresh",
+                "status_line": "REINICIA fresh (hubo progreso pero NO hay pesos restaurables)",
+            }
+        )
+        return result
+
+    if blockers:
+        result["status_line"] = (
+            f"EJECUTA (launcher NO omitira): {'; '.join(blockers[:2])}"
+        )
+    return result
+
+
 def write_job_resume_manifest(output_dir: Path, plan: Mapping[str, object]) -> Path:
     output_dir = Path(output_dir)
     data_dir = output_dir / DATA_DIR_NAME
