@@ -954,6 +954,59 @@ def job_has_final_results(output_dir: Path) -> bool:
     return (output_dir / "data" / "results.json").is_file() or (output_dir / "results.json").is_file()
 
 
+def read_job_results_json(output_dir: Path) -> Optional[Dict[str, object]]:
+    output_dir = Path(output_dir)
+    for rel in ("data/results.json", "results.json"):
+        path = output_dir / rel
+        if not path.is_file():
+            continue
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
+def job_counts_as_launcher_complete(
+    output_dir: Path,
+    *,
+    target_episodes: Optional[int] = None,
+) -> bool:
+    """True only when results.json reflects a full successful run (not salvage/partial)."""
+    payload = read_job_results_json(output_dir)
+    if not payload:
+        return False
+    if str(payload.get("status") or "").lower() == "completed_with_salvage":
+        return False
+
+    hyperparameters = dict(payload.get("hyperparameters") or {})
+    if hyperparameters.get("run_completed_with_salvage") or hyperparameters.get("run_error"):
+        return False
+
+    target = target_episodes
+    if target is None:
+        job_resume = dict(hyperparameters.get("job_resume") or {})
+        target = job_resume.get("target_episodes")
+    if target is None:
+        target = hyperparameters.get("episodes")
+
+    recorded = payload.get("episodes_recorded")
+    if recorded is None:
+        summaries = payload.get("episode_summaries")
+        if isinstance(summaries, list):
+            recorded = len(summaries)
+
+    if target is not None and recorded is not None and int(recorded) < int(target):
+        return False
+
+    audit = dict(payload.get("artifact_audit") or {})
+    expected = audit.get("expected_episodes")
+    if expected is not None and recorded is not None and int(recorded) < int(expected):
+        return False
+
+    return True
+
+
 def read_live_progress_json(output_dir: Path) -> Optional[Dict[str, object]]:
     path = Path(output_dir) / "live_progress.json"
     if not path.is_file():
@@ -1120,7 +1173,7 @@ def discover_job_resume_plan(
         "note": "fresh_start",
     }
 
-    if not allow_resume or job_has_final_results(output_dir):
+    if not allow_resume or job_counts_as_launcher_complete(output_dir, target_episodes=target_episodes):
         plan["note"] = "job_complete_or_resume_disabled"
         return plan
 

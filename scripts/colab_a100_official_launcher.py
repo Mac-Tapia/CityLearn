@@ -636,9 +636,11 @@ def command_for_job(job: Mapping[str, object]) -> List[str]:
     return [sys.executable, "-B", str(job["script"])] + [str(item) for item in job["args"]]
 
 
-def completed_artifact_exists(root: Path, job_output_dir: str) -> bool:
+def completed_artifact_exists(root: Path, job_output_dir: str, *, target_episodes: Optional[int] = None) -> bool:
+    from citylearn_v3_training_common import job_counts_as_launcher_complete, resolve_status_path
+
     run_path = resolve_status_path(root, job_output_dir)
-    return (run_path / "data" / "results.json").exists() or (run_path / "results.json").exists()
+    return job_counts_as_launcher_complete(run_path, target_episodes=target_episodes)
 
 
 def is_sigkill_exit(exit_code: int) -> bool:
@@ -898,7 +900,9 @@ def run_one_job(
     job_run_dir = run_dir(output_root, name, scenario, args.seed)
     job_output_dir = path_for_status(root, job_run_dir)
 
-    if args.skip_completed and completed_artifact_exists(root, job_output_dir):
+    if args.skip_completed and completed_artifact_exists(
+        root, job_output_dir, target_episodes=int(args.episodes)
+    ):
         record = {
             "name": name,
             "scenario": scenario,

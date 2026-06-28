@@ -20,6 +20,7 @@ from citylearn_v3_training_common import (
     ensure_project_paths,
     ensure_artifact_layout,
     install_finite_optimizer_step_guard,
+    job_counts_as_launcher_complete,
     resolve_output_dir,
     discover_job_resume_plan,
     write_job_resume_manifest,
@@ -96,6 +97,7 @@ def main() -> int:
     output_dir = resolve_output_dir(args.output_dir, "maac", args.scenario, args.seed)
     artifact_dirs = ensure_artifact_layout(output_dir)
 
+    target_episodes = int(args.episodes)
     resume_plan = discover_job_resume_plan(
         output_dir,
         algorithm="maac",
@@ -168,6 +170,7 @@ def main() -> int:
     if resume_plan.get("active") and resume_plan.get("maac_checkpoint"):
         model = AttentionSAC.init_from_save(str(resume_plan["maac_checkpoint"]), load_critic=True)
         print(f"[maac] Loaded {resume_plan['maac_checkpoint']}", flush=True)
+        model.prep_training(device="gpu" if use_gpu else "cpu")
     finite_optimizer_guard = install_finite_optimizer_step_guard(
         [
             {
@@ -229,9 +232,11 @@ def main() -> int:
         "finite_optimizer_step_guard": finite_optimizer_guard,
         "job_resume": resume_plan,
         "maac_start_episode": maac_start_episode,
+        "target_episodes": target_episodes,
     }
     heartbeat_stop = None
     heartbeat_thread = None
+    run_error: BaseException | None = None
     try:
         heartbeat_stop, heartbeat_thread = start_live_progress_heartbeat(
             env.adapter,
@@ -242,7 +247,6 @@ def main() -> int:
         )
         # Per-episode checkpoints already persist progress; additionally salvage and
         # write artifacts on any failure so a late crash never discards real progress.
-        run_error: BaseException | None = None
         ckpt_interval_s = int(getattr(args, "checkpoint_interval_seconds", 0) or 0)
         last_ckpt_time = time.monotonic()
         latest_ckpt_path = artifact_dirs["checkpoints"] / "checkpoint_latest.pt"
@@ -280,7 +284,7 @@ def main() -> int:
                         try:
                             model.prep_rollouts(device="cpu")
                             model.save(latest_ckpt_path)
-                            model.prep_rollouts(device="gpu" if use_gpu else "cpu")
+                            model.prep_training(device="gpu" if use_gpu else "cpu")
                             last_ckpt_time = time.monotonic()
                         except Exception as ckpt_exc:  # noqa: BLE001 - never abort training on a salvage save
                             print(f"[maac] rolling checkpoint save failed: {ckpt_exc}", flush=True)
@@ -289,6 +293,7 @@ def main() -> int:
                         break
 
                 model.save(artifact_dirs["checkpoints"] / f"checkpoint_episode_{episode + 1}.pt")
+                model.prep_training(device="gpu" if use_gpu else "cpu")
                 last_ckpt_time = time.monotonic()
         except Exception as exc:  # noqa: BLE001 - salvage on any training failure
             run_error = exc
@@ -358,6 +363,12 @@ def main() -> int:
         stop_live_progress_heartbeat(heartbeat_stop, heartbeat_thread)
         env.close()
 
+    if run_error is not None:
+        hyperparameters["run_completed_with_salvage"] = True
+        hyperparameters["run_error"] = f"{type(run_error).__name__}: {run_error}"
+    elif not job_counts_as_launcher_complete(output_dir, target_episodes=target_episodes):
+        hyperparameters["run_incomplete"] = True
+
     write_training_summary(
         output_dir,
         {
@@ -382,6 +393,10 @@ def main() -> int:
             "citylearn_v3_report": report,
         },
     )
+    if run_error is not None:
+        return 1
+    if not job_counts_as_launcher_complete(output_dir, target_episodes=target_episodes):
+        return 1
     return 0
 
 
