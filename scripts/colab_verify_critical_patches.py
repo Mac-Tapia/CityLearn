@@ -35,6 +35,8 @@ def verify_critical_patches(repo: Path) -> List[str]:
     maac_src = maac_sac.read_text(encoding="utf-8")
     if "_sync_optimizer_state" not in maac_src:
         problems.append("MAAC sin _sync_optimizer_state (fix cuda/cpu Adam)")
+    if "map_location" not in maac_src or "weights_only=False" not in maac_src:
+        problems.append("MAAC init_from_save sin map_location/weights_only=False (PyTorch 2.6+)")
 
     common_src = train_common.read_text(encoding="utf-8")
     if "def job_counts_as_launcher_complete" not in common_src:
@@ -47,6 +49,8 @@ def verify_critical_patches(repo: Path) -> List[str]:
     maac_train_src = train_maac.read_text(encoding="utf-8")
     if "job_counts_as_launcher_complete" not in maac_train_src:
         problems.append("train_citylearn_v3_maac sin guardia de corrida completa")
+    if "_save_maac_checkpoint" not in maac_train_src:
+        problems.append("train_citylearn_v3_maac sin guard de checkpoint atomico (Drive FUSE)")
 
     launcher_src = launcher.read_text(encoding="utf-8")
     if "def completed_artifact_exists" not in launcher_src:

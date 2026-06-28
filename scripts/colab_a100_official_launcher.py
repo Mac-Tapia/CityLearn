@@ -681,6 +681,49 @@ def is_oom_failure(*paths: Path) -> bool:
     return False
 
 
+def is_training_failure(*paths: Path) -> bool:
+    """Detect salvaged training crashes (CUDA/device, Drive I/O, Python exceptions)."""
+    needles = (
+        "training loop raised",
+        "traceback (most recent call last)",
+        "runtimeerror",
+        "same device",
+        "expected all tensors to be on the same device",
+        "cudnn",
+        "input/output error",
+        "oserror",
+        "transport endpoint is not connected",
+        "stale file handle",
+        "remote i/o error",
+        "salvaging trained model",
+    )
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore").lower()
+        except Exception:
+            continue
+        if any(needle in text for needle in needles):
+            return True
+    return False
+
+
+def is_retriable_job_failure(
+    name: str,
+    exit_code: int,
+    log_path: Path,
+    err_path: Path,
+) -> bool:
+    if int(exit_code) == 0:
+        return False
+    if is_sigkill_exit(exit_code) or is_oom_failure(log_path, err_path):
+        return True
+    if str(name).lower() in {"maac", "matd3", "masac"} and int(exit_code) == 1:
+        return is_training_failure(log_path, err_path)
+    return False
+
+
 def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]:
     retry = copy.deepcopy(dict(job))
     name = str(retry["name"])
@@ -706,9 +749,9 @@ def make_oom_retry_job(job: Mapping[str, object]) -> Optional[Dict[str, object]]
     elif name == "maac":
         cur_frac = float(arg_value(args, "--cuda-memory-fraction", "0.14") or 0.14)
         args = replace_arg(args, "--batch-size", "512")
-        args = replace_arg(args, "--buffer-length", "750000")
+        args = replace_arg(args, "--buffer-length", "450000")
         args = replace_arg(args, "--hidden-size", "512")
-        args = replace_arg(args, "--num-updates", "12")
+        args = replace_arg(args, "--num-updates", "8")
         args = replace_arg(args, "--steps-per-update", "100")
         args = replace_arg(args, "--cuda-memory-fraction", str(max(0.08, round(cur_frac * 0.7, 3))))
     elif name == "happo":
@@ -1021,8 +1064,9 @@ def run_job_with_retry(
     last_record = manifest["jobs"][-1]
     log_path = Path(str(last_record.get("log") or ""))
     err_path = Path(str(last_record.get("stderr_log") or ""))
-    oom_like = is_sigkill_exit(exit_code) or is_oom_failure(log_path, err_path)
-    if not args.oom_retry or not oom_like:
+    name = str(job.get("name") or "")
+    retriable = is_retriable_job_failure(name, exit_code, log_path, err_path)
+    if not args.oom_retry or not retriable:
         if is_sigkill_exit(exit_code) and args.oom_retry:
             print(
                 f"[launcher] {job['name'].upper()}/{job['scenario']} exit={exit_code} "
@@ -1035,7 +1079,10 @@ def run_job_with_retry(
     if retry_job is None:
         return exit_code
 
-    reason = "SIGKILL/OOM-killer" if is_sigkill_exit(exit_code) else "OOM in logs"
+    if is_sigkill_exit(exit_code) or is_oom_failure(log_path, err_path):
+        reason = "SIGKILL/OOM-killer" if is_sigkill_exit(exit_code) else "OOM in logs"
+    else:
+        reason = "training crash in logs"
     print(
         f"{reason} for {job['name'].upper()}/{job['scenario']}; "
         "retrying with conservative settings.",
@@ -1797,8 +1844,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="Train every 100 env steps (v4 winning run).")
     parser.add_argument("--maac-batch-size", default=768, type=int,
                         help="MAAC batch (Tensor Cores).")
-    parser.add_argument("--maac-buffer-length", default=1000000, type=int,
-                        help="1M steps ~7 GiB RAM/job; 3x21 GiB << 167 GiB.")
+    parser.add_argument("--maac-buffer-length", default=450000, type=int,
+                        help="MAAC replay steps (capped to episodes*8760 at train time; ~3 GiB/job).")
     parser.add_argument("--maac-hidden-size", default=768, type=int,
                         help="MAAC attention critic hidden 768 (stable 6-parallel phase 2).")
     parser.add_argument("--maac-steps-per-update", default=50, type=int,

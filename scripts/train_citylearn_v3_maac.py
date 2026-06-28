@@ -77,6 +77,40 @@ def parse_args():
     return parser.parse_args()
 
 
+def _effective_maac_buffer_length(
+    buffer_length: int,
+    *,
+    target_episodes: int,
+    episode_time_steps: int,
+) -> int:
+    """Cap replay RAM to what a full run needs (50 ep x 8760 = 438k steps)."""
+    buffer_length = max(256, int(buffer_length))
+    target_episodes = max(1, int(target_episodes))
+    episode_time_steps = max(1, int(episode_time_steps))
+    run_steps = target_episodes * episode_time_steps
+    return min(buffer_length, run_steps + episode_time_steps)
+
+
+def _save_maac_checkpoint(model, path, *, use_gpu: bool) -> None:
+    """Atomic checkpoint write; survives flaky Drive FUSE on Colab."""
+    from pathlib import Path as _Path
+
+    dest = _Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    staging = dest.with_suffix(dest.suffix + ".tmp")
+    if staging.exists():
+        staging.unlink()
+    try:
+        model.save(staging)
+        staging.replace(dest)
+    except Exception:
+        if staging.exists():
+            staging.unlink(missing_ok=True)
+        raise
+    finally:
+        model.prep_rollouts(device="gpu" if use_gpu else "cpu")
+
+
 def main() -> int:
     args = parse_args()
     ensure_project_paths()
@@ -167,6 +201,19 @@ def main() -> int:
         attend_heads=args.attend_heads,
         reward_scale=args.reward_scale,
     )
+    effective_buffer_length = _effective_maac_buffer_length(
+        args.buffer_length,
+        target_episodes=target_episodes,
+        episode_time_steps=args.episode_time_steps,
+    )
+    if effective_buffer_length != int(args.buffer_length):
+        print(
+            f"[maac] buffer-length capped {args.buffer_length} -> {effective_buffer_length} "
+            f"(target {target_episodes} ep x {args.episode_time_steps} steps)",
+            flush=True,
+        )
+        args.buffer_length = effective_buffer_length
+
     if resume_plan.get("active") and resume_plan.get("maac_checkpoint"):
         model = AttentionSAC.init_from_save(str(resume_plan["maac_checkpoint"]), load_critic=True)
         print(f"[maac] Loaded {resume_plan['maac_checkpoint']}", flush=True)
@@ -282,9 +329,7 @@ def main() -> int:
 
                     if ckpt_interval_s > 0 and (time.monotonic() - last_ckpt_time) >= ckpt_interval_s:
                         try:
-                            model.prep_rollouts(device="cpu")
-                            model.save(latest_ckpt_path)
-                            model.prep_training(device="gpu" if use_gpu else "cpu")
+                            _save_maac_checkpoint(model, latest_ckpt_path, use_gpu=use_gpu)
                             last_ckpt_time = time.monotonic()
                         except Exception as ckpt_exc:  # noqa: BLE001 - never abort training on a salvage save
                             print(f"[maac] rolling checkpoint save failed: {ckpt_exc}", flush=True)
@@ -292,8 +337,17 @@ def main() -> int:
                     if np.all(dones):
                         break
 
-                model.save(artifact_dirs["checkpoints"] / f"checkpoint_episode_{episode + 1}.pt")
-                model.prep_training(device="gpu" if use_gpu else "cpu")
+                try:
+                    _save_maac_checkpoint(
+                        model,
+                        artifact_dirs["checkpoints"] / f"checkpoint_episode_{episode + 1}.pt",
+                        use_gpu=use_gpu,
+                    )
+                except Exception as ckpt_exc:  # noqa: BLE001 - Drive FUSE must not abort the run
+                    print(
+                        f"[maac] episode checkpoint save failed (ep {episode + 1}): {ckpt_exc}",
+                        flush=True,
+                    )
                 last_ckpt_time = time.monotonic()
         except Exception as exc:  # noqa: BLE001 - salvage on any training failure
             run_error = exc
@@ -320,7 +374,7 @@ def main() -> int:
         except Exception:
             pass
         try:
-            model.save(artifact_dirs["checkpoints"] / "model.pt")
+            _save_maac_checkpoint(model, artifact_dirs["checkpoints"] / "model.pt", use_gpu=False)
         except Exception as exc:  # noqa: BLE001 - never let checkpointing abort finalization
             print(f"[maac] final model.save failed: {exc}", flush=True)
         if run_error is not None:
