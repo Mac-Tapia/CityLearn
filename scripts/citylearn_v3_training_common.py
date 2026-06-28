@@ -1081,6 +1081,54 @@ def infer_completed_episodes_from_timeseries_global_step(
     return max(0, int(max_gs // denom))
 
 
+def infer_trustable_completed_episodes(
+    output_dir: Path,
+    *,
+    algorithm: str,
+    episode_time_steps: int,
+    rollout_threads: int = 1,
+    live_progress: Optional[Mapping[str, object]] = None,
+) -> int:
+    """Episode count safe for skip/resume decisions (never inflated by CSV row heuristics).
+
+    HAPPO with n_rollout_threads>1 records fewer than episode_time_steps rows per
+    training episode in timeseries.csv; the legacy CSV episode-index counter therefore
+    OVER-estimates completion and must not be used for HAPPO resume/skip. global_step
+    is the authoritative counter for parallel-rollout backends.
+    """
+    output_dir = Path(output_dir)
+    algo = algorithm.lower()
+    rollout_threads = max(1, int(rollout_threads))
+    episode_time_steps = max(1, int(episode_time_steps))
+
+    completed_gs = infer_completed_episodes_from_timeseries_global_step(
+        output_dir,
+        episode_time_steps=episode_time_steps,
+        rollout_threads=rollout_threads,
+    )
+    completed_live = 0
+    if live_progress is None:
+        live_progress = read_live_progress_json(output_dir)
+    if live_progress:
+        completed_live = infer_completed_episodes_from_live_progress(
+            live_progress,
+            episode_time_steps=episode_time_steps,
+        )
+
+    if algo == "maac":
+        _, maac_ep = find_maac_resume_checkpoint(output_dir / CHECKPOINT_DIR_NAME)
+        return max(completed_gs, completed_live, int(maac_ep))
+
+    if algo == "happo" or rollout_threads > 1:
+        return max(completed_gs, completed_live)
+
+    completed_csv = infer_completed_episodes_from_timeseries_csv(
+        output_dir / DATA_DIR_NAME,
+        episode_time_steps=episode_time_steps,
+    )
+    return max(completed_gs, completed_live, completed_csv)
+
+
 def _checkpoint_exists_for_algorithm(output_dir: Path, algorithm: str) -> bool:
     algo = algorithm.lower()
     checkpoints_dir = Path(output_dir) / CHECKPOINT_DIR_NAME
@@ -1482,25 +1530,22 @@ def discover_job_resume_plan(
         return plan
 
     live = read_live_progress_json(output_dir)
-    completed_live = 0
-    if live:
-        completed_live = infer_completed_episodes_from_live_progress(
-            live,
-            episode_time_steps=episode_time_steps,
-        )
-    # timeseries.csv is the append-only source of truth for finished episodes and
-    # survives a buggy/old run resetting live_progress.json to ep1. Trust the larger
-    # of the two so resume never silently discards already-trained episodes.
-    completed_csv = infer_completed_episodes_from_timeseries_csv(
-        output_dir / DATA_DIR_NAME,
+    completed = infer_trustable_completed_episodes(
+        output_dir,
+        algorithm=algorithm,
         episode_time_steps=episode_time_steps,
+        rollout_threads=rollout_threads,
+        live_progress=live,
     )
     completed_gs = infer_completed_episodes_from_timeseries_global_step(
         output_dir,
         episode_time_steps=episode_time_steps,
         rollout_threads=rollout_threads,
     )
-    completed = max(completed_live, completed_csv, completed_gs)
+    completed_csv = infer_completed_episodes_from_timeseries_csv(
+        output_dir / DATA_DIR_NAME,
+        episode_time_steps=episode_time_steps,
+    )
 
     algo = algorithm.lower()
     model_dir: Optional[Path] = None
@@ -1531,7 +1576,23 @@ def discover_job_resume_plan(
 
     remaining = max(0, target_episodes - completed)
     if remaining <= 0:
-        plan["note"] = "episodes_complete_missing_results_json"
+        if _artifact_proves_job_complete(
+            output_dir,
+            algorithm=algo,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            rollout_threads=rollout_threads,
+        ):
+            plan["note"] = "episodes_complete_missing_results_json"
+            plan["completed_episodes"] = completed
+            return plan
+        # CSV episode-index heuristics can falsely claim completion for HAPPO; if
+        # trustable counters still fall short, continue as an active resume instead.
+        completed = max(completed_gs, completed)
+        remaining = max(0, target_episodes - completed)
+
+    if remaining <= 0:
+        plan["note"] = "job_complete_or_resume_disabled"
         plan["completed_episodes"] = completed
         return plan
 
@@ -1545,7 +1606,7 @@ def discover_job_resume_plan(
             "maac_checkpoint": str(maac_ckpt) if maac_ckpt else None,
             "maac_start_episode": maac_start,
             "note": "resume_from_checkpoint",
-            "completed_episodes_live": completed_live,
+            "completed_episodes_global_step": completed_gs,
             "completed_episodes_csv": completed_csv,
             "live_progress_episode": (live or {}).get("episode"),
             "live_progress_global_step": (live or {}).get("global_step"),
