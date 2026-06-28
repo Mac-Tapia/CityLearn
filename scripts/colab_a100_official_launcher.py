@@ -916,8 +916,26 @@ def run_one_job(
             "attempt": attempt,
         }
         append_job_record(manifest, status_path, record)
-        print(f"SKIP {name.upper()}/{scenario}: existing results.json", flush=True)
+        print(f"SKIP {name.upper()}/{scenario}: existing results.json + job completo", flush=True)
         return 0
+
+    if args.skip_completed:
+        from citylearn_v3_training_common import (
+            job_has_final_results,
+            job_launcher_completion_blockers,
+            read_job_launcher_complete_marker,
+        )
+
+        run_path = resolve_status_path(root, job_output_dir)
+        if job_has_final_results(run_path) or read_job_launcher_complete_marker(run_path):
+            blockers = job_launcher_completion_blockers(
+                run_path, target_episodes=int(args.episodes)
+            )
+            if blockers:
+                print(
+                    f"RUN {name.upper()}/{scenario}: not skipping — {'; '.join(blockers)}",
+                    flush=True,
+                )
 
     label = f"{scenario}_{name}"
     suffix = "" if attempt == 0 else f"_retry{attempt}"
