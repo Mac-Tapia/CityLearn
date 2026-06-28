@@ -637,7 +637,7 @@ def command_for_job(job: Mapping[str, object]) -> List[str]:
 
 
 def completed_artifact_exists(root: Path, job_output_dir: str, *, target_episodes: Optional[int] = None) -> bool:
-    from citylearn_v3_training_common import job_counts_as_launcher_complete, resolve_status_path
+    from citylearn_v3_training_common import job_counts_as_launcher_complete
 
     run_path = resolve_status_path(root, job_output_dir)
     return job_counts_as_launcher_complete(run_path, target_episodes=target_episodes)
@@ -1417,12 +1417,18 @@ def _run_backfill_schedule(
                     )
                 if ec != 0:
                     overall_rc = ec
-                if str(done_job.get("name", "")) in TWO_PHASE_P1_HM:
+                if ec == 0 and str(done_job.get("name", "")) in TWO_PHASE_P1_HM:
                     phase1_completed += 1
                     print(
                         f"[launcher] phase-1 DONE {str(done_job.get('name', '?')).upper()}/"
                         f"{done_job.get('scenario', '?')} "
                         f"({phase1_completed}/{phase1_total}) — opens one phase-2 slot",
+                        flush=True,
+                    )
+                elif ec != 0 and str(done_job.get("name", "")) in TWO_PHASE_P1_HM:
+                    print(
+                        f"[launcher] phase-1 FAIL {str(done_job.get('name', '?')).upper()}/"
+                        f"{done_job.get('scenario', '?')} exit={ec} — no phase-2 slot",
                         flush=True,
                     )
             # Admit phase-2 jobs per the one-for-one rule after handling completions.
