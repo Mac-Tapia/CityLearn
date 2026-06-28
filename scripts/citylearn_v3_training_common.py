@@ -1176,8 +1176,14 @@ def job_launcher_completion_blockers(
     output_dir: Path,
     *,
     target_episodes: Optional[int] = None,
+    rollout_threads: Optional[int] = None,
 ) -> List[str]:
-    """Human-readable reasons why --skip-completed would NOT omit this job."""
+    """Human-readable reasons why --skip-completed would NOT omit this job.
+
+    ``rollout_threads`` overrides the value inferred from results.json so the preview
+    (cell 2.1b / 7.1) and the resume plan interpret ``global_step`` with the same
+    denominator; otherwise the diagnostic episode count could disagree with the plan.
+    """
     output_dir = Path(output_dir)
     blockers: List[str] = []
     marker = read_job_launcher_complete_marker(output_dir)
@@ -1218,7 +1224,11 @@ def job_launcher_completion_blockers(
         or _as_int(hyperparameters.get("episode_time_steps"))
         or 8760
     )
-    rollout_threads = _infer_rollout_threads(payload)
+    rollout_threads = (
+        int(rollout_threads)
+        if rollout_threads is not None and int(rollout_threads) > 0
+        else _infer_rollout_threads(payload)
+    )
 
     if algo == "maac" and target is not None:
         max_ckpt = max_maac_checkpoint_episode(output_dir)
@@ -1655,7 +1665,11 @@ def preview_job_launcher_decision(
 
     skip = job_counts_as_launcher_complete(output_dir, target_episodes=target_episodes)
     blockers: List[str] = (
-        [] if skip else job_launcher_completion_blockers(output_dir, target_episodes=target_episodes)
+        []
+        if skip
+        else job_launcher_completion_blockers(
+            output_dir, target_episodes=target_episodes, rollout_threads=roll
+        )
     )
     plan = discover_job_resume_plan(
         output_dir,
