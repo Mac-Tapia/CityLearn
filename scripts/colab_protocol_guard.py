@@ -82,6 +82,29 @@ def validate_monitor_source(text: str, *, path: str = "") -> None:
         raise RuntimeError("\n".join(lines))
 
 
+def _verify_critical_patches(repo: Path) -> None:
+    """Load patch verifier from synced repo tree (immune to stale Colab notebook cells)."""
+    import importlib.util
+
+    patch_script = repo / "CityLearn/scripts/colab_verify_critical_patches.py"
+    if not patch_script.is_file():
+        raise FileNotFoundError(f"Falta verificador de parches: {patch_script}")
+
+    spec = importlib.util.spec_from_file_location(
+        "colab_verify_critical_patches", patch_script
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"No se pudo cargar {patch_script}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    problems = mod.verify_critical_patches(repo)
+    if problems:
+        raise RuntimeError(
+            "Parches críticos ausentes tras sync (re-ejecuta celda 1.2):\n  - "
+            + "\n  - ".join(problems)
+        )
+
+
 def validate_repo(repo: Path) -> None:
     repo = repo.resolve()
     launcher = repo / "CityLearn/scripts/colab_a100_official_launcher.py"
@@ -92,6 +115,7 @@ def validate_repo(repo: Path) -> None:
         assert_not_legacy_path(script, role=script.name)
     validate_launcher_source(launcher.read_text(encoding="utf-8"), path=str(launcher))
     validate_monitor_source(monitor.read_text(encoding="utf-8"), path=str(monitor))
+    _verify_critical_patches(repo)
 
 
 def quarantine_legacy_drive_scripts(*, dry_run: bool = False) -> List[str]:
