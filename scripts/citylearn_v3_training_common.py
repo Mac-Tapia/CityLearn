@@ -967,6 +967,72 @@ def read_job_results_json(output_dir: Path) -> Optional[Dict[str, object]]:
     return None
 
 
+def _resolve_job_target_episodes(
+    payload: Mapping[str, object],
+    *,
+    target_episodes: Optional[int] = None,
+) -> Optional[int]:
+    hyperparameters = dict(payload.get("hyperparameters") or {})
+    target = target_episodes
+    if target is None:
+        job_resume = dict(hyperparameters.get("job_resume") or {})
+        target = job_resume.get("target_episodes")
+    if target is None:
+        target = hyperparameters.get("target_episodes")
+    if target is None:
+        target = hyperparameters.get("episodes")
+    return _as_int(target)
+
+
+def _recorded_episodes_from_results(payload: Mapping[str, object]) -> Optional[int]:
+    recorded = _as_int(payload.get("episodes_recorded"))
+    if recorded is not None:
+        return recorded
+    summaries = payload.get("episode_summaries")
+    if isinstance(summaries, list):
+        return len(summaries)
+    return None
+
+
+def _verified_completed_episodes(
+    output_dir: Path,
+    payload: Mapping[str, object],
+    *,
+    episode_time_steps: int,
+) -> int:
+    """Completed episodes corroborated by append-only artifacts, not results.json claims."""
+
+    output_dir = Path(output_dir)
+    hyperparameters = dict(payload.get("hyperparameters") or {})
+    episode_time_steps = max(1, int(episode_time_steps))
+    verified = 0
+
+    verified = max(
+        verified,
+        infer_completed_episodes_from_timeseries_csv(
+            output_dir / DATA_DIR_NAME,
+            episode_time_steps=episode_time_steps,
+        ),
+    )
+
+    live = read_live_progress_json(output_dir)
+    if live:
+        verified = max(
+            verified,
+            infer_completed_episodes_from_live_progress(
+                live,
+                episode_time_steps=episode_time_steps,
+            ),
+        )
+
+    algo = str(payload.get("algorithm") or hyperparameters.get("algorithm_family") or "").lower()
+    if algo == "maac":
+        _, maac_completed = find_maac_resume_checkpoint(output_dir / CHECKPOINT_DIR_NAME)
+        verified = max(verified, int(maac_completed))
+
+    return max(0, int(verified))
+
+
 def job_counts_as_launcher_complete(
     output_dir: Path,
     *,
@@ -982,19 +1048,11 @@ def job_counts_as_launcher_complete(
     hyperparameters = dict(payload.get("hyperparameters") or {})
     if hyperparameters.get("run_completed_with_salvage") or hyperparameters.get("run_error"):
         return False
+    if hyperparameters.get("run_incomplete"):
+        return False
 
-    target = target_episodes
-    if target is None:
-        job_resume = dict(hyperparameters.get("job_resume") or {})
-        target = job_resume.get("target_episodes")
-    if target is None:
-        target = hyperparameters.get("episodes")
-
-    recorded = payload.get("episodes_recorded")
-    if recorded is None:
-        summaries = payload.get("episode_summaries")
-        if isinstance(summaries, list):
-            recorded = len(summaries)
+    target = _resolve_job_target_episodes(payload, target_episodes=target_episodes)
+    recorded = _recorded_episodes_from_results(payload)
 
     if target is not None and recorded is not None and int(recorded) < int(target):
         return False
@@ -1003,6 +1061,27 @@ def job_counts_as_launcher_complete(
     expected = audit.get("expected_episodes")
     if expected is not None and recorded is not None and int(recorded) < int(expected):
         return False
+
+    episode_time_steps = (
+        _as_int(payload.get("episode_time_steps"))
+        or _as_int(hyperparameters.get("episode_time_steps"))
+        or 8760
+    )
+    verified = _verified_completed_episodes(
+        output_dir,
+        payload,
+        episode_time_steps=int(episode_time_steps),
+    )
+
+    if target is not None:
+        # MAAC can write a results.json whose episode_summaries are inflated by the
+        # CityLearn adapter while only N checkpoint_episode_*.pt files exist. Never
+        # treat that as launcher-complete unless verified artifacts back the claim.
+        if verified > 0 and verified < int(target):
+            return False
+        algo = str(payload.get("algorithm") or "").lower()
+        if algo == "maac" and verified < int(target):
+            return False
 
     return True
 
