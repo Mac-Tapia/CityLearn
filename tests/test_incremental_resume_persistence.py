@@ -312,6 +312,40 @@ def test_completed_from_timeseries_csv_empty(tmp_path):
     ) == 0
 
 
+def test_preload_dedups_polluted_timeseries(job_dir):
+    """A buggy run can append duplicate low-episode rows; preload must dedup them.
+
+    After preload the kept set must have exactly episode_time_steps rows per completed
+    episode (one row per (episode, episode_step)), not duplicated rows.
+    """
+    root, data, live = job_dir
+    ts_path = data / "timeseries.csv"
+    ep_steps = 8760
+    rows = []
+    for ep in range(5):
+        rows.extend(_episode_rows(ep, ep_steps))
+    # Pollute: duplicate episode 0 + episode 1 appended again (as a buggy resume would).
+    rows.extend(_episode_rows(0, ep_steps))
+    rows.extend(_episode_rows(1, ep_steps))
+    common.write_csv(ts_path, [{**r, "reward_mean": -0.5} for r in rows])
+
+    adapter = common.CityLearnV3BackendAdapter(
+        scenario="E1",
+        seed=0,
+        episode_time_steps=ep_steps,
+        algorithm="HAPPO",
+        live_progress_path=str(live),
+        resume_completed_episodes=5,
+    )
+    # Exactly 5 clean episodes, no duplicates.
+    assert len(adapter.timeseries_records) == 5 * ep_steps
+    per_ep = {}
+    for r in adapter.timeseries_records:
+        per_ep[int(r["episode"])] = per_ep.get(int(r["episode"]), 0) + 1
+    assert per_ep == {0: ep_steps, 1: ep_steps, 2: ep_steps, 3: ep_steps, 4: ep_steps}
+    assert adapter.global_step == 5 * ep_steps
+
+
 def test_discover_prefers_csv_when_live_progress_reset(tmp_path):
     """Recovery path: a buggy run reset live_progress to ep1 but timeseries.csv has 18.
 

@@ -685,6 +685,26 @@ def read_csv_rows(path: Path) -> List[Dict[str, object]]:
         return []
 
 
+def _dedup_rows_keep_first(
+    rows: Sequence[Mapping[str, object]],
+    keys: Sequence[str],
+) -> List[Dict[str, object]]:
+    """Drop duplicate rows sharing the same `keys`, keeping the FIRST occurrence.
+
+    Used on resume to clean an incremental CSV that a buggy/old run polluted with
+    duplicate (episode, step[, agent]) rows, guaranteeing one row per key in file order.
+    """
+    seen: set = set()
+    out: List[Dict[str, object]] = []
+    for row in rows:
+        signature = tuple(str(row.get(k)) for k in keys)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        out.append(dict(row))
+    return out
+
+
 def _append_csv_rows_stable_schema(
     path: Path,
     rows: Sequence[Mapping[str, object]],
@@ -3350,9 +3370,14 @@ class CityLearnV3BackendAdapter:
 
         episode_length = max(int(self.episode_time_steps), 1)
 
-        # timeseries: keep only fully-completed episodes (episode < completed).
+        # timeseries: keep only fully-completed episodes (episode < completed) and
+        # dedup by (episode, episode_step) keeping the first occurrence, so a buggy
+        # prior run that appended duplicate low-episode rows cannot corrupt integrity.
         ts_rows = read_csv_rows(self._incremental_ts_path) if self._incremental_ts_path else []
-        kept_ts = [r for r in ts_rows if (_as_int(r.get("episode")) or 0) < completed]
+        kept_ts = _dedup_rows_keep_first(
+            [r for r in ts_rows if (_as_int(r.get("episode")) or 0) < completed],
+            ("episode", "episode_step"),
+        )
         if kept_ts:
             self.timeseries_records = list(kept_ts)
             self._ts_fieldnames = sorted({k for r in kept_ts for k in r.keys()})
@@ -3364,9 +3389,12 @@ class CityLearnV3BackendAdapter:
                     self._update_reward_accumulators(int(ep), row)
             summary["timeseries_rows"] = len(kept_ts)
 
-        # trace: same completed-episode filter.
+        # trace: same completed-episode filter + dedup (per agent within a step).
         trace_rows = read_csv_rows(self._incremental_trace_path) if self._incremental_trace_path else []
-        kept_trace = [r for r in trace_rows if (_as_int(r.get("episode")) or 0) < completed]
+        kept_trace = _dedup_rows_keep_first(
+            [r for r in trace_rows if (_as_int(r.get("episode")) or 0) < completed],
+            ("episode", "episode_step", "agent"),
+        )
         if kept_trace:
             self.trace_records = list(kept_trace)
             self._trace_fieldnames = sorted({k for r in kept_trace for k in r.keys()})
