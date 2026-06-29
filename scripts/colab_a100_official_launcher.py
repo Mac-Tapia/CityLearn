@@ -14,6 +14,7 @@ import json
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -51,6 +52,96 @@ _MANIFEST_LOCK = threading.Lock()
 # threads. This lock + shared timestamp lets exactly one thread print per interval.
 _MONITOR_LOCK = threading.Lock()
 _LAST_MONITOR_TS = 0.0
+
+# Singleton guard: a second launcher on the same OUTPUT_ROOT (e.g. re-running the
+# notebook launch cell, or an orphan process from a disconnected session) would
+# re-admit jobs and clobber a job that is mid-resume — observed as MATD3 dropping
+# from ep8 back to ep1 and overwriting checkpoints. A heartbeat lock file lets a
+# fresh launcher detect a live one and refuse to start (unless --force-unlock).
+LAUNCHER_LOCK_NAME = "official_full_status.launcher.lock"
+LAUNCHER_LOCK_STALE_AFTER_S = 90.0
+LAUNCHER_LOCK_HEARTBEAT_S = 20.0
+
+
+class LauncherSingletonLock:
+    """Heartbeat lock so only one launcher owns an OUTPUT_ROOT at a time."""
+
+    def __init__(
+        self,
+        lock_path: Path,
+        *,
+        stale_after_s: float = LAUNCHER_LOCK_STALE_AFTER_S,
+        heartbeat_s: float = LAUNCHER_LOCK_HEARTBEAT_S,
+    ) -> None:
+        self.lock_path = Path(lock_path)
+        self.stale_after_s = float(stale_after_s)
+        self.heartbeat_s = float(heartbeat_s)
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._owned = False
+
+    def _payload(self) -> Dict[str, object]:
+        now = time.time()
+        return {
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "started_at": utc_now(),
+            "heartbeat": now,
+            "heartbeat_iso": utc_now(),
+        }
+
+    def _read(self) -> Optional[Mapping[str, object]]:
+        try:
+            return json.loads(self.lock_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _age_seconds(data: Mapping[str, object]) -> Optional[float]:
+        try:
+            return max(0.0, time.time() - float(data.get("heartbeat")))
+        except Exception:
+            return None
+
+    def _write(self) -> None:
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(self.lock_path, self._payload())
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop.wait(self.heartbeat_s):
+            try:
+                self._write()
+            except Exception:
+                pass
+
+    def acquire(self, *, force: bool = False) -> Optional[Mapping[str, object]]:
+        """Take the lock. Returns None on success, else the live owner's payload."""
+        existing = self._read()
+        if existing and not force:
+            age = self._age_seconds(existing)
+            if age is not None and age < self.stale_after_s:
+                return existing
+        self._write()
+        self._owned = True
+        self._thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._thread.start()
+        return None
+
+    def release(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        if self._owned:
+            try:
+                data = self._read()
+                if data and int(data.get("pid", -1)) == os.getpid():
+                    self.lock_path.unlink()
+            except Exception:
+                pass
+            self._owned = False
+
+
 DEFAULT_SCHEMA = "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json"
 DEFAULT_OUTPUT_ROOT = "outputs/colab_madrl_a100_official"
 REFERENCE_SOURCES = [
@@ -1791,6 +1882,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--smoke-imports", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-completed", action="store_true")
+    parser.add_argument(
+        "--force-unlock",
+        action="store_true",
+        help="Override the singleton lock and start anyway. Only use when you are "
+             "certain no other launcher is running on this OUTPUT_ROOT (the previous "
+             "launcher crashed/disconnected). Running two launchers can reset jobs to ep1.",
+    )
     parser.add_argument("--start-from-algorithm", default="happo", choices=ALGORITHMS)
     parser.add_argument("--live-monitor", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--monitor-interval", default=120, type=int)
@@ -2132,6 +2230,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     log_dir = output_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    # Singleton guard (skip for --dry-run preflight, which is harmless and short).
+    launcher_lock: Optional[LauncherSingletonLock] = None
+    if not args.dry_run:
+        launcher_lock = LauncherSingletonLock(output_root / LAUNCHER_LOCK_NAME)
+        owner = launcher_lock.acquire(force=args.force_unlock)
+        if owner is not None:
+            age = LauncherSingletonLock._age_seconds(owner)
+            age_txt = f"{age:.0f}s" if age is not None else "unknown"
+            print(
+                "[launcher] FATAL: otro launcher ya está activo sobre este OUTPUT_ROOT "
+                f"(pid={owner.get('pid')} host={owner.get('hostname')} "
+                f"iniciado={owner.get('started_at')} heartbeat hace {age_txt}).\n"
+                "[launcher] No se inicia un segundo launcher: dos launchers a la vez "
+                "pueden reiniciar jobs en curso a ep1 y pisar checkpoints.\n"
+                "[launcher] Si estás SEGURO de que el otro proceso murió "
+                "(desconexión/crash), re-ejecuta con --force-unlock.",
+                flush=True,
+            )
+            return 3
+
     schema_resolved = resolve_path(root, args.schema_path)
     if not schema_resolved.exists():
         raise FileNotFoundError(f"Schema not found: {schema_resolved}")
@@ -2200,26 +2318,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "Colab A100 launcher only supports two_phase_happo_masac."
         )
 
-    if getattr(args, "dynamic_backfill", True):
-        overall_rc = run_dynamic_backfill_jobs(
-            root=root,
-            manifest=manifest,
-            status_path=status_path,
-            jobs=jobs,
-            output_root=output_root,
-            log_dir=log_dir,
-            args=args,
-        )
-    else:
-        overall_rc = run_two_phase_happo_masac_jobs(
-            root=root,
-            manifest=manifest,
-            status_path=status_path,
-            jobs=jobs,
-            output_root=output_root,
-            log_dir=log_dir,
-            args=args,
-        )
+    try:
+        if getattr(args, "dynamic_backfill", True):
+            overall_rc = run_dynamic_backfill_jobs(
+                root=root,
+                manifest=manifest,
+                status_path=status_path,
+                jobs=jobs,
+                output_root=output_root,
+                log_dir=log_dir,
+                args=args,
+            )
+        else:
+            overall_rc = run_two_phase_happo_masac_jobs(
+                root=root,
+                manifest=manifest,
+                status_path=status_path,
+                jobs=jobs,
+                output_root=output_root,
+                log_dir=log_dir,
+                args=args,
+            )
+    finally:
+        if launcher_lock is not None:
+            launcher_lock.release()
     manifest["status"] = "completed" if overall_rc == 0 else "failed"
     manifest["completed_at"] = utc_now()
     atomic_write_json(manifest_path, manifest)
