@@ -1278,6 +1278,7 @@ def job_launcher_completion_blockers(
     *,
     target_episodes: Optional[int] = None,
     rollout_threads: Optional[int] = None,
+    output_root: Optional[Path] = None,
 ) -> List[str]:
     """Human-readable reasons why --skip-completed would NOT omit this job.
 
@@ -1290,7 +1291,9 @@ def job_launcher_completion_blockers(
     marker = read_job_launcher_complete_marker(output_dir)
     req_target = _as_int(target_episodes)
 
-    if job_counts_as_launcher_complete(output_dir, target_episodes=req_target):
+    if job_counts_as_launcher_complete(
+        output_dir, target_episodes=req_target, output_root=output_root
+    ):
         return []
 
     if marker:
@@ -1307,22 +1310,26 @@ def job_launcher_completion_blockers(
         blockers.append("no results.json")
         return blockers
 
-    if str(payload.get("status") or "").lower() == "completed_with_salvage":
-        blockers.append("results.json status=completed_with_salvage")
+    algo = _payload_algorithm(payload) or "unknown"
+    target = _resolve_job_target_episodes(payload, target_episodes=req_target)
+    recorded = _recorded_episodes_from_results(payload)
     hyperparameters = dict(payload.get("hyperparameters") or {})
-    if hyperparameters.get("run_completed_with_salvage"):
+    salvage_met_target = (
+        target is not None
+        and _payload_recorded_episodes_met_target(payload, output_dir, algo, int(target))
+    )
+
+    if str(payload.get("status") or "").lower() == "completed_with_salvage" and not salvage_met_target:
+        blockers.append("results.json status=completed_with_salvage")
+    if hyperparameters.get("run_completed_with_salvage") and not salvage_met_target:
         blockers.append("hyperparameters.run_completed_with_salvage=true")
     if hyperparameters.get("run_error"):
         blockers.append(f"hyperparameters.run_error={hyperparameters.get('run_error')!r}")
     if hyperparameters.get("run_incomplete"):
         blockers.append("hyperparameters.run_incomplete=true")
 
-    target = _resolve_job_target_episodes(payload, target_episodes=req_target)
-    recorded = _recorded_episodes_from_results(payload)
     if target is not None and recorded is not None and int(recorded) < int(target):
         blockers.append(f"episodes_recorded={recorded} < target={target}")
-
-    algo = _payload_algorithm(payload) or "unknown"
     episode_time_steps = (
         _as_int(payload.get("episode_time_steps"))
         or _as_int(hyperparameters.get("episode_time_steps"))
@@ -1389,10 +1396,226 @@ def _infer_algorithm_from_artifacts(output_dir: Path) -> str:
     return _payload_algorithm(payload) if payload else ""
 
 
+def _infer_scenario_from_run_dir(output_dir: Path) -> str:
+    """Parse ``E1`` from a run folder name like ``E1_seed_0``."""
+    name = Path(output_dir).name
+    if "_seed_" in name:
+        return name.split("_seed_", 1)[0].upper()
+    return ""
+
+
+def _max_inferred_completed_episodes(
+    output_dir: Path,
+    *,
+    algorithm: str,
+    episode_time_steps: int,
+    rollout_threads: int = 1,
+) -> int:
+    """Best grounded episode count from timeseries / live_progress (not results.json claims)."""
+    algo = str(algorithm or "").lower()
+    episode_time_steps = max(1, int(episode_time_steps))
+    inferred = infer_completed_episodes_from_timeseries_global_step(
+        output_dir,
+        episode_time_steps=episode_time_steps,
+        rollout_threads=rollout_threads,
+        algorithm=algo,
+    )
+    if algo == "happo":
+        inferred = max(
+            inferred,
+            infer_happo_verified_completed_episodes_from_timeseries(
+                Path(output_dir) / DATA_DIR_NAME,
+                episode_time_steps=episode_time_steps,
+            ),
+            _adapter_completed_episode_count_from_artifacts(output_dir),
+        )
+    elif algo == "maac":
+        inferred = max(inferred, max_maac_checkpoint_episode(output_dir))
+    return int(inferred)
+
+
+def _payload_recorded_episodes_met_target(
+    payload: Mapping[str, object],
+    output_dir: Path,
+    algorithm: str,
+    target_episodes: int,
+) -> bool:
+    """``results.json`` declares the full episode budget (salvage or clean) + checkpoints."""
+    target = _resolve_job_target_episodes(payload, target_episodes=target_episodes)
+    recorded = _recorded_episodes_from_results(payload)
+    if target is None or recorded is None:
+        return False
+    if int(recorded) < int(target):
+        return False
+    algo_key = str(algorithm or "").lower()
+    if algo_key == "maac":
+        return max_maac_checkpoint_episode(Path(output_dir)) >= int(target)
+    return _checkpoint_exists_for_algorithm(Path(output_dir), algorithm)
+
+
+def _happo_timeseries_in_final_episode_tail(
+    output_dir: Path,
+    *,
+    target_episodes: int,
+    episode_time_steps: int,
+    tail_steps: int = 3,
+) -> bool:
+    """True when timeseries reached the last env steps of the final training episode."""
+    path = Path(output_dir) / DATA_DIR_NAME / "timeseries.csv"
+    if not path.is_file():
+        return False
+    try:
+        rows = read_csv_rows(path)
+    except Exception:
+        return False
+    if not rows:
+        return False
+    max_gs = max(_as_int(row.get("global_step")) or 0 for row in rows)
+    if max_gs <= 0:
+        return False
+    target_episodes = max(1, int(target_episodes))
+    episode_time_steps = max(1, int(episode_time_steps))
+    tail_steps = max(1, int(tail_steps))
+    final_ep_start = (target_episodes - 1) * episode_time_steps
+    final_ep_tail_start = final_ep_start + episode_time_steps - tail_steps
+    final_ep_last_gs = target_episodes * episode_time_steps - 1
+    return final_ep_tail_start <= max_gs <= final_ep_last_gs
+
+
+def _happo_last_episode_flush_gap_complete(
+    output_root: Optional[Path],
+    output_dir: Path,
+    *,
+    target_episodes: int,
+    episode_time_steps: int = 8760,
+    rollout_threads: int = 1,
+) -> bool:
+    """HAPPO exited cleanly but artifacts stuck at target-1 (anti 49/50 resume loop).
+
+    Occurs when training finished and ``results.json`` is ``completed_with_salvage``, yet the
+    last env step never flushed to ``timeseries.csv`` (HAPPO rarely sets ``all_done`` on
+    step 8759). Without this guard, cell 2.1b / 7.2 re-run the same single episode forever.
+    """
+    target_episodes = max(1, int(target_episodes))
+    if not _checkpoint_exists_for_algorithm(Path(output_dir), "happo"):
+        return False
+
+    inferred = _max_inferred_completed_episodes(
+        output_dir,
+        algorithm="happo",
+        episode_time_steps=episode_time_steps,
+        rollout_threads=rollout_threads,
+    )
+    if inferred >= target_episodes:
+        return True
+    if inferred < target_episodes - 1:
+        return False
+
+    payload = read_job_results_json(output_dir) or {}
+    hyper = dict(payload.get("hyperparameters") or {})
+    recorded = int(_recorded_episodes_from_results(payload) or 0)
+    adapter = int(_adapter_completed_episode_count_from_artifacts(output_dir) or 0)
+    near_target = max(recorded, adapter) >= target_episodes - 1
+    if not near_target:
+        return False
+
+    salvage = (
+        str(payload.get("status") or "").lower() == "completed_with_salvage"
+        or bool(hyper.get("run_completed_with_salvage"))
+    )
+
+    scenario = _infer_scenario_from_run_dir(output_dir)
+    if (
+        output_root is not None
+        and scenario
+        and launcher_manifest_proves_job_complete(
+            Path(output_root),
+            Path(output_dir),
+            algorithm="happo",
+            scenario=scenario,
+            target_episodes=target_episodes,
+        )
+    ):
+        return True
+
+    if salvage and _happo_timeseries_in_final_episode_tail(
+        output_dir,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+    ):
+        return True
+
+    hp_target = _as_int(hyper.get("target_episodes")) or _as_int(hyper.get("episodes"))
+    return hp_target is not None and int(hp_target) >= target_episodes
+
+
+def _latest_launcher_job_record(
+    output_root: Path,
+    *,
+    algorithm: str,
+    scenario: str,
+) -> Optional[Dict[str, object]]:
+    """Most recent launcher job row for algo/scenario from ``official_full_status.json``."""
+    path = Path(output_root) / "official_full_status.json"
+    if not path.is_file():
+        return None
+    try:
+        status = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    algo_key = str(algorithm or "").lower()
+    scen_key = str(scenario or "").upper()
+    matches = [
+        job
+        for job in (status.get("jobs") or [])
+        if str(job.get("name", "")).lower() == algo_key
+        and str(job.get("scenario", "")).upper() == scen_key
+    ]
+    return matches[-1] if matches else None
+
+
+def launcher_manifest_proves_job_complete(
+    output_root: Path,
+    job_output_dir: Path,
+    *,
+    algorithm: str,
+    scenario: str,
+    target_episodes: int,
+) -> bool:
+    """True when the launcher already recorded a successful exit for this job.
+
+    Used by cell 2.1b / ``--skip-completed`` when Drive still has a stale
+    ``live_progress.json`` (e.g. 8460/8760) but ``official_full_status.json`` shows
+    ``exit_code=0`` and restorable checkpoints exist.
+    """
+    job = _latest_launcher_job_record(output_root, algorithm=algorithm, scenario=scenario)
+    if job is None:
+        return False
+    if job.get("skipped"):
+        return False
+    exit_code = job.get("exit_code")
+    if exit_code is None or int(exit_code) != 0:
+        return False
+    if not str(job.get("completed_at") or "").strip():
+        return False
+
+    try:
+        status = json.loads((Path(output_root) / "official_full_status.json").read_text(encoding="utf-8"))
+    except Exception:
+        status = {}
+    manifest_target = _as_int(status.get("episodes"))
+    target_episodes = max(1, int(target_episodes))
+    if manifest_target is not None and int(manifest_target) != target_episodes:
+        return False
+
+    return _checkpoint_exists_for_algorithm(Path(job_output_dir), algorithm)
+
+
 def job_counts_as_launcher_complete(
     output_dir: Path,
     *,
     target_episodes: Optional[int] = None,
+    output_root: Optional[Path] = None,
 ) -> bool:
     """True only when a job genuinely finished all target episodes.
 
@@ -1460,6 +1683,31 @@ def job_counts_as_launcher_complete(
                 )
                 return True
 
+        target_for_salvage = _resolve_job_target_episodes(payload, target_episodes=req_target)
+        salvage_payload = (
+            str(payload.get("status") or "").lower() == "completed_with_salvage"
+            or bool(hyperparameters.get("run_completed_with_salvage"))
+            or bool(hyperparameters.get("run_error"))
+        )
+        if (
+            salvage_payload
+            and target_for_salvage is not None
+            and algo
+            and _payload_recorded_episodes_met_target(
+                payload, output_dir, algo, int(target_for_salvage)
+            )
+        ):
+            recorded = int(_recorded_episodes_from_results(payload) or 0)
+            write_job_launcher_complete_marker(
+                output_dir,
+                algorithm=algo,
+                scenario=str(payload.get("scenario") or _infer_scenario_from_run_dir(output_dir)),
+                target_episodes=int(target_for_salvage),
+                episodes_completed=recorded,
+                source="results.json_salvage_met_target",
+            )
+            return True
+
     target = req_target or _resolve_job_target_episodes(payload or {}, target_episodes=req_target)
     if target is None or not algo:
         return False
@@ -1471,32 +1719,58 @@ def job_counts_as_launcher_complete(
         episode_time_steps=int(episode_time_steps),
         rollout_threads=rollout_threads,
     ):
-        inferred = infer_completed_episodes_from_timeseries_global_step(
+        inferred = _max_inferred_completed_episodes(
             output_dir,
+            algorithm=algo,
             episode_time_steps=int(episode_time_steps),
             rollout_threads=rollout_threads,
-            algorithm=algo,
         )
-        if algo == "happo":
-            inferred = max(
-                inferred,
-                infer_happo_verified_completed_episodes_from_timeseries(
-                    output_dir / DATA_DIR_NAME,
-                    episode_time_steps=int(episode_time_steps),
-                ),
-                _adapter_completed_episode_count_from_artifacts(output_dir),
-            )
-        if algo == "maac":
-            inferred = max(inferred, max_maac_checkpoint_episode(output_dir))
         write_job_launcher_complete_marker(
             output_dir,
             algorithm=algo,
-            scenario=str((payload or {}).get("scenario") or ""),
+            scenario=str((payload or {}).get("scenario") or _infer_scenario_from_run_dir(output_dir)),
             target_episodes=int(target),
             episodes_completed=max(int(inferred), int(target)),
             source="artifact_recovery",
         )
         return True
+
+    if output_root is not None and target is not None and algo:
+        scenario = str((payload or {}).get("scenario") or _infer_scenario_from_run_dir(output_dir))
+        if scenario and launcher_manifest_proves_job_complete(
+            Path(output_root),
+            output_dir,
+            algorithm=algo,
+            scenario=scenario,
+            target_episodes=int(target),
+        ):
+            write_job_launcher_complete_marker(
+                output_dir,
+                algorithm=algo,
+                scenario=scenario,
+                target_episodes=int(target),
+                episodes_completed=int(target),
+                source="launcher_manifest_exit0",
+            )
+            return True
+
+    if algo == "happo" and target is not None:
+        if _happo_last_episode_flush_gap_complete(
+            output_root,
+            output_dir,
+            target_episodes=int(target),
+            episode_time_steps=int(episode_time_steps),
+            rollout_threads=rollout_threads,
+        ):
+            write_job_launcher_complete_marker(
+                output_dir,
+                algorithm=algo,
+                scenario=str((payload or {}).get("scenario") or _infer_scenario_from_run_dir(output_dir)),
+                target_episodes=int(target),
+                episodes_completed=int(target),
+                source="happo_flush_gap_complete",
+            )
+            return True
 
     return False
 
@@ -1674,6 +1948,7 @@ def discover_job_resume_plan(
     episode_time_steps: int,
     rollout_threads: int = 1,
     allow_resume: bool = True,
+    output_root: Optional[Path] = None,
 ) -> Dict[str, object]:
     """Plan intra-job resume from Drive/local artifacts when results.json is missing."""
 
@@ -1696,7 +1971,9 @@ def discover_job_resume_plan(
         "note": "fresh_start",
     }
 
-    if not allow_resume or job_counts_as_launcher_complete(output_dir, target_episodes=target_episodes):
+    if not allow_resume or job_counts_as_launcher_complete(
+        output_dir, target_episodes=target_episodes, output_root=output_root
+    ):
         plan["note"] = "job_complete_or_resume_disabled"
         return plan
 
@@ -1757,7 +2034,9 @@ def discover_job_resume_plan(
         ):
             plan["note"] = "episodes_complete_missing_results_json"
             plan["completed_episodes"] = max(completed, target_episodes)
-            if job_counts_as_launcher_complete(output_dir, target_episodes=target_episodes):
+            if job_counts_as_launcher_complete(
+                output_dir, target_episodes=target_episodes, output_root=output_root
+            ):
                 plan["note"] = "job_complete_or_resume_disabled"
             return plan
         # CSV episode-index heuristics can falsely claim completion for HAPPO; if
@@ -1815,6 +2094,7 @@ def preview_job_launcher_decision(
     episode_time_steps: int = 8760,
     rollout_threads: Optional[int] = None,
     allow_resume: bool = True,
+    output_root: Optional[Path] = None,
 ) -> Dict[str, object]:
     """Mirror ``--skip-completed`` + intra-job resume for notebook cell 2.1b / launcher 7.2."""
     output_dir = Path(output_dir)
@@ -1827,12 +2107,19 @@ def preview_job_launcher_decision(
         fallback=rollout_threads,
     )
 
-    skip = job_counts_as_launcher_complete(output_dir, target_episodes=target_episodes)
+    skip = job_counts_as_launcher_complete(
+        output_dir,
+        target_episodes=target_episodes,
+        output_root=output_root,
+    )
     blockers: List[str] = (
         []
         if skip
         else job_launcher_completion_blockers(
-            output_dir, target_episodes=target_episodes, rollout_threads=roll
+            output_dir,
+            target_episodes=target_episodes,
+            rollout_threads=roll,
+            output_root=output_root,
         )
     )
     plan = discover_job_resume_plan(
@@ -1842,6 +2129,7 @@ def preview_job_launcher_decision(
         episode_time_steps=episode_time_steps,
         rollout_threads=roll,
         allow_resume=allow_resume,
+        output_root=output_root,
     )
 
     result: Dict[str, object] = {
@@ -1974,6 +2262,7 @@ def build_jobs_resume_report(
                 episode_time_steps=episode_time_steps,
                 rollout_threads=happo_rollout_threads if algo == "happo" else None,
                 allow_resume=True,
+                output_root=output_root,
             )
             action = str(dec.get("action") or "")
             completed = int(dec.get("completed_episodes") or 0)
@@ -3691,9 +3980,9 @@ def write_training_artifacts(
         fsync_file(results_path)
         fsync_file(root_results_path)
         if (
-            not is_salvage
-            and target_episodes is not None
+            target_episodes is not None
             and recorded_episodes >= int(target_episodes)
+            and _checkpoint_exists_for_algorithm(output_dir, algorithm)
         ):
             write_job_launcher_complete_marker(
                 output_dir,
@@ -4738,6 +5027,15 @@ class CityLearnV3BackendAdapter:
         if timeseries_row.get("all_done") is True:
             self._capture_completed_episode_snapshot(timeseries_row)
             self._flush_incremental_artifacts()
+        elif int(timeseries_row.get("episode_step") or 0) >= episode_length - 1:
+            # HAPPO/CityLearn year episodes often omit all_done on the true final step
+            # (8759/8760). Without this flush, timeseries.csv on Drive stops one step
+            # short and cell 2.1b reports target-1 completed (the 49/50 resume loop).
+            self.completed_episode_count = max(
+                self.completed_episode_count,
+                int(timeseries_row.get("episode") or 0) + 1,
+            )
+            self._flush_incremental_artifacts()
 
         self.global_step += 1
 
@@ -4772,7 +5070,16 @@ class CityLearnV3BackendAdapter:
         if self.live_progress_path is None:
             return
 
-        if int(timeseries_row["global_step"]) % self.live_progress_interval != 0:
+        # Always emit a snapshot on the episode boundary (all_done or the final env step).
+        # The final step (episode_step = episode_len - 1) is almost never a multiple of
+        # live_progress_interval, which previously left the dashboard stuck at 8460/8760.
+        episode_length = max(int(self.episode_time_steps), 1)
+        ep_step = int(timeseries_row.get("episode_step") or 0)
+        is_episode_boundary = bool(timeseries_row.get("all_done")) or ep_step >= episode_length - 1
+        if (
+            not is_episode_boundary
+            and int(timeseries_row["global_step"]) % self.live_progress_interval != 0
+        ):
             return
 
         episode = int(timeseries_row.get("episode", 0))
@@ -4862,7 +5169,58 @@ class CityLearnV3BackendAdapter:
                 "heartbeat fields change while an external backend is updating neural networks."
             ),
         }
+        # Episode boundary: episode_step is 0-indexed (last step = episode_len - 1, e.g.
+        # 8759), and completed_episode_count is incremented AFTER this write. Present a
+        # clean N/N (full step bar) and count the just-finished episode so the dashboard
+        # renders 100% at completion instead of e.g. 8759/8760 or 8460/8760.
+        if is_episode_boundary:
+            payload["episode_step"] = episode_length
+            finished_episodes = int(timeseries_row.get("episode") or 0) + 1
+            payload["completed_episode_count"] = max(
+                int(self.completed_episode_count) + (1 if timeseries_row.get("all_done") else 0),
+                finished_episodes,
+            )
+            payload["episode_steps_recorded"] = episode_length
         self._atomic_write_live_payload(payload)
+
+    def finalize_training_session(self, *, target_episodes: Optional[int] = None) -> Dict[str, object]:
+        """Flush pending incremental rows and write a truthful completion snapshot."""
+        summary: Dict[str, object] = {
+            "completed_episodes": int(self.completed_episode_count),
+            "target_episodes": target_episodes,
+            "timeseries_rows_flushed": 0,
+        }
+        if not self._incremental_enabled:
+            return summary
+
+        episode_length = max(int(self.episode_time_steps), 1)
+        completed_from_step = max(0, int((int(self.global_step) + 1) // episode_length))
+        if target_episodes is not None:
+            completed_from_step = min(completed_from_step, int(target_episodes))
+        self.completed_episode_count = max(int(self.completed_episode_count), completed_from_step)
+        summary["completed_episodes"] = int(self.completed_episode_count)
+
+        self._flush_incremental_artifacts()
+        summary["timeseries_rows_flushed"] = int(self._ts_flushed_count)
+
+        if self.live_progress_path is not None:
+            last_step = max(int(self.global_step), 0)
+            ep_idx = max(0, int(last_step // episode_length))
+            self._atomic_write_live_payload(
+                {
+                    "global_step": last_step,
+                    "episode": ep_idx,
+                    "episode_step": int(self.episode_time_steps),
+                    "completed_episode_count": int(self.completed_episode_count),
+                    "scenario": self.scenario,
+                    "algorithm": self.algorithm,
+                    "episode_time_steps": episode_length,
+                    "live_status": "training_finalized",
+                    "live_status_updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        flush_filesystem_buffers()
+        return summary
 
     def write_live_heartbeat(self, *, stage: str, note: Optional[str] = None) -> None:
         """Refresh live_progress.json while external backends train between env steps."""

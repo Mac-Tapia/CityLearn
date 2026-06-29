@@ -77,6 +77,11 @@ def main() -> int:
 
     output_dir = resolve_output_dir(args.output_dir, "matd3", args.scenario, args.seed)
     artifact_dirs = ensure_artifact_layout(output_dir)
+    training_output_root = (
+        output_dir.parent.parent
+        if output_dir.parent.name.lower() in {"happo", "masac", "matd3", "maac", "maddpg"}
+        else output_dir.parent
+    )
     configured_num_env_steps = max(
         args.num_env_steps,
         args.episode_time_steps,
@@ -90,6 +95,7 @@ def main() -> int:
         target_episodes=configured_episodes,
         episode_time_steps=args.episode_time_steps,
         allow_resume=bool(getattr(args, "resume", True)),
+        output_root=training_output_root,
     )
     if resume_plan.get("active"):
         configured_episodes = int(resume_plan["remaining_episodes"])
@@ -233,6 +239,7 @@ def main() -> int:
         "run_dir": run_dir,
     }
 
+    matd3_resuming = bool(resume_plan.get("active"))
     runner = MPERunner(config=config)
     if hasattr(runner, "writter"):
         finite_writer = FiniteTensorBoardWriter(
@@ -259,7 +266,22 @@ def main() -> int:
         ],
         output_dir / "data" / "matd3_finite_gradient_guard.jsonl",
     )
-    env.adapter.clear_records()
+    # MPERunner.__init__ runs the replay warmup (random-action episodes) which appends
+    # rows to the adapter AFTER the constructor's resume preload. On a FRESH start we
+    # wipe everything so real training begins clean at global_step=0. On a RESUME we must
+    # NOT zero the state (that is the bug that dropped MATD3 from ep10 back to ep1): we
+    # re-apply the resume preload instead, which discards the warmup pollution and
+    # restores live_progress/timeseries.csv/global_step to the completed-episode boundary
+    # while keeping the warmup-filled replay buffer intact.
+    if matd3_resuming:
+        env.adapter.preload_resume_artifacts(matd3_resume_completed)
+        print(
+            f"[matd3] resume: restored episode boundary at {matd3_resume_completed} "
+            "after warmup (no reset to ep1)",
+            flush=True,
+        )
+    else:
+        env.adapter.clear_records()
     total_num_steps = 0
     report = citylearn_v3_training_report(None)
     artifacts = {}

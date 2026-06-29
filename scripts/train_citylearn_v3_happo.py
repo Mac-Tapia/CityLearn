@@ -82,6 +82,11 @@ def main() -> int:
 
     output_dir = resolve_output_dir(args.output_dir, "happo", args.scenario, args.seed)
     artifact_dirs = ensure_artifact_layout(output_dir)
+    training_output_root = (
+        output_dir.parent.parent
+        if output_dir.parent.name.lower() in {"happo", "masac", "matd3", "maac", "maddpg"}
+        else output_dir.parent
+    )
     rollout_threads = max(1, int(args.n_rollout_threads))
     # Mantener acotado el minibatch de GPU al escalar rollouts: mas workers agrandan el
     # buffer numpy (RAM de sistema) pero num_mini_batch divide el batch -> VRAM por update
@@ -108,6 +113,7 @@ def main() -> int:
         episode_time_steps=args.episode_time_steps,
         rollout_threads=rollout_threads,
         allow_resume=bool(getattr(args, "resume", True)),
+        output_root=training_output_root,
     )
     if resume_plan.get("active"):
         configured_episodes = int(resume_plan["remaining_episodes"])
@@ -298,6 +304,12 @@ def main() -> int:
             except Exception:
                 pass
         if heartbeat_adapter is not None:
+            try:
+                heartbeat_adapter.finalize_training_session(
+                    target_episodes=int(resume_plan.get("target_episodes") or configured_episodes),
+                )
+            except Exception as exc:  # noqa: BLE001 - never block artifact write
+                print(f"[happo] finalize_training_session failed: {exc}", flush=True)
             try:
                 heartbeat_adapter.write_live_heartbeat(
                     stage="happo_backend_finished",

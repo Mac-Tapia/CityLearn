@@ -727,11 +727,28 @@ def command_for_job(job: Mapping[str, object]) -> List[str]:
     return [sys.executable, "-B", str(job["script"])] + [str(item) for item in job["args"]]
 
 
-def completed_artifact_exists(root: Path, job_output_dir: str, *, target_episodes: Optional[int] = None) -> bool:
+def completed_artifact_exists(
+    root: Path,
+    job_output_dir: str,
+    *,
+    target_episodes: Optional[int] = None,
+    output_root: Optional[Path] = None,
+) -> bool:
     from citylearn_v3_training_common import job_counts_as_launcher_complete
 
     run_path = resolve_status_path(root, job_output_dir)
-    return job_counts_as_launcher_complete(run_path, target_episodes=target_episodes)
+    training_root = output_root
+    if training_root is None:
+        algo_parent = run_path.parent.name.lower()
+        if algo_parent in {"happo", "masac", "matd3", "maac", "maddpg"}:
+            training_root = run_path.parent.parent
+        else:
+            training_root = run_path.parent
+    return job_counts_as_launcher_complete(
+        run_path,
+        target_episodes=target_episodes,
+        output_root=training_root,
+    )
 
 
 def is_sigkill_exit(exit_code: int) -> bool:
@@ -1035,7 +1052,10 @@ def run_one_job(
     job_output_dir = path_for_status(root, job_run_dir)
 
     if args.skip_completed and completed_artifact_exists(
-        root, job_output_dir, target_episodes=int(args.episodes)
+        root,
+        job_output_dir,
+        target_episodes=int(args.episodes),
+        output_root=output_root,
     ):
         record = {
             "name": name,
