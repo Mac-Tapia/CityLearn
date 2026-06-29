@@ -1075,46 +1075,6 @@ def _timeseries_global_step_episode_denominator(
     return episode_time_steps
 
 
-def _row_all_done_true(row: Mapping[str, object]) -> bool:
-    flag = str(row.get("all_done", "")).strip().lower()
-    return flag in {"true", "1", "1.0", "yes"}
-
-
-def _completed_episodes_from_all_done_rows(
-    rows: Sequence[Mapping[str, object]],
-    *,
-    episode_time_steps: int,
-) -> int:
-    """Episode count from trusted ``all_done`` boundary rows in timeseries.csv.
-
-    Rows record ``global_step`` *before* the post-step increment. After the final step
-    of episode index ``E``, the last row has ``global_step = (E+1)*episode_time_steps - 1``,
-    so ``max(global_step) // episode_time_steps`` under-counts by one (the 49/50 bug).
-    Counting explicit ``all_done`` boundary rows is exact and applies to every
-    single-recording-worker algorithm (HAPPO/MASAC/MATD3), so a salvaged run that
-    actually reached the target is recognized as complete instead of stuck at 49/50.
-    """
-    episode_time_steps = max(1, int(episode_time_steps))
-    completed = 0
-    for row in rows:
-        if not _row_all_done_true(row):
-            continue
-        episode = _as_int(row.get("episode"))
-        if episode is None:
-            continue
-        episode_step = _as_int(row.get("episode_step"))
-        global_step = _as_int(row.get("global_step"))
-        boundary = (
-            episode_step is not None and episode_step >= episode_time_steps - 1
-        ) or (
-            global_step is not None
-            and global_step >= (int(episode) + 1) * episode_time_steps - 1
-        )
-        if boundary:
-            completed = max(completed, int(episode) + 1)
-    return completed
-
-
 def infer_completed_episodes_from_timeseries_global_step(
     output_dir: Path,
     *,
@@ -1122,7 +1082,17 @@ def infer_completed_episodes_from_timeseries_global_step(
     rollout_threads: int = 1,
     algorithm: str = "",
 ) -> int:
-    """Episode count from max ``global_step`` in timeseries.csv."""
+    """Episode count from max ``global_step`` in timeseries.csv.
+
+    ``global_step`` is a 0-indexed step counter written *before* its post-step
+    increment, so the final step of episode index ``E`` is stored as
+    ``(E+1)*denom - 1``. Counting ``(max_gs + 1) // denom`` therefore yields ``E+1``
+    exactly when that final step was logged, and ``E`` while the episode is still in
+    progress. The old ``max_gs // denom`` under-counted finished runs by one and left
+    HAPPO/MASAC/MATD3 stuck at ``target-1`` (the 49/50 resume loop). HAPPO never writes
+    an ``all_done=True`` boundary row, so this step-budget rule (not the flag) is the
+    reliable completion signal.
+    """
     path = Path(output_dir) / DATA_DIR_NAME / "timeseries.csv"
     if not path.is_file():
         return 0
@@ -1140,17 +1110,7 @@ def infer_completed_episodes_from_timeseries_global_step(
         rollout_threads=rollout_threads,
         algorithm=algorithm,
     )
-    completed = max(0, int(max_gs // denom))
-    # MAAC completion is checkpoint-based (not global_step); for the timeseries-driven
-    # algorithms the boundary count corrects the off-by-one at the episode tail.
-    if str(algorithm or "").lower() != "maac":
-        completed = max(
-            completed,
-            _completed_episodes_from_all_done_rows(
-                rows, episode_time_steps=episode_time_steps
-            ),
-        )
-    return completed
+    return max(0, int((max_gs + 1) // denom))
 
 
 def _adapter_completed_episode_count_from_artifacts(
@@ -1575,7 +1535,10 @@ def infer_completed_episodes_from_live_progress(
         rollout_threads=rollout_threads,
         algorithm=algo,
     )
-    from_gs = max(0, int(global_step // denom)) if global_step > 0 else 0
+    # global_step is the 0-indexed pre-increment step counter (see
+    # infer_completed_episodes_from_timeseries_global_step), so +1 makes the final
+    # step of an episode count it as complete instead of under-counting by one.
+    from_gs = max(0, int((global_step + 1) // denom)) if global_step > 0 else 0
     episode = _as_int(live_progress.get("episode")) or 0
     episode = max(0, min(int(episode), 10_000))
 
