@@ -1920,6 +1920,138 @@ def preview_job_launcher_decision(
     return result
 
 
+DEFAULT_REPORT_ALGORITHMS = ("happo", "masac", "matd3", "maac")
+DEFAULT_REPORT_SCENARIOS = ("E1", "E2", "E3")
+
+
+def build_jobs_resume_report(
+    output_root: Path,
+    *,
+    target_episodes: int,
+    algorithms: Sequence[str] = DEFAULT_REPORT_ALGORITHMS,
+    scenarios: Sequence[str] = DEFAULT_REPORT_SCENARIOS,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+    seed: int = 0,
+) -> Dict[str, object]:
+    """Per-job skip/resume preview for every algo x scenario under ``output_root``.
+
+    Single source of truth for the notebook preview tables (cells 2.1b and 7.1 §4)
+    so the launch flow never duplicates the loop. Each row mirrors exactly what
+    ``--skip-completed`` + intra-job resume (cell 7.2) would do.
+    """
+    output_root = Path(output_root)
+    algorithms = [str(a).lower() for a in algorithms]
+    scenarios = [str(s) for s in scenarios]
+    target_episodes = max(1, int(target_episodes))
+
+    rows: List[Dict[str, object]] = []
+    done = resume = pending = restart = 0
+    episodes_done = 0
+
+    for algo in algorithms:
+        for scen in scenarios:
+            run_dir = resolve_existing_job_run_dir(output_root, algo, scen, seed)
+            if run_dir is None or not Path(run_dir).exists():
+                rows.append(
+                    {
+                        "algorithm": algo,
+                        "scenario": scen,
+                        "action": "run_fresh",
+                        "skip": False,
+                        "completed_episodes": 0,
+                        "status_line": "PENDIENTE (fresh)",
+                        "launcher_line": "",
+                    }
+                )
+                pending += 1
+                continue
+
+            dec = preview_job_launcher_decision(
+                Path(run_dir),
+                algorithm=algo,
+                target_episodes=target_episodes,
+                episode_time_steps=episode_time_steps,
+                rollout_threads=happo_rollout_threads if algo == "happo" else None,
+                allow_resume=True,
+            )
+            action = str(dec.get("action") or "")
+            completed = int(dec.get("completed_episodes") or 0)
+            if action == "skip":
+                done += 1
+                episodes_done += target_episodes
+            elif action == "resume":
+                resume += 1
+                episodes_done += completed
+            elif action == "restart_fresh":
+                restart += 1
+                pending += 1
+            else:
+                pending += 1
+            rows.append(
+                {
+                    "algorithm": algo,
+                    "scenario": scen,
+                    "action": action,
+                    "skip": bool(dec.get("skip")),
+                    "completed_episodes": completed,
+                    "status_line": str(dec.get("status_line") or ""),
+                    "launcher_line": str(dec.get("launcher_line") or ""),
+                }
+            )
+
+    episodes_target = len(algorithms) * len(scenarios) * target_episodes
+    return {
+        "output_root": str(output_root),
+        "target_episodes": target_episodes,
+        "jobs": rows,
+        "completed": done,
+        "resumable": resume,
+        "pending": pending,
+        "restart_fresh": restart,
+        "episodes_done": episodes_done,
+        "episodes_target": episodes_target,
+        "progress_pct": (100.0 * episodes_done / episodes_target) if episodes_target else 0.0,
+    }
+
+
+def print_jobs_resume_report(
+    report: Mapping[str, object],
+    *,
+    show_launcher_line: bool = True,
+    show_footer_hint: bool = True,
+) -> None:
+    """Pretty-print :func:`build_jobs_resume_report` (cells 2.1b / 7.1 §4)."""
+    output_root = str(report.get("output_root") or "")
+    target = int(report.get("target_episodes") or 0)
+    jobs = list(report.get("jobs") or [])
+    print("=" * 70)
+    print(f"  RUN: {Path(output_root).name}   (objetivo: {target} episodios/corrida)")
+    print(f"  OUTPUT_ROOT: {output_root}")
+    print("=" * 70)
+    for row in jobs:
+        print(f"  {str(row['algorithm']).upper():<6} {row['scenario']}  ->  {row['status_line']}")
+        if show_launcher_line and not row.get("skip") and row.get("launcher_line"):
+            print(f"           (7.2: {row['launcher_line']})")
+    restart = int(report.get("restart_fresh") or 0)
+    extra = f" (incl. {restart} reinicio-fresh)" if restart else ""
+    print("-" * 70)
+    print(
+        f"  COMPLETOS={report.get('completed', 0)}  REANUDABLES={report.get('resumable', 0)}  "
+        f"PENDIENTES={report.get('pending', 0)}{extra}  (total {len(jobs)})"
+    )
+    print(
+        f"  Progreso global: ~{report.get('episodes_done', 0)}/{report.get('episodes_target', 0)} "
+        f"episodios ({float(report.get('progress_pct') or 0.0):.1f}%) hacia el 100%"
+    )
+    print("=" * 70)
+    if show_footer_hint:
+        print("\n  Siguiente: ejecuta 6.1 -> 7.0 -> 7.1 -> 7.2 (no modifiques nada mas).")
+        print("  Tras 7.1, vuelve a ejecutar esta celda 2.1b para confirmar HAPPO rollout_threads.")
+        print(f"  7.2 usa --skip-completed (omite COMPLETOS) y resume intra-job (continua los")
+        print(f"  REANUDABLES desde su ultimo checkpoint) hasta completar los {target} episodios.")
+
+
 def write_job_resume_manifest(output_dir: Path, plan: Mapping[str, object]) -> Path:
     output_dir = Path(output_dir)
     data_dir = output_dir / DATA_DIR_NAME
