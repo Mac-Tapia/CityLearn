@@ -1075,6 +1075,43 @@ def _timeseries_global_step_episode_denominator(
     return episode_time_steps
 
 
+def _row_all_done_true(row: Mapping[str, object]) -> bool:
+    flag = str(row.get("all_done", "")).strip().lower()
+    return flag in {"true", "1", "1.0", "yes"}
+
+
+def _happo_completed_episodes_from_all_done_rows(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    episode_time_steps: int,
+) -> int:
+    """HAPPO episode count from trusted ``all_done`` boundary rows in timeseries.csv.
+
+    Rows record ``global_step`` *before* the post-step increment. After the final step
+    of episode index ``E``, the last row has ``global_step = (E+1)*episode_time_steps - 1``,
+    so ``max(global_step) // episode_time_steps`` under-counts by one (49/50 bug).
+    """
+    episode_time_steps = max(1, int(episode_time_steps))
+    completed = 0
+    for row in rows:
+        if not _row_all_done_true(row):
+            continue
+        episode = _as_int(row.get("episode"))
+        if episode is None:
+            continue
+        episode_step = _as_int(row.get("episode_step"))
+        global_step = _as_int(row.get("global_step"))
+        boundary = (
+            episode_step is not None and episode_step >= episode_time_steps - 1
+        ) or (
+            global_step is not None
+            and global_step >= (int(episode) + 1) * episode_time_steps - 1
+        )
+        if boundary:
+            completed = max(completed, int(episode) + 1)
+    return completed
+
+
 def infer_completed_episodes_from_timeseries_global_step(
     output_dir: Path,
     *,
@@ -1100,7 +1137,15 @@ def infer_completed_episodes_from_timeseries_global_step(
         rollout_threads=rollout_threads,
         algorithm=algorithm,
     )
-    return max(0, int(max_gs // denom))
+    completed = max(0, int(max_gs // denom))
+    if str(algorithm or "").lower() == "happo":
+        completed = max(
+            completed,
+            _happo_completed_episodes_from_all_done_rows(
+                rows, episode_time_steps=episode_time_steps
+            ),
+        )
+    return completed
 
 
 def _adapter_completed_episode_count_from_artifacts(
@@ -1279,6 +1324,9 @@ def job_launcher_completion_blockers(
     blockers: List[str] = []
     marker = read_job_launcher_complete_marker(output_dir)
     req_target = _as_int(target_episodes)
+
+    if job_counts_as_launcher_complete(output_dir, target_episodes=req_target):
+        return []
 
     if marker:
         m_target = _as_int(marker.get("target_episodes"))
