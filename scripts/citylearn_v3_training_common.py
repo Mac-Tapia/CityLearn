@@ -1053,18 +1053,36 @@ def write_job_launcher_complete_marker(
     return path
 
 
+def _timeseries_global_step_episode_denominator(
+    *,
+    episode_time_steps: int,
+    rollout_threads: int = 1,
+    algorithm: str = "",
+) -> int:
+    """Steps per adapter episode index stored in timeseries.csv / live_progress.json.
+
+    HAPPO persists rank-0 CityLearn steps only (``global_step += 1`` per env step in the
+  recording worker). Parallel ``n_rollout_threads`` does **not** multiply the stored
+    ``global_step`` or episode index. Dividing by ``episode_time_steps * rollout_threads``
+    under-counts finished HAPPO episodes and leaves completed jobs stuck at ``target-1``.
+    """
+    episode_time_steps = max(1, int(episode_time_steps))
+    if str(algorithm or "").lower() == "happo":
+        return episode_time_steps
+    rollout_threads = max(1, int(rollout_threads))
+    if rollout_threads > 1:
+        return episode_time_steps * rollout_threads
+    return episode_time_steps
+
+
 def infer_completed_episodes_from_timeseries_global_step(
     output_dir: Path,
     *,
     episode_time_steps: int,
     rollout_threads: int = 1,
+    algorithm: str = "",
 ) -> int:
-    """HARL-style episode count from max global_step (robust with n_rollout_threads>1).
-
-    With parallel rollouts each env step advances global_step once; a training episode
-    spans episode_time_steps * rollout_threads steps. The legacy per-episode row-count
-    rule (>=8760 rows) under-counts when rollout_threads>1 and must NOT gate skip/resume.
-    """
+    """Episode count from max ``global_step`` in timeseries.csv."""
     path = Path(output_dir) / DATA_DIR_NAME / "timeseries.csv"
     if not path.is_file():
         return 0
@@ -1077,8 +1095,60 @@ def infer_completed_episodes_from_timeseries_global_step(
     max_gs = max(_as_int(row.get("global_step")) or 0 for row in rows)
     if max_gs <= 0:
         return 0
-    denom = max(1, int(episode_time_steps)) * max(1, int(rollout_threads))
+    denom = _timeseries_global_step_episode_denominator(
+        episode_time_steps=episode_time_steps,
+        rollout_threads=rollout_threads,
+        algorithm=algorithm,
+    )
     return max(0, int(max_gs // denom))
+
+
+def _adapter_completed_episode_count_from_artifacts(
+    output_dir: Path,
+    *,
+    live_progress: Optional[Mapping[str, object]] = None,
+) -> int:
+    """``completed_episode_count`` from live_progress or persisted results audit."""
+    if live_progress is None:
+        live_progress = read_live_progress_json(output_dir)
+    if live_progress:
+        counted = _as_int(live_progress.get("completed_episode_count"))
+        if counted is not None and counted > 0:
+            return int(counted)
+    payload = read_job_results_json(output_dir)
+    if not payload:
+        return 0
+    audit = dict(payload.get("artifact_audit") or {})
+    report_source = dict(audit.get("report_source") or {})
+    counted = _as_int(report_source.get("completed_episode_count"))
+    if counted is not None and counted > 0:
+        return int(counted)
+    counted = _as_int(payload.get("completed_episode_count"))
+    return int(counted) if counted is not None and counted > 0 else 0
+
+
+def infer_happo_verified_completed_episodes_from_timeseries(
+    data_dir: Path,
+    *,
+    episode_time_steps: int,
+) -> int:
+    """HAPPO episodes with a full per-episode row count (ignores lone ``all_done`` tails)."""
+    episode_time_steps = max(1, int(episode_time_steps))
+    path = Path(data_dir) / "timeseries.csv"
+    if not path.is_file():
+        return 0
+    try:
+        rows = read_csv_rows(path)
+    except Exception:
+        return 0
+    counts: Dict[int, int] = {}
+    for row in rows:
+        ep = _as_int(row.get("episode"))
+        if ep is None:
+            continue
+        counts[ep] = counts.get(ep, 0) + 1
+    complete = {ep for ep, c in counts.items() if c >= episode_time_steps}
+    return (max(complete) + 1) if complete else 0
 
 
 def infer_trustable_completed_episodes(
@@ -1089,13 +1159,7 @@ def infer_trustable_completed_episodes(
     rollout_threads: int = 1,
     live_progress: Optional[Mapping[str, object]] = None,
 ) -> int:
-    """Episode count safe for skip/resume decisions (never inflated by CSV row heuristics).
-
-    HAPPO with n_rollout_threads>1 records fewer than episode_time_steps rows per
-    training episode in timeseries.csv; the legacy CSV episode-index counter therefore
-    OVER-estimates completion and must not be used for HAPPO resume/skip. global_step
-    is the authoritative counter for parallel-rollout backends.
-    """
+    """Episode count safe for skip/resume decisions (never inflated by CSV row heuristics)."""
     output_dir = Path(output_dir)
     algo = algorithm.lower()
     rollout_threads = max(1, int(rollout_threads))
@@ -1105,28 +1169,45 @@ def infer_trustable_completed_episodes(
         output_dir,
         episode_time_steps=episode_time_steps,
         rollout_threads=rollout_threads,
+        algorithm=algo,
     )
-    completed_live = 0
     if live_progress is None:
         live_progress = read_live_progress_json(output_dir)
+    completed_live = 0
     if live_progress:
         completed_live = infer_completed_episodes_from_live_progress(
             live_progress,
             episode_time_steps=episode_time_steps,
+            algorithm=algo,
+            rollout_threads=rollout_threads,
         )
+    completed_adapter = _adapter_completed_episode_count_from_artifacts(
+        output_dir, live_progress=live_progress
+    )
 
     if algo == "maac":
         _, maac_ep = find_maac_resume_checkpoint(output_dir / CHECKPOINT_DIR_NAME)
-        return max(completed_gs, completed_live, int(maac_ep))
+        return max(completed_gs, completed_live, int(maac_ep), completed_adapter)
 
-    if algo == "happo" or rollout_threads > 1:
-        return max(completed_gs, completed_live)
+    if algo == "happo":
+        verified_csv = infer_happo_verified_completed_episodes_from_timeseries(
+            output_dir / DATA_DIR_NAME,
+            episode_time_steps=episode_time_steps,
+        )
+        reconciled = max(completed_gs, verified_csv, completed_adapter)
+        if completed_gs > 0 and completed_live > reconciled + 1:
+            # Stale live_progress.episode after preload_resume_artifacts without a Drive sync.
+            return reconciled
+        return max(reconciled, completed_live)
+
+    if rollout_threads > 1:
+        return max(completed_gs, completed_live, completed_adapter)
 
     completed_csv = infer_completed_episodes_from_timeseries_csv(
         output_dir / DATA_DIR_NAME,
         episode_time_steps=episode_time_steps,
     )
-    return max(completed_gs, completed_live, completed_csv)
+    return max(completed_gs, completed_live, completed_csv, completed_adapter)
 
 
 def _checkpoint_exists_for_algorithm(output_dir: Path, algorithm: str) -> bool:
@@ -1166,7 +1247,17 @@ def _artifact_proves_job_complete(
         output_dir,
         episode_time_steps=episode_time_steps,
         rollout_threads=rollout_threads,
+        algorithm=algo,
     )
+    if algo == "happo":
+        inferred = max(
+            inferred,
+            infer_happo_verified_completed_episodes_from_timeseries(
+                output_dir / DATA_DIR_NAME,
+                episode_time_steps=episode_time_steps,
+            ),
+            _adapter_completed_episode_count_from_artifacts(output_dir),
+        )
     if inferred < target_episodes:
         return False
     return _checkpoint_exists_for_algorithm(output_dir, algo)
@@ -1246,7 +1337,17 @@ def job_launcher_completion_blockers(
             output_dir,
             episode_time_steps=int(episode_time_steps),
             rollout_threads=rollout_threads,
+            algorithm=algo,
         )
+        if algo == "happo":
+            inferred = max(
+                inferred,
+                infer_happo_verified_completed_episodes_from_timeseries(
+                    output_dir / DATA_DIR_NAME,
+                    episode_time_steps=int(episode_time_steps),
+                ),
+                _adapter_completed_episode_count_from_artifacts(output_dir),
+            )
         has_ckpt = _checkpoint_exists_for_algorithm(output_dir, algo)
         blockers.append(
             f"artifacts: inferred_episodes={inferred} (rollout_threads={rollout_threads}), "
@@ -1265,6 +1366,14 @@ def max_maac_checkpoint_episode(output_dir: Path) -> int:
     """
     _, episode = find_maac_resume_checkpoint(Path(output_dir) / CHECKPOINT_DIR_NAME)
     return max(0, int(episode))
+
+
+def _infer_algorithm_from_artifacts(output_dir: Path) -> str:
+    live = read_live_progress_json(output_dir)
+    if live and live.get("algorithm"):
+        return str(live.get("algorithm") or "").lower()
+    payload = read_job_results_json(output_dir)
+    return _payload_algorithm(payload) if payload else ""
 
 
 def job_counts_as_launcher_complete(
@@ -1296,7 +1405,7 @@ def job_counts_as_launcher_complete(
 
     payload = read_job_results_json(output_dir)
     hyperparameters = dict(payload.get("hyperparameters") or {}) if payload else {}
-    algo = _payload_algorithm(payload) if payload else ""
+    algo = _payload_algorithm(payload) if payload else _infer_algorithm_from_artifacts(output_dir)
     episode_time_steps = (
         _as_int((payload or {}).get("episode_time_steps"))
         or _as_int(hyperparameters.get("episode_time_steps"))
@@ -1353,7 +1462,17 @@ def job_counts_as_launcher_complete(
             output_dir,
             episode_time_steps=int(episode_time_steps),
             rollout_threads=rollout_threads,
+            algorithm=algo,
         )
+        if algo == "happo":
+            inferred = max(
+                inferred,
+                infer_happo_verified_completed_episodes_from_timeseries(
+                    output_dir / DATA_DIR_NAME,
+                    episode_time_steps=int(episode_time_steps),
+                ),
+                _adapter_completed_episode_count_from_artifacts(output_dir),
+            )
         if algo == "maac":
             inferred = max(inferred, max_maac_checkpoint_episode(output_dir))
         write_job_launcher_complete_marker(
@@ -1383,14 +1502,40 @@ def infer_completed_episodes_from_live_progress(
     live_progress: Mapping[str, object],
     *,
     episode_time_steps: int,
+    algorithm: str = "",
+    rollout_threads: int = 1,
 ) -> int:
-    """Episodes fully finished before an interrupt (0-indexed episode in progress excluded)."""
+    """Episodes fully finished before an interrupt.
 
+    For HAPPO the persisted ``episode`` field can be ahead of ``global_step`` after a
+    resume preload; prefer ``global_step // episode_time_steps`` and
+    ``completed_episode_count`` when present.
+    """
+    adapter_count = _as_int(live_progress.get("completed_episode_count"))
     global_step = _as_int(live_progress.get("global_step")) or 0
-    if global_step <= 0:
+    if global_step <= 0 and (adapter_count is None or adapter_count <= 0):
         return 0
+
+    algo = str(algorithm or "").lower()
+    denom = _timeseries_global_step_episode_denominator(
+        episode_time_steps=episode_time_steps,
+        rollout_threads=rollout_threads,
+        algorithm=algo,
+    )
+    from_gs = max(0, int(global_step // denom)) if global_step > 0 else 0
     episode = _as_int(live_progress.get("episode")) or 0
-    return max(0, min(int(episode), 10_000))
+    episode = max(0, min(int(episode), 10_000))
+
+    if algo == "happo":
+        if adapter_count is not None and adapter_count > 0:
+            return max(from_gs, int(adapter_count))
+        if episode > from_gs + 1:
+            return from_gs
+        return max(from_gs, episode)
+
+    if adapter_count is not None and adapter_count > 0:
+        return max(from_gs, int(adapter_count), episode)
+    return max(from_gs, episode) if from_gs > 0 else episode
 
 
 def infer_completed_episodes_from_timeseries_csv(
@@ -1539,6 +1684,7 @@ def discover_job_resume_plan(
         plan["note"] = "job_complete_or_resume_disabled"
         return plan
 
+    algo = algorithm.lower()
     live = read_live_progress_json(output_dir)
     completed = infer_trustable_completed_episodes(
         output_dir,
@@ -1551,13 +1697,13 @@ def discover_job_resume_plan(
         output_dir,
         episode_time_steps=episode_time_steps,
         rollout_threads=rollout_threads,
+        algorithm=algo,
     )
     completed_csv = infer_completed_episodes_from_timeseries_csv(
         output_dir / DATA_DIR_NAME,
         episode_time_steps=episode_time_steps,
     )
 
-    algo = algorithm.lower()
     model_dir: Optional[Path] = None
     maac_ckpt: Optional[Path] = None
     maac_start = 0
@@ -1594,7 +1740,9 @@ def discover_job_resume_plan(
             rollout_threads=rollout_threads,
         ):
             plan["note"] = "episodes_complete_missing_results_json"
-            plan["completed_episodes"] = completed
+            plan["completed_episodes"] = max(completed, target_episodes)
+            if job_counts_as_launcher_complete(output_dir, target_episodes=target_episodes):
+                plan["note"] = "job_complete_or_resume_disabled"
             return plan
         # CSV episode-index heuristics can falsely claim completion for HAPPO; if
         # trustable counters still fall short, continue as an active resume instead.
@@ -3228,6 +3376,8 @@ def write_training_artifacts(
     timeseries_rows = list(getattr(adapter, "timeseries_records", [])) if adapter is not None else []
     trace_rows = list(getattr(adapter, "trace_records", [])) if adapter is not None else []
     episode_summaries = _episode_summaries(timeseries_rows)
+    adapter_completed = int(getattr(adapter, "completed_episode_count", 0) or 0) if adapter else 0
+    episodes_recorded = max(len(episode_summaries), adapter_completed)
     citylearn_kpi_frame_rows = _citylearn_kpi_frame_rows(candidate)
     expected_episode_time_steps = _as_int(getattr(args, "episode_time_steps", None))
     expected_episodes = _as_int((hyperparameters or {}).get("episodes"))
@@ -3329,7 +3479,7 @@ def write_training_artifacts(
             "statistical_comparison_trace_csv": include_statistical_trace,
             **trace_sampling,
         },
-        "episodes_recorded": len(episode_summaries),
+        "episodes_recorded": episodes_recorded,
         "timeseries_rows": len(timeseries_rows),
         "trace_rows": len(trace_rows),
         "timeseries_csv": str(timeseries_path),
@@ -3368,7 +3518,12 @@ def write_training_artifacts(
         or _as_int(hyperparameters.get("episodes"))
         or _as_int(getattr(args, "episodes", None))
     )
-    recorded_episodes = len(episode_summaries)
+    recorded_episodes = episodes_recorded
+    adapter_completed = _as_int(
+        (report.get("report_source") or {}).get("completed_episode_count")  # type: ignore[union-attr]
+    )
+    if adapter_completed is not None and adapter_completed > recorded_episodes:
+        recorded_episodes = int(adapter_completed)
 
     if is_salvage and job_counts_as_launcher_complete(
         output_dir,
@@ -4010,6 +4165,20 @@ class CityLearnV3BackendAdapter:
         self.reset_count = completed
         self.completed_episode_count = completed
         summary["completed_episodes"] = completed
+        if self.live_progress_path is not None:
+            self._atomic_write_live_payload(
+                {
+                    "global_step": self.global_step,
+                    "episode": completed,
+                    "episode_step": 0,
+                    "completed_episode_count": completed,
+                    "scenario": self.scenario,
+                    "algorithm": self.algorithm,
+                    "episode_time_steps": episode_length,
+                    "live_status": "resume_preload",
+                    "live_status_updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
         return summary
 
     def _incremental_flush_records(
@@ -4505,6 +4674,7 @@ class CityLearnV3BackendAdapter:
             "episode": int(timeseries_row["episode"]),
             "episode_step": int(timeseries_row["episode_step"]),
             "time_step": int(timeseries_row["time_step"]),
+            "completed_episode_count": int(self.completed_episode_count),
             "scenario": self.scenario,
             "algorithm": self.algorithm,
             "reward_function": self.reward_metadata.get("function"),

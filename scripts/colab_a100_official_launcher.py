@@ -1412,92 +1412,113 @@ def _run_backfill_schedule(
     max_workers: int,
     submit_fn,
 ) -> int:
-    """Pure dynamic-backfill scheduler (no VRAM/args coupling, fully unit-testable).
+    """Scenario-paired dynamic backfill with an OR dependency for MATD3.
 
-    Rule enforced (matches the launch protocol):
-      * Start ALL phase-1 jobs (HAPPO+MASAC) up to the concurrency cap; never prefill
-        phase 2 at t=0.
-      * As soon as ANY phase-1 job COMPLETES, admit exactly ONE phase-2 job (MATD3/MAAC,
-        lightest-first) — one-for-one with phase-1 completions — provided a slot is free.
-      * Phase 2 therefore never starts before a phase-1 job finishes and flows in
-        dynamically/flexibly as each subsequent slot frees.
-
-    `submit_fn(pool, job)` must return a Future yielding the job's int exit code.
-    Returns the worst (non-zero wins) exit code so a single failure surfaces.
+    Per scenario S:
+      * Start ALL phase-1 jobs (HAPPO+MASAC) up to the concurrency cap.
+      * MAAC/S becomes eligible when any phase-1 job for S (HAPPO/S or MASAC/S) completes.
+      * MATD3/S becomes eligible when HAPPO/S completes OR MAAC/S completes (OR gate),
+        so MATD3 never has to wait specifically for MAAC if HAPPO already freed a slot,
+        and never has to wait specifically for HAPPO if MAAC finished first.
+      * Eligible phase-2 jobs are admitted lightest-first (MAAC before MATD3) as soon as
+        a concurrency slot frees; phase-2 never starts before a phase-1 job finishes.
     """
     max_workers = max(1, int(max_workers))
-    backfill_queue = sorted(phase2_jobs, key=_job_backfill_weight)
-    phase1_total = len(phase1_jobs)
-    phase2_total = len(phase2_jobs)
+
+    phase2_index: Dict[Tuple[str, str], Mapping[str, object]] = {}
+    for job in phase2_jobs:
+        phase2_index[(str(job.get("name", "")), str(job.get("scenario", "")))] = job
+
+    started: set = set()
+    p1_done: set = set()      # scenarios with HAPPO or MASAC completed (unblocks MAAC)
+    happo_done: set = set()   # scenarios with HAPPO completed (unblocks MATD3)
+    maac_done: set = set()    # scenarios with MAAC completed (unblocks MATD3)
     overall_rc = 0
+
+    def _eligible(key: Tuple[str, str]) -> bool:
+        name, scenario = key
+        if key in started:
+            return False
+        if name == "maac":
+            return scenario in p1_done
+        if name == "matd3":
+            return scenario in happo_done or scenario in maac_done
+        return True
+
+    def _ready_jobs() -> List[Mapping[str, object]]:
+        ready = [phase2_index[key] for key in phase2_index if _eligible(key)]
+        return sorted(ready, key=_job_backfill_weight)
+
+    def _start_job(pool: ThreadPoolExecutor, job: Mapping[str, object], label: str) -> None:
+        fut = submit_fn(pool, job)
+        pending.add(fut)
+        future_to_job[fut] = job
+        started.add((str(job.get("name", "")), str(job.get("scenario", ""))))
+        print(
+            f"[launcher] {label} {str(job.get('name', '')).upper()}/{job.get('scenario', '?')}",
+            flush=True,
+        )
+
+    def _admit_phase2(pool: ThreadPoolExecutor) -> None:
+        while len(pending) < max_workers:
+            ready = _ready_jobs()
+            if not ready:
+                break
+            _start_job(pool, ready[0], "phase-2 START")
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         pending: set = set()
         future_to_job: Dict[object, Mapping[str, object]] = {}
-        phase1_completed = 0
-        phase2_started = 0
 
-        def _admit_phase2() -> None:
-            # ROBUST 2-PHASE RULE: admit the next lightest phase-2 job ONLY when a
-            # phase-1 job has already completed (one-for-one) AND a concurrency slot is
-            # free. The `phase2_started < phase1_completed` gate guarantees phase 2 never
-            # enters before phase 1 frees a slot, regardless of how wide the cap is.
-            nonlocal phase2_started
-            while (
-                backfill_queue
-                and len(pending) < max_workers
-                and phase2_started < phase1_completed
-            ):
-                job = backfill_queue.pop(0)
-                fut = submit_fn(pool, job)
-                pending.add(fut)
-                future_to_job[fut] = job
-                phase2_started += 1
-                print(
-                    f"[launcher] phase-2 START {str(job['name']).upper()}/{job['scenario']} "
-                    f"(lightest-first; phase-1 done={phase1_completed}/{phase1_total}, "
-                    f"phase-2 started={phase2_started}/{phase2_total})",
-                    flush=True,
-                )
-
-        # Start phase 1 ONLY. No phase-2 prefill: extras beyond the cap queue in the
-        # executor, and phase 2 waits for the first phase-1 completion (rule above).
         for job in phase1_jobs:
-            fut = submit_fn(pool, job)
-            pending.add(fut)
-            future_to_job[fut] = job
+            _start_job(pool, job, "phase-1 START")
 
         while pending:
             finished, pending = wait(pending, return_when=FIRST_COMPLETED)
             for fut in finished:
                 done_job = future_to_job.pop(fut, {})
+                scenario = str(done_job.get("scenario", ""))
+                name = str(done_job.get("name", ""))
                 try:
                     ec = int(fut.result())
                 except Exception as exc:  # noqa: BLE001 - a worker crash must not abort the pool
                     ec = 1
                     print(
-                        f"[launcher] worker for {done_job.get('name', '?')}/"
-                        f"{done_job.get('scenario', '?')} raised {type(exc).__name__}: {exc}",
+                        f"[launcher] worker for {name}/"
+                        f"{scenario} raised {type(exc).__name__}: {exc}",
                         flush=True,
                     )
                 if ec != 0:
                     overall_rc = ec
-                if ec == 0 and str(done_job.get("name", "")) in TWO_PHASE_P1_HM:
-                    phase1_completed += 1
+                    # A failed job does NOT satisfy any downstream dependency.
                     print(
-                        f"[launcher] phase-1 DONE {str(done_job.get('name', '?')).upper()}/"
-                        f"{done_job.get('scenario', '?')} "
-                        f"({phase1_completed}/{phase1_total}) — opens one phase-2 slot",
+                        f"[launcher] {name.upper()}/{scenario} FAIL exit={ec} "
+                        f"— does not unblock dependents",
                         flush=True,
                     )
-                elif ec != 0 and str(done_job.get("name", "")) in TWO_PHASE_P1_HM:
+                    continue
+
+                if name in TWO_PHASE_P1_HM:
+                    p1_done.add(scenario)
+                    opens = [f"MAAC/{scenario}"]
+                    if name == "happo":
+                        happo_done.add(scenario)
+                        opens.append(f"MATD3/{scenario}")
                     print(
-                        f"[launcher] phase-1 FAIL {str(done_job.get('name', '?')).upper()}/"
-                        f"{done_job.get('scenario', '?')} exit={ec} — no phase-2 slot",
+                        f"[launcher] phase-1 DONE {name.upper()}/{scenario} "
+                        f"— eligible: {', '.join(opens)}",
                         flush=True,
                     )
-            # Admit phase-2 jobs per the one-for-one rule after handling completions.
-            _admit_phase2()
+                elif name == "maac":
+                    maac_done.add(scenario)
+                    print(
+                        f"[launcher] MAAC DONE {scenario} — eligible: MATD3/{scenario}",
+                        flush=True,
+                    )
+                elif name == "matd3":
+                    print(f"[launcher] MATD3 DONE {scenario}", flush=True)
+
+            _admit_phase2(pool)
 
     return overall_rc
 
@@ -1512,17 +1533,11 @@ def run_dynamic_backfill_jobs(
     log_dir: Path,
     args: argparse.Namespace,
 ) -> int:
-    """Elastic single-pool scheduler for two_phase_happo_masac (robust 2-phase rule).
+    """Elastic single-pool scheduler for two_phase_happo_masac (scenario-paired backfill).
 
-    Hard rule enforced here (matches the launch protocol): a phase-2 job (MATD3/MAAC,
-    lightest first) may start ONLY after a phase-1 job (HAPPO/MASAC) has COMPLETED —
-    one phase-2 admission per phase-1 completion. Phase 2 therefore NEVER runs before at
-    least one phase-1 job finishes; it overlaps only the *tail* of phase 1 as each slot
-    frees. This is independent of the concurrency cap: even if the cap (RAM/VRAM budget)
-    is wider than the phase-1 set, no phase-2 job is prefilled at t=0. Total concurrency
-    additionally stays within the VRAM-aware cap so the validated envelope is never
-    exceeded. The strict barrier scheduler (run_two_phase_happo_masac_jobs) remains the
-    fallback for --no-dynamic-backfill.
+    Per scenario S: phase-1 (HAPPO or MASAC) completion makes MAAC/S eligible; MATD3/S
+    is eligible when HAPPO/S OR MAAC/S completes (OR dependency). Eligible phase-2 jobs
+    are admitted lightest-first as concurrency slots free.
     """
     cuda_fraction = _phase_cuda_fraction(args)
     masac_cuda_fraction = _masac_cuda_fraction(args)
@@ -1581,20 +1596,21 @@ def run_dynamic_backfill_jobs(
             flush=True,
         )
         max_workers = vram_cap
-    backfill_queue = sorted(phase2_jobs, key=_job_backfill_weight)
 
     print(
         f"\n[launcher] === DYNAMIC BACKFILL (two_phase_happo_masac): "
-        f"start {len(phase1_jobs)} phase-1 (HAPPO+MASAC); each phase-1 completion admits "
-        f"ONE phase-2 job ({len(backfill_queue)} total: MATD3+MAAC, lightest first). "
+        f"start {len(phase1_jobs)} phase-1 (HAPPO+MASAC); per scenario MAAC is eligible "
+        f"when its phase-1 pair finishes, and MATD3 is eligible when HAPPO OR MAAC "
+        f"finishes ({len(phase2_jobs)} phase-2 jobs total, admitted lightest-first). "
         f"Phase 2 never starts before a phase-1 job finishes. concurrency cap={max_workers} "
         f"(HAPPO/MATD3/MAAC ~{cuda_fraction * vram_gib:.0f} GiB/job, "
         f"MASAC ~{masac_cuda_fraction * vram_gib:.0f} GiB/job) ===",
         flush=True,
     )
-    if backfill_queue:
-        order = ", ".join(f"{j['name'].upper()}/{j['scenario']}" for j in backfill_queue)
-        print(f"[launcher] backfill order: {order}", flush=True)
+    if phase2_jobs:
+        scenarios = sorted({str(j.get("scenario", "")) for j in phase2_jobs})
+        deps = ", ".join(f"MATD3/{s}<-(HAPPO/{s} or MAAC/{s})" for s in scenarios)
+        print(f"[launcher] phase-2 dependencies: {deps}", flush=True)
 
     def _submit(pool: ThreadPoolExecutor, job: Mapping[str, object]):
         return pool.submit(
@@ -1673,9 +1689,10 @@ def make_manifest(
             "gpu_vram_gib": vram_gib,
             "strategy": (
                 (
-                    "dynamic_backfill: start 6 (HAPPO+MASAC x3); each phase-1 completion "
-                    "admits ONE phase-2 (MATD3+MAAC, lightest-first). Phase 2 never starts "
-                    "before a phase-1 job finishes (overlaps only the tail of phase 1); "
+                    "dynamic_backfill: start 6 (HAPPO+MASAC x3); per scenario MAAC is "
+                    "eligible when its phase-1 pair finishes, and MATD3 is eligible when "
+                    "HAPPO OR MAAC finishes (OR dependency, lightest-first admission). "
+                    "Phase 2 never starts before a phase-1 job finishes; "
                     f"cap=6 | VRAM {vram_gib:.0f} GiB | HAPPO/MATD3/MAAC cap "
                     f"{cuda_frac * vram_gib:.0f} GiB/job | MASAC cap {masac_frac * vram_gib:.0f} GiB/job"
                 )
