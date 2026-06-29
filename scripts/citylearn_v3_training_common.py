@@ -1080,16 +1080,19 @@ def _row_all_done_true(row: Mapping[str, object]) -> bool:
     return flag in {"true", "1", "1.0", "yes"}
 
 
-def _happo_completed_episodes_from_all_done_rows(
+def _completed_episodes_from_all_done_rows(
     rows: Sequence[Mapping[str, object]],
     *,
     episode_time_steps: int,
 ) -> int:
-    """HAPPO episode count from trusted ``all_done`` boundary rows in timeseries.csv.
+    """Episode count from trusted ``all_done`` boundary rows in timeseries.csv.
 
     Rows record ``global_step`` *before* the post-step increment. After the final step
     of episode index ``E``, the last row has ``global_step = (E+1)*episode_time_steps - 1``,
-    so ``max(global_step) // episode_time_steps`` under-counts by one (49/50 bug).
+    so ``max(global_step) // episode_time_steps`` under-counts by one (the 49/50 bug).
+    Counting explicit ``all_done`` boundary rows is exact and applies to every
+    single-recording-worker algorithm (HAPPO/MASAC/MATD3), so a salvaged run that
+    actually reached the target is recognized as complete instead of stuck at 49/50.
     """
     episode_time_steps = max(1, int(episode_time_steps))
     completed = 0
@@ -1138,10 +1141,12 @@ def infer_completed_episodes_from_timeseries_global_step(
         algorithm=algorithm,
     )
     completed = max(0, int(max_gs // denom))
-    if str(algorithm or "").lower() == "happo":
+    # MAAC completion is checkpoint-based (not global_step); for the timeseries-driven
+    # algorithms the boundary count corrects the off-by-one at the episode tail.
+    if str(algorithm or "").lower() != "maac":
         completed = max(
             completed,
-            _happo_completed_episodes_from_all_done_rows(
+            _completed_episodes_from_all_done_rows(
                 rows, episode_time_steps=episode_time_steps
             ),
         )
