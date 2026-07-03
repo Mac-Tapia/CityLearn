@@ -1192,7 +1192,17 @@ def job_meets_launcher_complete_requirements(
         episode_time_steps=episode_time_steps,
         rollout_threads=roll,
     )
-    if grounded < target_episodes:
+    happo_gap_complete = (
+        algo == "happo"
+        and _happo_last_episode_flush_gap_complete(
+            output_root,
+            output_dir,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            rollout_threads=roll,
+        )
+    )
+    if grounded < target_episodes and not happo_gap_complete:
         return False
     if _artifact_proves_job_complete(
         output_dir,
@@ -1201,6 +1211,8 @@ def job_meets_launcher_complete_requirements(
         episode_time_steps=episode_time_steps,
         rollout_threads=roll,
     ):
+        return True
+    if happo_gap_complete:
         return True
     if not _results_have_audited_kpis(payload):
         return False
@@ -1728,8 +1740,26 @@ def _payload_recorded_episodes_met_target(
         rollout_threads=int(rollout_threads),
     )
     if int(grounded) < int(target):
-        return False
+        if not (
+            str(algorithm or "").lower() == "happo"
+            and _happo_last_episode_flush_gap_complete(
+                None,
+                Path(output_dir),
+                target_episodes=int(target),
+                episode_time_steps=int(episode_time_steps),
+                rollout_threads=int(rollout_threads),
+            )
+        ):
+            return False
     algo_key = str(algorithm or "").lower()
+    if algo_key == "happo" and _happo_last_episode_flush_gap_complete(
+        None,
+        Path(output_dir),
+        target_episodes=int(target),
+        episode_time_steps=int(episode_time_steps),
+        rollout_threads=int(rollout_threads),
+    ):
+        return _checkpoint_exists_for_algorithm(Path(output_dir), algorithm)
     if algo_key == "maac":
         ckpt_ep = max_maac_checkpoint_episode(Path(output_dir))
         ts_ep = infer_completed_episodes_from_timeseries_global_step(
@@ -1769,6 +1799,57 @@ def _happo_timeseries_in_final_episode_tail(
     final_ep_tail_start = final_ep_start + episode_time_steps - tail_steps
     final_ep_last_gs = target_episodes * episode_time_steps - 1
     return final_ep_tail_start <= max_gs <= final_ep_last_gs
+
+
+def _happo_timeseries_max_global_step(output_dir: Path) -> int:
+    path = Path(output_dir) / DATA_DIR_NAME / "timeseries.csv"
+    if not path.is_file():
+        return 0
+    try:
+        rows = read_csv_rows(path)
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+    return max(_as_int(row.get("global_step")) or 0 for row in rows)
+
+
+def _happo_timeseries_entered_final_episode(
+    output_dir: Path,
+    *,
+    target_episodes: int,
+    episode_time_steps: int,
+) -> bool:
+    """True when timeseries reached any step of the last training episode."""
+    target_episodes = max(1, int(target_episodes))
+    episode_time_steps = max(1, int(episode_time_steps))
+    max_gs = _happo_timeseries_max_global_step(output_dir)
+    if max_gs <= 0:
+        return False
+    return max_gs >= (target_episodes - 1) * episode_time_steps
+
+
+def _happo_live_progress_entered_final_episode(
+    output_dir: Path,
+    *,
+    target_episodes: int,
+    episode_time_steps: int,
+) -> bool:
+    live = read_live_progress_json(output_dir)
+    if not live:
+        return False
+    target_episodes = max(1, int(target_episodes))
+    episode_time_steps = max(1, int(episode_time_steps))
+    ep_lp = _as_int(live.get("episode")) or 0
+    gs_lp = _as_int(live.get("global_step")) or 0
+    completed_lp = _as_int(live.get("completed_episode_count")) or 0
+    if completed_lp >= target_episodes:
+        return True
+    if ep_lp >= target_episodes - 1:
+        return True
+    if gs_lp >= (target_episodes - 1) * episode_time_steps:
+        return True
+    return False
 
 
 def _happo_last_episode_flush_gap_complete(
@@ -1827,15 +1908,150 @@ def _happo_last_episode_flush_gap_complete(
     ):
         return True
 
-    if salvage and _happo_timeseries_in_final_episode_tail(
+    if not salvage:
+        return False
+
+    if recorded >= target_episodes:
+        return True
+    if _happo_timeseries_in_final_episode_tail(
         output_dir,
         target_episodes=target_episodes,
         episode_time_steps=episode_time_steps,
     ):
-        payload = read_job_results_json(output_dir) or {}
-        return _results_have_audited_kpis(payload)
+        return True
+    if _happo_timeseries_entered_final_episode(
+        output_dir,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+    ):
+        return True
+    if _happo_live_progress_entered_final_episode(
+        output_dir,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+    ):
+        return True
 
     return False
+
+
+def repair_happo_results_json_kpi_audit(output_dir: Path) -> bool:
+    """Backfill ``citylearn_v3_report.all_values`` from sibling report fields when salvage omitted KPIs."""
+    output_dir = Path(output_dir)
+    payload = read_job_results_json(output_dir)
+    if not payload or _payload_algorithm(payload) != "happo":
+        return False
+    if _results_have_audited_kpis(payload):
+        return False
+
+    report = dict(payload.get("citylearn_v3_report") or {})
+    all_values = report.get("all_values")
+    if isinstance(all_values, Mapping) and all_values:
+        return False
+
+    repaired: Optional[Dict[str, object]] = None
+    for key in ("axis_kpis", "supporting_values", "objective_axis_kpis", "project_axis_metrics"):
+        candidate = report.get(key)
+        if isinstance(candidate, Mapping) and candidate:
+            repaired = dict(candidate)
+            break
+
+    if repaired is None:
+        return False
+
+    report["all_values"] = repaired
+    report.setdefault("report_source", {})
+    if isinstance(report["report_source"], Mapping):
+        source = dict(report["report_source"])
+        if _as_int(source.get("completed_episode_count")) is None:
+            recorded = _recorded_episodes_from_results(payload)
+            if recorded is not None:
+                source["completed_episode_count"] = int(recorded)
+        source["kpi_audit_repaired_at"] = datetime.now(timezone.utc).isoformat()
+        report["report_source"] = source
+
+    payload = dict(payload)
+    payload["citylearn_v3_report"] = report
+    data_dir = output_dir / DATA_DIR_NAME
+    data_dir.mkdir(parents=True, exist_ok=True)
+    _write_json_mirrors([data_dir / "results.json", output_dir / "results.json"], payload)
+    fsync_file(data_dir / "results.json")
+    print(
+        f"[happo] repaired citylearn_v3_report.all_values in {output_dir} "
+        f"({len(repaired)} keys)",
+        flush=True,
+    )
+    return True
+
+
+def attempt_repair_happo_launcher_job(
+    output_dir: Path,
+    *,
+    target_episodes: int,
+    output_root: Optional[Path] = None,
+    rollout_threads: Optional[int] = None,
+) -> bool:
+    """Repair salvage-gap HAPPO artifacts so ``--skip-completed`` can omit the job."""
+    output_dir = Path(output_dir)
+    payload = read_job_results_json(output_dir)
+    if not payload or _payload_algorithm(payload) != "happo":
+        return False
+
+    repair_happo_results_json_kpi_audit(output_dir)
+
+    if job_counts_as_launcher_complete(
+        output_dir,
+        target_episodes=int(target_episodes),
+        output_root=output_root,
+    ):
+        return True
+
+    hyperparameters = dict(payload.get("hyperparameters") or {})
+    episode_time_steps = (
+        _as_int(payload.get("episode_time_steps"))
+        or _as_int(hyperparameters.get("episode_time_steps"))
+        or 8760
+    )
+    roll = (
+        int(rollout_threads)
+        if rollout_threads is not None and int(rollout_threads) > 0
+        else _infer_rollout_threads(payload)
+    )
+    if not _happo_last_episode_flush_gap_complete(
+        output_root,
+        output_dir,
+        target_episodes=int(target_episodes),
+        episode_time_steps=int(episode_time_steps),
+        rollout_threads=int(roll),
+    ):
+        return False
+
+    algo = "happo"
+    scenario = str(payload.get("scenario") or _infer_scenario_from_run_dir(output_dir))
+    grounded = _grounded_completed_episodes_for_skip(
+        read_job_results_json(output_dir) or payload,
+        output_dir,
+        algorithm=algo,
+        episode_time_steps=int(episode_time_steps),
+        rollout_threads=int(roll),
+    )
+    write_job_launcher_complete_marker(
+        output_dir,
+        algorithm=algo.upper(),
+        scenario=scenario,
+        target_episodes=int(target_episodes),
+        episodes_completed=max(int(grounded), int(target_episodes)),
+        source="happo_salvage_gap_repair",
+    )
+    print(
+        f"[happo] marked launcher-complete after salvage gap repair under {output_dir}",
+        flush=True,
+    )
+    return job_counts_as_launcher_complete(
+        output_dir,
+        target_episodes=int(target_episodes),
+        output_root=output_root,
+    )
 
 
 def _latest_launcher_job_record(
@@ -2174,6 +2390,18 @@ def discover_job_resume_plan(
         return plan
 
     algo = algorithm.lower()
+    if algo == "happo" and _happo_last_episode_flush_gap_complete(
+        output_root,
+        output_dir,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+        rollout_threads=rollout_threads,
+    ):
+        plan["note"] = "happo_salvage_gap_complete"
+        plan["completed_episodes"] = target_episodes
+        plan["remaining_episodes"] = 0
+        return plan
+
     live = read_live_progress_json(output_dir)
     completed = infer_trustable_completed_episodes(
         output_dir,
@@ -4769,6 +4997,14 @@ class CityLearnV3BackendAdapter:
             return summary
 
         episode_length = max(int(self.episode_time_steps), 1)
+        if self.live_progress_path is not None:
+            self.write_live_heartbeat(
+                stage="resume_preload",
+                note=(
+                    f"Preloading resume artifacts for {completed} completed episodes "
+                    "(reading incremental CSVs from disk)."
+                ),
+            )
 
         # timeseries: keep only fully-completed episodes (episode < completed) and
         # dedup by (episode, episode_step) keeping the first occurrence, so a buggy
@@ -4788,6 +5024,11 @@ class CityLearnV3BackendAdapter:
                 if ep is not None:
                     self._update_reward_accumulators(int(ep), row)
             summary["timeseries_rows"] = len(kept_ts)
+            if self.live_progress_path is not None:
+                self.write_live_heartbeat(
+                    stage="resume_preload",
+                    note=f"Timeseries preload complete ({len(kept_ts)} rows retained).",
+                )
 
         # trace: same completed-episode filter + dedup (per agent within a step).
         trace_rows = read_csv_rows(self._incremental_trace_path) if self._incremental_trace_path else []

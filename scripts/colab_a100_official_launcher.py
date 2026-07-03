@@ -1097,6 +1097,16 @@ def run_one_job(
     job_run_dir = run_dir(output_root, name, scenario, args.seed)
     job_output_dir = path_for_status(root, job_run_dir)
 
+    if args.skip_completed and name == "happo":
+        from citylearn_v3_training_common import attempt_repair_happo_launcher_job
+
+        attempt_repair_happo_launcher_job(
+            resolve_status_path(root, job_output_dir),
+            target_episodes=int(args.episodes),
+            output_root=output_root,
+            rollout_threads=int(args.happo_n_rollout_threads),
+        )
+
     if try_skip_completed_job(
         root=root,
         manifest=manifest,
@@ -1838,7 +1848,10 @@ def run_dynamic_backfill_jobs(
             output_root,
             target_episodes=int(args.episodes),
             episode_time_steps=int(args.episode_time_steps),
-            happo_rollout_threads=int(getattr(args, "happo_n_rollout_threads", None) or 12),
+            happo_rollout_threads=max(
+                1,
+                int(getattr(args, "happo_n_rollout_threads", None) or 2),
+            ),
             seed=int(args.seed),
         )
         print(

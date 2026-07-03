@@ -19,6 +19,8 @@ if str(HARL_ROOT) not in sys.path:
 from citylearn_v3_training_common import (  # noqa: E402
     DATA_DIR_NAME,
     JOB_LAUNCHER_COMPLETE_MARKER,
+    _happo_last_episode_flush_gap_complete,
+    attempt_repair_happo_launcher_job,
     job_counts_as_launcher_complete,
     job_meets_launcher_complete_requirements,
     reconcile_stale_job_launcher_marker,
@@ -106,7 +108,8 @@ def test_resume_slice_episodes_field_does_not_block_skip(tmp_path: Path) -> None
     assert job_counts_as_launcher_complete(run, target_episodes=50)
 
 
-def test_happo_salvage_without_kpis_does_not_skip(tmp_path: Path) -> None:
+def test_happo_salvage_recorded_target_skips_without_kpi(tmp_path: Path) -> None:
+    """Salvage HAPPO with episodes_recorded=50 but timeseries stuck at 49 must SKIP."""
     run = tmp_path / "HAPPO" / "E1"
     run.mkdir(parents=True)
     _write_results(
@@ -129,6 +132,70 @@ def test_happo_salvage_without_kpis_does_not_skip(tmp_path: Path) -> None:
     _write_timeseries_steps(run, 49 * 8760)
     _touch_checkpoint(run, algorithm="happo")
 
+    assert _happo_last_episode_flush_gap_complete(None, run, target_episodes=50)
+    assert job_meets_launcher_complete_requirements(run, target_episodes=50)
+    assert job_counts_as_launcher_complete(run, target_episodes=50)
+
+
+def test_happo_salvage_49_partial_final_episode_skips_without_kpi(tmp_path: Path) -> None:
+    """Drive Colab loop: 49 full episodes + partial ep-50 steps, salvage, no KPI audit."""
+    run = tmp_path / "HAPPO" / "E1_seed_0"
+    run.mkdir(parents=True)
+    _write_results(
+        run,
+        {
+            "algorithm": "HAPPO",
+            "scenario": "E1",
+            "status": "completed_with_salvage",
+            "episodes_recorded": 49,
+            "episode_time_steps": 8760,
+            "citylearn_v3_report": {"all_values": {}},
+            "hyperparameters": {
+                "target_episodes": 50,
+                "n_rollout_threads": 4,
+                "run_completed_with_salvage": True,
+            },
+        },
+    )
+    _write_timeseries_steps(run, 49 * 8760 + 60)
+    _touch_checkpoint(run, algorithm="happo")
+    (run / "live_progress.json").write_text(
+        json.dumps(
+            {
+                "episode": 49,
+                "episode_step": 60,
+                "global_step": 49 * 8760 + 60,
+                "completed_episode_count": 49,
+                "algorithm": "happo",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _happo_last_episode_flush_gap_complete(None, run, target_episodes=50)
+    assert attempt_repair_happo_launcher_job(run, target_episodes=50)
+    assert job_counts_as_launcher_complete(run, target_episodes=50)
+
+
+def test_happo_salvage_mid_training_does_not_skip(tmp_path: Path) -> None:
+    run = tmp_path / "HAPPO" / "E1"
+    run.mkdir(parents=True)
+    _write_results(
+        run,
+        {
+            "algorithm": "HAPPO",
+            "scenario": "E1",
+            "status": "completed_with_salvage",
+            "episodes_recorded": 30,
+            "episode_time_steps": 8760,
+            "citylearn_v3_report": {"all_values": {}},
+            "hyperparameters": {"target_episodes": 50, "n_rollout_threads": 4},
+        },
+    )
+    _write_timeseries_steps(run, 30 * 8760)
+    _touch_checkpoint(run, algorithm="happo")
+
+    assert not _happo_last_episode_flush_gap_complete(None, run, target_episodes=50)
     assert not job_meets_launcher_complete_requirements(run, target_episodes=50)
     assert not job_counts_as_launcher_complete(run, target_episodes=50)
 
