@@ -17,6 +17,30 @@ import pandas as pd
 DISTRICT = "District"
 
 
+def unwrap_citylearn_core_env(env):
+    """Reach CityLearn core without calling broken HARL ``ShareVecEnv.unwrapped``."""
+    if env is None:
+        return env
+    seen: set[int] = set()
+    current = env
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if hasattr(current, "evaluate_v2"):
+            return current
+        nested = getattr(current, "env", None)
+        if nested is not None and nested is not current:
+            current = nested
+            continue
+        try:
+            unwrapped = getattr(current, "unwrapped", current)
+        except NameError:
+            unwrapped = current
+        if unwrapped is current:
+            break
+        current = unwrapped
+    return current
+
+
 CITYLEARN_V2_KPI_GROUPS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
     "flexibility": {
         "grid_import": (

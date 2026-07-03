@@ -118,6 +118,47 @@ def test_dec_pomdp_parallel_env_contract_and_team_reward():
     assert kpis["electricity_cost"] == pytest.approx(0.82)
 
 
+def test_dec_pomdp_get_kpi_frame_avoids_broken_harl_unwrapped():
+    class _Core:
+        def evaluate_v2(self):
+            return pd.DataFrame(
+                [
+                    {
+                        "level": "district",
+                        "name": "District",
+                        "cost_function": "district_energy_grid_shape_quality_peak_all_time_average_to_baseline_ratio",
+                        "value": 0.5,
+                    }
+                ]
+            )
+
+    class _BrokenWrapper:
+        def __init__(self):
+            self.env = _Core()
+
+        @property
+        def unwrapped(self):
+            raise NameError("name 'VecEnvWrapper' is not defined")
+
+    from citylearn.madrl_kpis import unwrap_citylearn_core_env
+
+    broken = _BrokenWrapper()
+    assert unwrap_citylearn_core_env(broken) is broken.env
+
+    class _DecPOMDPLike:
+        def __init__(self, env):
+            self.env = env
+
+        def get_kpi_frame(self):
+            from citylearn.madrl_kpis import evaluate_citylearn_v2_kpi_frame, unwrap_citylearn_core_env
+
+            return evaluate_citylearn_v2_kpi_frame(unwrap_citylearn_core_env(self.env))
+
+    frame = _DecPOMDPLike(broken).get_kpi_frame()
+    assert len(frame) == 1
+    assert float(frame.iloc[0]["value"]) == pytest.approx(0.5)
+
+
 def test_citylearn_v2_kpi_extractor_uses_exact_v2_names():
     frame = pd.DataFrame(
         [

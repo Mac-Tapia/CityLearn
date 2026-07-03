@@ -995,6 +995,163 @@ def _recorded_episodes_from_results(payload: Mapping[str, object]) -> Optional[i
     return None
 
 
+def _kpi_evaluated_episodes_from_results(payload: Mapping[str, object]) -> Optional[int]:
+    """Last resume-slice episode count in results.json (not total training progress).
+
+    On ``--resume``, train scripts often pass the *remaining* slice as ``extra.episodes``
+    (e.g. 11/12/40). Prefer ``training_episodes_from_artifacts`` for skip/resume gates.
+    """
+    kpi_ep = _as_int(payload.get("episodes"))
+    if kpi_ep is not None:
+        return kpi_ep
+    report = payload.get("citylearn_v3_report")
+    if isinstance(report, Mapping):
+        source = dict(report.get("report_source") or {})
+        counted = _as_int(source.get("completed_episode_count"))
+        if counted is not None:
+            return counted
+    return None
+
+
+def _results_have_audited_kpis(payload: Optional[Mapping[str, object]]) -> bool:
+    if not payload:
+        return False
+    report = payload.get("citylearn_v3_report")
+    if not isinstance(report, Mapping):
+        return False
+    all_values = report.get("all_values")
+    return isinstance(all_values, Mapping) and bool(all_values)
+
+
+def training_episodes_from_artifacts(
+    payload: Mapping[str, object],
+    output_dir: Path,
+    *,
+    algorithm: str,
+    episode_time_steps: int,
+    rollout_threads: int,
+) -> int:
+    """Grounded training episode count: max(timeseries, episodes_recorded, MAAC checkpoints)."""
+    return _grounded_completed_episodes_for_skip(
+        payload,
+        output_dir,
+        algorithm=algorithm,
+        episode_time_steps=episode_time_steps,
+        rollout_threads=rollout_threads,
+    )
+
+
+def _grounded_completed_episodes_for_skip(
+    payload: Mapping[str, object],
+    output_dir: Path,
+    *,
+    algorithm: str,
+    episode_time_steps: int,
+    rollout_threads: int,
+) -> int:
+    """Training progress for --skip-completed (ignores resume-slice ``episodes`` field)."""
+    algo = str(algorithm or "").lower()
+    output_dir = Path(output_dir)
+    episode_time_steps = max(1, int(episode_time_steps))
+    rollout_threads = max(1, int(rollout_threads))
+
+    inferred = _max_inferred_completed_episodes(
+        output_dir,
+        algorithm=algo,
+        episode_time_steps=episode_time_steps,
+        rollout_threads=rollout_threads,
+    )
+    recorded = _recorded_episodes_from_results(payload) or 0
+    grounded = max(int(inferred), int(recorded))
+    if algo == "maac":
+        grounded = max(grounded, max_maac_checkpoint_episode(output_dir))
+    return int(grounded)
+
+
+def job_meets_launcher_complete_requirements(
+    output_dir: Path,
+    *,
+    target_episodes: int,
+    output_root: Optional[Path] = None,
+    rollout_threads: Optional[int] = None,
+) -> bool:
+    """Single gate: skip/re-analysis only when KPIs exist for the full episode budget."""
+    output_dir = Path(output_dir)
+    target_episodes = max(1, int(target_episodes))
+    payload = read_job_results_json(output_dir)
+    if not payload:
+        return False
+
+    hyperparameters = dict(payload.get("hyperparameters") or {})
+    algo = _payload_algorithm(payload) or _infer_algorithm_from_artifacts(output_dir)
+    if not algo:
+        return False
+
+    episode_time_steps = (
+        _as_int(payload.get("episode_time_steps"))
+        or _as_int(hyperparameters.get("episode_time_steps"))
+        or 8760
+    )
+    roll = (
+        int(rollout_threads)
+        if rollout_threads is not None and int(rollout_threads) > 0
+        else _infer_rollout_threads(payload)
+    )
+    grounded = _grounded_completed_episodes_for_skip(
+        payload,
+        output_dir,
+        algorithm=algo,
+        episode_time_steps=episode_time_steps,
+        rollout_threads=roll,
+    )
+    if grounded < target_episodes:
+        return False
+    if not _results_have_audited_kpis(payload):
+        return False
+    if not _artifact_proves_job_complete(
+        output_dir,
+        algorithm=algo,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+        rollout_threads=roll,
+    ):
+        return False
+    return True
+
+
+def reconcile_stale_job_launcher_marker(
+    output_dir: Path,
+    *,
+    target_episodes: int,
+    output_root: Optional[Path] = None,
+    rollout_threads: Optional[int] = None,
+) -> bool:
+    """Drop a write-once marker that no longer passes KPI-grounded completion."""
+    output_dir = Path(output_dir)
+    if not read_job_launcher_complete_marker(output_dir):
+        return False
+    if job_meets_launcher_complete_requirements(
+        output_dir,
+        target_episodes=int(target_episodes),
+        output_root=output_root,
+        rollout_threads=rollout_threads,
+    ):
+        return False
+    removed = False
+    for rel in (f"{DATA_DIR_NAME}/{JOB_LAUNCHER_COMPLETE_MARKER}", JOB_LAUNCHER_COMPLETE_MARKER):
+        path = output_dir / rel
+        if path.is_file():
+            path.unlink()
+            removed = True
+    if removed:
+        print(
+            f"[launcher] removed stale {JOB_LAUNCHER_COMPLETE_MARKER} under {output_dir} "
+            f"(KPI-grounded completion not met for target={int(target_episodes)})",
+            flush=True,
+        )
+    return removed
+
+
 def _payload_algorithm(payload: Mapping[str, object]) -> str:
     hyperparameters = dict(payload.get("hyperparameters") or {})
     return str(payload.get("algorithm") or hyperparameters.get("algorithm_family") or "").lower()
@@ -1251,7 +1408,14 @@ def _artifact_proves_job_complete(
     algo = algorithm.lower()
 
     if algo == "maac":
-        return max_maac_checkpoint_episode(output_dir) >= target_episodes
+        ckpt_ep = max_maac_checkpoint_episode(output_dir)
+        inferred_maac = infer_completed_episodes_from_timeseries_global_step(
+            output_dir,
+            episode_time_steps=episode_time_steps,
+            rollout_threads=rollout_threads,
+            algorithm=algo,
+        )
+        return max(ckpt_ep, inferred_maac) >= target_episodes
 
     inferred = infer_completed_episodes_from_timeseries_global_step(
         output_dir,
@@ -1341,10 +1505,23 @@ def job_launcher_completion_blockers(
         else _infer_rollout_threads(payload)
     )
 
+    if not _results_have_audited_kpis(payload):
+        blockers.append("citylearn_v3_report.all_values missing (KPI audit incomplete)")
+
     if algo == "maac" and target is not None:
         max_ckpt = max_maac_checkpoint_episode(output_dir)
-        if 0 < max_ckpt < int(target):
-            blockers.append(f"maac checkpoint_episode_{max_ckpt}.pt < target={target}")
+        ts_ep = infer_completed_episodes_from_timeseries_global_step(
+            output_dir,
+            episode_time_steps=int(episode_time_steps),
+            rollout_threads=rollout_threads,
+            algorithm=algo,
+        )
+        grounded_maac = max(max_ckpt, ts_ep)
+        if grounded_maac < int(target):
+            blockers.append(
+                f"maac training episodes={grounded_maac} "
+                f"(checkpoint={max_ckpt}, timeseries={ts_ep}) < target={target}"
+            )
 
     if target is not None and not _artifact_proves_job_complete(
         output_dir,
@@ -1440,16 +1617,36 @@ def _payload_recorded_episodes_met_target(
     algorithm: str,
     target_episodes: int,
 ) -> bool:
-    """``results.json`` declares the full episode budget (salvage or clean) + checkpoints."""
+    """Salvage path: grounded episodes + checkpoints meet target (not inflated timeseries)."""
     target = _resolve_job_target_episodes(payload, target_episodes=target_episodes)
-    recorded = _recorded_episodes_from_results(payload)
-    if target is None or recorded is None:
+    if target is None:
         return False
-    if int(recorded) < int(target):
+    hyperparameters = dict(payload.get("hyperparameters") or {})
+    episode_time_steps = (
+        _as_int(payload.get("episode_time_steps"))
+        or _as_int(hyperparameters.get("episode_time_steps"))
+        or 8760
+    )
+    rollout_threads = _infer_rollout_threads(payload)
+    grounded = _grounded_completed_episodes_for_skip(
+        payload,
+        Path(output_dir),
+        algorithm=algorithm,
+        episode_time_steps=int(episode_time_steps),
+        rollout_threads=int(rollout_threads),
+    )
+    if int(grounded) < int(target):
         return False
     algo_key = str(algorithm or "").lower()
     if algo_key == "maac":
-        return max_maac_checkpoint_episode(Path(output_dir)) >= int(target)
+        ckpt_ep = max_maac_checkpoint_episode(Path(output_dir))
+        ts_ep = infer_completed_episodes_from_timeseries_global_step(
+            Path(output_dir),
+            episode_time_steps=int(episode_time_steps),
+            rollout_threads=int(rollout_threads),
+            algorithm=algo_key,
+        )
+        return max(ckpt_ep, ts_ep) >= int(target)
     return _checkpoint_exists_for_algorithm(Path(output_dir), algorithm)
 
 
@@ -1543,10 +1740,10 @@ def _happo_last_episode_flush_gap_complete(
         target_episodes=target_episodes,
         episode_time_steps=episode_time_steps,
     ):
-        return True
+        payload = read_job_results_json(output_dir) or {}
+        return _results_have_audited_kpis(payload)
 
-    hp_target = _as_int(hyper.get("target_episodes")) or _as_int(hyper.get("episodes"))
-    return hp_target is not None and int(hp_target) >= target_episodes
+    return False
 
 
 def _latest_launcher_job_record(
@@ -1617,27 +1814,9 @@ def job_counts_as_launcher_complete(
     target_episodes: Optional[int] = None,
     output_root: Optional[Path] = None,
 ) -> bool:
-    """True only when a job genuinely finished all target episodes.
-
-    Priority (grounded in persisted artifacts, never fragile row-count heuristics):
-
-    1. ``job_launcher_complete.json`` write-once marker from a prior successful run.
-    2. Clean ``results.json`` (no salvage/error/incomplete) with ``episodes_recorded>=target``.
-    3. Artifact recovery when results.json was damaged by a mistaken retrain:
-       - MAAC: ``checkpoint_episode_N.pt`` with N>=target.
-       - HAPPO/MASAC/MATD3: max ``global_step`` in timeseries.csv proves >=target episodes
-         (correct with n_rollout_threads>1) AND restorable checkpoints exist.
-    """
+    """True only when KPIs + artifacts prove ``target_episodes`` (see ``job_meets_launcher_complete_requirements``)."""
     output_dir = Path(output_dir)
     req_target = _as_int(target_episodes)
-
-    marker = read_job_launcher_complete_marker(output_dir)
-    if marker:
-        m_done = _as_int(marker.get("episodes_completed"))
-        m_target = _as_int(marker.get("target_episodes"))
-        need = req_target or m_target
-        if m_done is not None and need is not None and int(m_done) >= int(need):
-            return True
 
     payload = read_job_results_json(output_dir)
     hyperparameters = dict(payload.get("hyperparameters") or {}) if payload else {}
@@ -1648,127 +1827,52 @@ def job_counts_as_launcher_complete(
         or 8760
     )
     rollout_threads = _infer_rollout_threads(payload)
+    target = req_target or _resolve_job_target_episodes(payload or {}, target_episodes=req_target)
 
-    if payload:
-        if str(payload.get("status") or "").lower() == "completed_with_salvage":
-            pass  # fall through to artifact recovery
-        elif hyperparameters.get("run_completed_with_salvage") or hyperparameters.get("run_error"):
-            pass
-        elif hyperparameters.get("run_incomplete"):
-            pass
-        else:
-            target = _resolve_job_target_episodes(payload, target_episodes=req_target)
-            recorded = _recorded_episodes_from_results(payload)
+    if target is not None:
+        reconcile_stale_job_launcher_marker(
+            output_dir,
+            target_episodes=int(target),
+            output_root=output_root,
+            rollout_threads=rollout_threads,
+        )
 
-            results_ok = True
-            if target is not None and recorded is not None and int(recorded) < int(target):
-                results_ok = False
-            audit = dict(payload.get("artifact_audit") or {})
-            expected = audit.get("expected_episodes")
-            if expected is not None and recorded is not None and int(recorded) < int(expected):
-                results_ok = False
-            if results_ok and algo == "maac" and target is not None:
-                max_ckpt = max_maac_checkpoint_episode(output_dir)
-                if 0 < max_ckpt < int(target):
-                    results_ok = False
+    marker = read_job_launcher_complete_marker(output_dir)
 
-            if results_ok and target is not None and recorded is not None and int(recorded) >= int(target):
-                write_job_launcher_complete_marker(
-                    output_dir,
-                    algorithm=algo or "UNKNOWN",
-                    scenario=str(payload.get("scenario") or ""),
-                    target_episodes=int(target),
-                    episodes_completed=int(recorded),
-                    source="results.json",
-                )
+    if marker and target is not None:
+        m_done = _as_int(marker.get("episodes_completed"))
+        m_target = _as_int(marker.get("target_episodes"))
+        need = int(req_target or m_target or target)
+        if m_done is not None and int(m_done) >= need:
+            if job_meets_launcher_complete_requirements(
+                output_dir,
+                target_episodes=need,
+                output_root=output_root,
+                rollout_threads=rollout_threads,
+            ):
                 return True
 
-        target_for_salvage = _resolve_job_target_episodes(payload, target_episodes=req_target)
-        salvage_payload = (
-            str(payload.get("status") or "").lower() == "completed_with_salvage"
-            or bool(hyperparameters.get("run_completed_with_salvage"))
-            or bool(hyperparameters.get("run_error"))
-        )
-        if (
-            salvage_payload
-            and target_for_salvage is not None
-            and algo
-            and _payload_recorded_episodes_met_target(
-                payload, output_dir, algo, int(target_for_salvage)
-            )
+    if payload and target is not None and algo:
+        if job_meets_launcher_complete_requirements(
+            output_dir,
+            target_episodes=int(target),
+            output_root=output_root,
+            rollout_threads=rollout_threads,
         ):
-            recorded = int(_recorded_episodes_from_results(payload) or 0)
+            grounded = _grounded_completed_episodes_for_skip(
+                payload,
+                output_dir,
+                algorithm=algo,
+                episode_time_steps=int(episode_time_steps),
+                rollout_threads=int(rollout_threads),
+            )
             write_job_launcher_complete_marker(
                 output_dir,
                 algorithm=algo,
                 scenario=str(payload.get("scenario") or _infer_scenario_from_run_dir(output_dir)),
-                target_episodes=int(target_for_salvage),
-                episodes_completed=recorded,
-                source="results.json_salvage_met_target",
-            )
-            return True
-
-    target = req_target or _resolve_job_target_episodes(payload or {}, target_episodes=req_target)
-    if target is None or not algo:
-        return False
-
-    if _artifact_proves_job_complete(
-        output_dir,
-        algorithm=algo,
-        target_episodes=int(target),
-        episode_time_steps=int(episode_time_steps),
-        rollout_threads=rollout_threads,
-    ):
-        inferred = _max_inferred_completed_episodes(
-            output_dir,
-            algorithm=algo,
-            episode_time_steps=int(episode_time_steps),
-            rollout_threads=rollout_threads,
-        )
-        write_job_launcher_complete_marker(
-            output_dir,
-            algorithm=algo,
-            scenario=str((payload or {}).get("scenario") or _infer_scenario_from_run_dir(output_dir)),
-            target_episodes=int(target),
-            episodes_completed=max(int(inferred), int(target)),
-            source="artifact_recovery",
-        )
-        return True
-
-    if output_root is not None and target is not None and algo:
-        scenario = str((payload or {}).get("scenario") or _infer_scenario_from_run_dir(output_dir))
-        if scenario and launcher_manifest_proves_job_complete(
-            Path(output_root),
-            output_dir,
-            algorithm=algo,
-            scenario=scenario,
-            target_episodes=int(target),
-        ):
-            write_job_launcher_complete_marker(
-                output_dir,
-                algorithm=algo,
-                scenario=scenario,
                 target_episodes=int(target),
-                episodes_completed=int(target),
-                source="launcher_manifest_exit0",
-            )
-            return True
-
-    if algo == "happo" and target is not None:
-        if _happo_last_episode_flush_gap_complete(
-            output_root,
-            output_dir,
-            target_episodes=int(target),
-            episode_time_steps=int(episode_time_steps),
-            rollout_threads=rollout_threads,
-        ):
-            write_job_launcher_complete_marker(
-                output_dir,
-                algorithm=algo,
-                scenario=str((payload or {}).get("scenario") or _infer_scenario_from_run_dir(output_dir)),
-                target_episodes=int(target),
-                episodes_completed=int(target),
-                source="happo_flush_gap_complete",
+                episodes_completed=int(grounded),
+                source="kpi_audited_complete",
             )
             return True
 
@@ -3943,6 +4047,13 @@ def write_training_artifacts(
     if extra:
         results.update(dict(extra))
 
+    slice_episodes = _as_int(results.get("episodes"))
+    total_episodes = max(int(episodes_recorded), int(slice_episodes or 0), int(adapter_completed))
+    report_completed = _as_int((report.get("report_source") or {}).get("completed_episode_count"))  # type: ignore[union-attr]
+    if report_completed is not None:
+        total_episodes = max(total_episodes, int(report_completed))
+    results["episodes"] = int(total_episodes)
+
     results_path = data_dir / "results.json"
     root_results_path = output_dir / "results.json"
     hyperparameters = dict(hyperparameters or {})
@@ -4327,9 +4438,11 @@ class CityLearnV3BackendAdapter:
 
         # Cache stable env traversal — identity never changes after init; avoids wrapper
         # traversal in every step-level hot path (_record_step, _write_live_progress, etc.)
-        _obj = getattr(self.env, "env", getattr(self.env, "unwrapped", self.env))
+        from citylearn.madrl_kpis import unwrap_citylearn_core_env
+
+        _obj = getattr(self.env, "env", None) or self.env
         self._cached_objective_env = _obj
-        self._cached_core_env = getattr(_obj, "unwrapped", _obj)
+        self._cached_core_env = unwrap_citylearn_core_env(_obj)
 
         self.scenario = scenario
         self.algorithm = str(algorithm).upper()

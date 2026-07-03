@@ -45,6 +45,8 @@ def verify_critical_patches(repo: Path) -> List[str]:
         problems.append(
             "training_common sin preview_job_launcher_decision (celdas 2.1b/7.1)"
         )
+    if "unwrap_citylearn_core_env" not in common_src:
+        problems.append("training_common sin unwrap_citylearn_core_env en adapter init")
 
     maac_train_src = train_maac.read_text(encoding="utf-8")
     if "job_counts_as_launcher_complete" not in maac_train_src:
@@ -61,6 +63,37 @@ def verify_critical_patches(repo: Path) -> List[str]:
         problems.append(
             "launcher importa resolve_status_path inexistente (ImportError)"
         )
+
+    madrl_kpis = repo / "CityLearn/citylearn/madrl_kpis.py"
+    dec_pomdp = repo / "CityLearn/citylearn/dec_pomdp.py"
+    harl_wrappers = repo / "external/HARL/harl/envs/env_wrappers.py"
+    regenerate = repo / "CityLearn/scripts/regenerate_happo_kpis.py"
+    for path in (madrl_kpis, dec_pomdp, harl_wrappers, regenerate):
+        if not path.is_file():
+            problems.append(f"Falta archivo: {path}")
+
+    if madrl_kpis.is_file():
+        kpis_src = madrl_kpis.read_text(encoding="utf-8")
+        if "def unwrap_citylearn_core_env" not in kpis_src:
+            problems.append("madrl_kpis sin unwrap_citylearn_core_env (fix VecEnvWrapper)")
+
+    if dec_pomdp.is_file():
+        dec_src = dec_pomdp.read_text(encoding="utf-8")
+        if "self.env.unwrapped" in dec_src:
+            problems.append("dec_pomdp aún usa self.env.unwrapped (NameError HARL)")
+        if "unwrap_citylearn_core_env" not in dec_src:
+            problems.append("dec_pomdp sin unwrap_citylearn_core_env")
+
+    if harl_wrappers.is_file():
+        harl_src = harl_wrappers.read_text(encoding="utf-8")
+        if "class VecEnvWrapper" not in harl_src:
+            problems.append("HARL env_wrappers sin stub VecEnvWrapper")
+
+    prepare = repo / "CityLearn/scripts/prepare_happo_colab_resume.py"
+    if not prepare.is_file():
+        problems.append("Falta prepare_happo_colab_resume.py (resume HAPPO 49→50)")
+    if regenerate.is_file() and "preflight" not in regenerate.read_text(encoding="utf-8"):
+        problems.append("regenerate_happo_kpis sin preflight de checkpoints")
 
     return problems
 
@@ -86,7 +119,8 @@ def main(argv: List[str] | None = None) -> int:
 
     print(
         "[OK] parches verificados: MAAC cuda-sync + validación de corrida "
-        "+ preview_job_launcher_decision + ImportError launcher"
+        "+ preview_job_launcher_decision + ImportError launcher "
+        "+ unwrap_citylearn_core_env (HAPPO KPIs)"
     )
     return 0
 

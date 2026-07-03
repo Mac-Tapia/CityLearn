@@ -275,10 +275,10 @@ def objective_manifest() -> Dict[str, object]:
 
 
 def _unwrap_env(env):
-    if hasattr(env, "env") and hasattr(env.env, "unwrapped"):
-        return env.env.unwrapped
+    """Reach CityLearn core without calling broken HARL ``ShareVecEnv.unwrapped``."""
+    from citylearn.madrl_kpis import unwrap_citylearn_core_env
 
-    return getattr(env, "unwrapped", env)
+    return unwrap_citylearn_core_env(env)
 
 
 def _safe_float(value) -> Optional[float]:

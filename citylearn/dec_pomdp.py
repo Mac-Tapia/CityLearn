@@ -22,6 +22,7 @@ from citylearn.madrl_kpis import (
     evaluate_citylearn_v2_all_kpis,
     evaluate_citylearn_v2_kpi_frame,
     evaluate_citylearn_v2_kpis,
+    unwrap_citylearn_core_env,
 )
 
 
@@ -170,17 +171,17 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
     def get_kpis(self) -> Dict[str, float]:
         """Return CityLearn v2 KPI summary for reporting."""
 
-        return evaluate_citylearn_v2_kpis(self.env.unwrapped)
+        return evaluate_citylearn_v2_kpis(unwrap_citylearn_core_env(self.env))
 
     def get_kpi_frame(self):
         """Return the complete CityLearn v2 KPI DataFrame."""
 
-        return evaluate_citylearn_v2_kpi_frame(self.env.unwrapped)
+        return evaluate_citylearn_v2_kpi_frame(unwrap_citylearn_core_env(self.env))
 
     def get_all_kpis(self) -> Dict[str, Dict[str, float]]:
         """Return all CityLearn v2 KPIs grouped by district/building name."""
 
-        return evaluate_citylearn_v2_all_kpis(self.env.unwrapped)
+        return evaluate_citylearn_v2_all_kpis(unwrap_citylearn_core_env(self.env))
 
     def close(self):
         self.env.close()
@@ -189,7 +190,7 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
         return self.env.render()
 
     def _agent_names(self) -> List[str]:
-        buildings = getattr(self.env.unwrapped, "buildings", [])
+        buildings = getattr(unwrap_citylearn_core_env(self.env), "buildings", [])
         names = [getattr(building, "name", None) for building in buildings]
         names = [str(name) for name in names if name is not None]
 

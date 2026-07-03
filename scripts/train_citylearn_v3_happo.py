@@ -326,7 +326,7 @@ def main() -> int:
             hyperparameters["run_error"] = f"{type(run_error).__name__}: {run_error}"
         try:
             report = citylearn_v3_training_report(report_candidate)
-        except Exception as exc:  # noqa: BLE001 - keep fallback report
+        except Exception as exc:  # noqa: BLE001 - keep fallback report / salvage path
             print(f"[happo] training report failed, using fallback report: {exc}", flush=True)
         try:
             artifacts = write_training_artifacts(
