@@ -169,6 +169,13 @@ def _job_is_running(job: Mapping[str, object]) -> bool:
     return job.get("completed_at") is None and not job.get("planned_only") and not job.get("skipped")
 
 
+def _running_jobs_grounded(
+    status: Mapping[str, object], root: Path
+) -> List[Mapping[str, object]]:
+    jobs = [job for job in status.get("jobs", []) if _job_is_running(job)]
+    return [job for job in jobs if not _artifact_complete_for_job(status, job, root)]
+
+
 def execution_mode(status: Mapping[str, object]) -> str:
     par = dict(status.get("parallelization") or {})
     return str(par.get("execution_mode") or status.get("execution") or "?")
@@ -177,6 +184,27 @@ def execution_mode(status: Mapping[str, object]) -> str:
 def dynamic_backfill_enabled(status: Mapping[str, object]) -> bool:
     par = dict(status.get("parallelization") or {})
     return bool(par.get("dynamic_backfill", True))
+
+
+def _artifact_complete_for_job(
+    status: Mapping[str, object],
+    job: Mapping[str, object],
+    root: Path,
+) -> bool:
+    """True when on-disk artifacts prove the job is done (same as --skip-completed)."""
+    try:
+        from citylearn_v3_training_common import job_counts_as_launcher_complete
+
+        output_dir = path_for_job(root, str(job.get("output_dir") or ""))
+        episodes = int(status.get("episodes") or 0)
+        output_root = path_for_job(root, str(status.get("output_root", "")))
+        return job_counts_as_launcher_complete(
+            output_dir,
+            target_episodes=episodes if episodes > 0 else None,
+            output_root=output_root,
+        )
+    except Exception:
+        return False
 
 
 def estimate_backfill_eta_minutes(
@@ -199,6 +227,8 @@ def estimate_backfill_eta_minutes(
     remaining: List[float] = []
     for job in status.get("jobs", []):
         if _job_is_done(job):
+            continue
+        if _artifact_complete_for_job(status, job, root):
             continue
         algo = str(job.get("name") or "")
         prior = EST_MIN_PER_EPISODE_BY_ALGO.get(algo, est_min_per_episode)
@@ -273,6 +303,23 @@ def _jobs_for_algo(status: Mapping[str, object], algo: str) -> List[Mapping[str,
     return [j for j in status.get("jobs", []) if str(j.get("name")) == algo]
 
 
+def _ep_progress_from_live(
+    progress: Optional[Mapping[str, object]],
+    *,
+    episodes: int,
+    episode_steps: int,
+) -> tuple[int, int]:
+    """Return (episode_index, episode_step) for ETA (boundary-aware)."""
+    if not progress:
+        return 0, 0
+    ep = int(progress.get("episode") or 0)
+    ep_step = int(progress.get("episode_step") or 0)
+    if ep_step >= episode_steps:
+        ep = min(ep + 1, episodes)
+        ep_step = 0
+    return ep, ep_step
+
+
 def progress_fps(progress: Mapping[str, object]) -> Optional[float]:
     raw = progress.get("fps")
     if raw is not None:
@@ -298,17 +345,17 @@ def estimate_minutes_remaining_for_job(
     if not progress:
         return episodes * est_min_per_episode
 
-    current_ep = int(progress.get("episode") or 0)
-    ep_step = int(progress.get("episode_step") or 0)
+    current_ep, ep_step = _ep_progress_from_live(
+        progress, episodes=episodes, episode_steps=episode_steps
+    )
     remaining_steps = max(0, (episodes - current_ep - 1) * episode_steps + (episode_steps - ep_step))
 
     fps = progress_fps(progress)
     if fps and fps > 0.1:
         return remaining_steps / fps / 60.0
 
-    remaining_eps = max(0, episodes - current_ep)
     prior = EST_MIN_PER_EPISODE_BY_ALGO.get(algo, est_min_per_episode)
-    return remaining_eps * prior
+    return (remaining_steps / max(episode_steps, 1)) * prior
 
 
 def _phase_algos(phase: int) -> frozenset:
@@ -571,13 +618,10 @@ def print_gpu() -> None:
         print(apps)
 
 
-def running_jobs(status: Mapping[str, object]) -> List[Mapping[str, object]]:
+def running_jobs(status: Mapping[str, object], root: Optional[Path] = None) -> List[Mapping[str, object]]:
     """All in-flight jobs sorted MADRL then escenario (HAPPO/E1 … MAAC/E3)."""
-    jobs = [
-        job
-        for job in status.get("jobs", [])
-        if _job_is_running(job)
-    ]
+    base = root or project_root()
+    jobs = _running_jobs_grounded(status, base)
     return sorted(
         jobs,
         key=lambda j: (
@@ -591,9 +635,41 @@ def running_jobs(status: Mapping[str, object]) -> List[Mapping[str, object]]:
     )
 
 
+def _live_progress_for_job(
+    status: Mapping[str, object], job: Mapping[str, object], root: Path
+) -> Optional[Dict[str, object]]:
+    output_dir = job.get("output_dir")
+    if not output_dir:
+        return None
+    return read_json(path_for_job(root, str(output_dir)) / "live_progress.json")
+
+
+def collect_running_progress(
+    status: Mapping[str, object], root: Path, *, stale_seconds: float = 600.0
+) -> List[Dict[str, object]]:
+    """One live_progress row per running job (status-grounded, not lag-filtered)."""
+    rows: List[Dict[str, object]] = []
+    for job in running_jobs(status, root):
+        progress = _live_progress_for_job(status, job, root)
+        if progress is None:
+            progress = {
+                "algorithm": job.get("name"),
+                "scenario": job.get("scenario"),
+                "live_status": "waiting_for_progress",
+            }
+        age = file_age_seconds(
+            path_for_job(root, str(job.get("output_dir") or "")) / "live_progress.json"
+        )
+        progress["_lag"] = age
+        progress["_stale"] = age is None or age > stale_seconds
+        rows.append(progress)
+    return rows
+
+
 def print_progress(status: Mapping[str, object], root: Path) -> None:
-    jobs = running_jobs(status)
-    if not jobs:
+    jobs = running_jobs(status, root)
+    progress_rows = collect_running_progress(status, root)
+    if not jobs and not progress_rows:
         print("")
         print("Progreso vivo: sin job activo todavia.")
         return
@@ -609,24 +685,27 @@ def print_progress(status: Mapping[str, object], root: Path) -> None:
     print(f"PROGRESO INDIVIDUAL POR MADRL - {phase_label} | {len(jobs)} corridas activas")
     print("=" * 76)
 
-    for job in jobs:
+    for job, progress in zip(jobs, progress_rows):
         run_dir = path_for_job(root, str(job.get("output_dir")))
         progress_path = run_dir / "live_progress.json"
-        progress = read_json(progress_path)
         algo = str(job.get("name")).upper()
         label = f"{algo}/{job.get('scenario')}"
         print("")
         print(f"  [ {label} ] " + "-" * max(0, 60 - len(label)))
         print(f"  | dir: {job.get('output_dir')}")
 
-        if not progress:
+        if not progress or progress.get("live_status") == "waiting_for_progress":
             print("  | progreso vivo aun no disponible (aparece tras el 1er intervalo de pasos).")
             print("  " + "-" * 70)
             continue
 
         global_step = int(progress.get("global_step") or 0)
-        episode = int(progress.get("episode") or 0) + 1
-        episode_step = int(progress.get("episode_step") or 0)
+        ep_idx, episode_step = _ep_progress_from_live(
+            progress, episodes=episodes, episode_steps=episode_steps
+        )
+        episode = min(int(progress.get("completed_episode_count") or 0) or (ep_idx + 1), episodes)
+        if int(progress.get("episode_step") or 0) >= episode_steps:
+            episode_step = episode_steps
         pct = round(100.0 * global_step / total_steps, 2) if total_steps else 0.0
         ep_pct = round(100.0 * episode_step / episode_steps, 2) if episode_steps else 0.0
         weights = progress.get("reward_axis_weights") or {}
@@ -651,10 +730,13 @@ def print_progress(status: Mapping[str, object], root: Path) -> None:
             )
         )
         print("  | APRENDIZAJE")
+        stage = str(progress.get("live_status") or "?")
+        if progress.get("backend_training_active"):
+            stage += " (backend GPU)"
         print(
             "  |   FPS={}  live_status={}  ETA_job=~{:.1f} h".format(
                 f"{fps:.1f}" if fps else "-",
-                progress.get("live_status"),
+                stage,
                 eta_min / 60.0 if eta_min else 0.0,
             )
         )
