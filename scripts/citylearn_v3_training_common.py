@@ -385,17 +385,67 @@ def resolve_job_run_dir(base: Path, algorithm: str, scenario: str, seed: int) ->
     return path
 
 
+def job_run_dir_has_artifacts(run_dir: Path) -> bool:
+    """True when a run folder contains resume/skip signals (not an empty mkdir stub)."""
+    run_dir = Path(run_dir)
+    data = run_dir / DATA_DIR_NAME
+    if (data / "results.json").is_file():
+        return True
+    if (run_dir / "live_progress.json").is_file():
+        return True
+    if (data / JOB_LAUNCHER_COMPLETE_MARKER).is_file():
+        return True
+    if (run_dir / JOB_LAUNCHER_COMPLETE_MARKER).is_file():
+        return True
+    ckpt = run_dir / CHECKPOINT_DIR_NAME
+    if ckpt.is_dir():
+        try:
+            if any(ckpt.rglob("*")):
+                return True
+        except OSError:
+            pass
+    return False
+
+
 def resolve_existing_job_run_dir(
     base: Path,
     algorithm: str,
     scenario: str,
     seed: int,
 ) -> Optional[Path]:
-    """Return an existing run directory (new or legacy layout), or None."""
+    """Return an existing run directory (new or legacy layout), or None.
+
+    Prefer directories that already hold training artifacts so an empty canonical
+    ``HAPPO/E1`` stub (created by a prior launcher pass) does not hide a populated
+    legacy ``happo/E1_seed_0`` tree on Drive.
+    """
+    fallback: Optional[Path] = None
     for candidate in iter_job_run_dir_candidates(base, algorithm, scenario, seed):
-        if candidate.is_dir():
+        if not candidate.is_dir():
+            continue
+        if job_run_dir_has_artifacts(candidate):
             return candidate
-    return None
+        if fallback is None:
+            fallback = candidate
+    return fallback
+
+
+def job_run_dir_for_launcher(
+    base: Path,
+    algorithm: str,
+    scenario: str,
+    seed: int,
+    *,
+    create_if_missing: bool = False,
+) -> Path:
+    """Resolve the run directory the launcher should read/write for one job."""
+    existing = resolve_existing_job_run_dir(base, algorithm, scenario, seed)
+    if existing is not None:
+        return existing
+    canonical = next(iter_job_run_dir_candidates(base, algorithm, scenario, seed))
+    if create_if_missing:
+        canonical.mkdir(parents=True, exist_ok=True)
+    return canonical
 
 
 def resolve_output_dir(output_dir: Optional[str], algorithm: str, scenario: str, seed: int) -> Path:
@@ -1068,6 +1118,44 @@ def _grounded_completed_episodes_for_skip(
     return int(grounded)
 
 
+def _kpi_audited_results_prove_job_complete(
+    payload: Mapping[str, object],
+    *,
+    target_episodes: int,
+    grounded_episodes: int,
+) -> bool:
+    """True when a non-salvage ``results.json`` with audited KPIs proves ``target_episodes``.
+
+    Off-policy jobs (MASAC/MATD3/MAAC) often finish with a full KPI report while
+    checkpoint files are still flushing to Drive; skipping on audited results avoids
+    restarting a completed job. Salvage/incomplete payloads still require artifacts.
+    """
+    target_episodes = max(1, int(target_episodes))
+    if int(grounded_episodes) < target_episodes:
+        return False
+    if not _results_have_audited_kpis(payload):
+        return False
+
+    status = str(payload.get("status") or "").lower()
+    hyperparameters = dict(payload.get("hyperparameters") or {})
+    if status == "completed_with_salvage" or hyperparameters.get("run_completed_with_salvage"):
+        return False
+    if hyperparameters.get("run_incomplete") or hyperparameters.get("run_error"):
+        return False
+
+    recorded = _recorded_episodes_from_results(payload)
+    if recorded is not None and int(recorded) < target_episodes:
+        return False
+
+    audit = payload.get("artifact_audit")
+    if isinstance(audit, Mapping):
+        summaries = audit.get("episode_summaries")
+        if isinstance(summaries, list) and len(summaries) >= target_episodes:
+            return True
+
+    return recorded is not None and int(recorded) >= target_episodes
+
+
 def job_meets_launcher_complete_requirements(
     output_dir: Path,
     *,
@@ -1106,17 +1194,21 @@ def job_meets_launcher_complete_requirements(
     )
     if grounded < target_episodes:
         return False
-    if not _results_have_audited_kpis(payload):
-        return False
-    if not _artifact_proves_job_complete(
+    if _artifact_proves_job_complete(
         output_dir,
         algorithm=algo,
         target_episodes=target_episodes,
         episode_time_steps=episode_time_steps,
         rollout_threads=roll,
     ):
+        return True
+    if not _results_have_audited_kpis(payload):
         return False
-    return True
+    return _kpi_audited_results_prove_job_complete(
+        payload,
+        target_episodes=target_episodes,
+        grounded_episodes=grounded,
+    )
 
 
 def reconcile_stale_job_launcher_marker(

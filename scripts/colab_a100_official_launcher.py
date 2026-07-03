@@ -509,9 +509,11 @@ def output_base(output_root: Path, algorithm: str) -> Path:
 
 
 def run_dir(output_root: Path, algorithm: str, scenario: str, seed: int) -> Path:
-    from citylearn_v3_training_common import resolve_job_run_dir
+    from citylearn_v3_training_common import job_run_dir_for_launcher
 
-    return resolve_job_run_dir(output_root, algorithm, scenario, seed)
+    return job_run_dir_for_launcher(
+        output_root, algorithm, scenario, seed, create_if_missing=True
+    )
 
 
 def common_args(
@@ -1035,6 +1037,50 @@ def complete_job_record(
         atomic_write_json(status_path, manifest)
 
 
+def try_skip_completed_job(
+    *,
+    root: Path,
+    manifest: Dict[str, object],
+    status_path: Path,
+    job: Mapping[str, object],
+    output_root: Path,
+    args: argparse.Namespace,
+    attempt: int = 0,
+) -> bool:
+    """Record and return True when ``--skip-completed`` omits this job."""
+    if not args.skip_completed:
+        return False
+
+    name = str(job["name"])
+    scenario = str(job["scenario"])
+    job_run_dir = run_dir(output_root, name, scenario, args.seed)
+    job_output_dir = path_for_status(root, job_run_dir)
+
+    if not completed_artifact_exists(
+        root,
+        job_output_dir,
+        target_episodes=int(args.episodes),
+        output_root=output_root,
+    ):
+        return False
+
+    record = {
+        "name": name,
+        "scenario": scenario,
+        "script": job["script"],
+        "started_at": "skipped",
+        "completed_at": utc_now(),
+        "exit_code": 0,
+        "output_dir": job_output_dir,
+        "skipped": True,
+        "skip_reason": "already_completed",
+        "attempt": attempt,
+    }
+    append_job_record(manifest, status_path, record)
+    print(f"SKIP {name.upper()}/{scenario}: existing results.json + job completo", flush=True)
+    return True
+
+
 def run_one_job(
     *,
     root: Path,
@@ -1051,26 +1097,15 @@ def run_one_job(
     job_run_dir = run_dir(output_root, name, scenario, args.seed)
     job_output_dir = path_for_status(root, job_run_dir)
 
-    if args.skip_completed and completed_artifact_exists(
-        root,
-        job_output_dir,
-        target_episodes=int(args.episodes),
+    if try_skip_completed_job(
+        root=root,
+        manifest=manifest,
+        status_path=status_path,
+        job=job,
         output_root=output_root,
+        args=args,
+        attempt=attempt,
     ):
-        record = {
-            "name": name,
-            "scenario": scenario,
-            "script": job["script"],
-            "started_at": "skipped",
-            "completed_at": utc_now(),
-            "exit_code": 0,
-            "output_dir": job_output_dir,
-            "skipped": True,
-            "skip_reason": "already_completed",
-            "attempt": attempt,
-        }
-        append_job_record(manifest, status_path, record)
-        print(f"SKIP {name.upper()}/{scenario}: existing results.json + job completo", flush=True)
         return 0
 
     if args.skip_completed:
@@ -1082,8 +1117,14 @@ def run_one_job(
 
         run_path = resolve_status_path(root, job_output_dir)
         if job_has_final_results(run_path) or read_job_launcher_complete_marker(run_path):
+            rollout_threads = (
+                int(args.happo_n_rollout_threads) if name == "happo" else None
+            )
             blockers = job_launcher_completion_blockers(
-                run_path, target_episodes=int(args.episodes)
+                run_path,
+                target_episodes=int(args.episodes),
+                rollout_threads=rollout_threads,
+                output_root=output_root,
             )
             if blockers:
                 print(
@@ -1233,10 +1274,24 @@ def run_parallel_jobs(
     """Run jobs concurrently; returns first non-zero exit code (0 if all succeed)."""
     if not jobs:
         return 0
-    workers = max(1, min(int(max_workers), len(jobs)))
+    active_jobs: List[Dict[str, object]] = []
+    for job in jobs:
+        if try_skip_completed_job(
+            root=root,
+            manifest=manifest,
+            status_path=status_path,
+            job=job,
+            output_root=output_root,
+            args=args,
+        ):
+            continue
+        active_jobs.append(job)
+    if not active_jobs:
+        return 0
+    workers = max(1, min(int(max_workers), len(active_jobs)))
     overall_rc = 0
     if workers == 1:
-        for job in jobs:
+        for job in active_jobs:
             ec = run_job_with_retry(
                 root=root, manifest=manifest, status_path=status_path,
                 job=job, output_root=output_root, log_dir=log_dir, args=args,
@@ -1252,7 +1307,7 @@ def run_parallel_jobs(
                 root=root, manifest=manifest, status_path=status_path,
                 job=job, output_root=output_root, log_dir=log_dir, args=args,
             ): job
-            for job in jobs
+            for job in active_jobs
         }
         for fut in as_completed(futures):
             ec = int(fut.result())
@@ -1516,17 +1571,49 @@ def _job_backfill_weight(job: Mapping[str, object]) -> Tuple[int, str]:
     return (_BACKFILL_ALGO_WEIGHT.get(name, 9), scenario)
 
 
+def _backfill_on_job_success(
+    name: str,
+    scenario: str,
+    *,
+    p1_done: set,
+    happo_done: set,
+    maac_done: set,
+) -> None:
+    """Update phase-2 eligibility after a phase-1/2 job finishes or is skipped."""
+    if name in TWO_PHASE_P1_HM:
+        p1_done.add(scenario)
+        opens = [f"MAAC/{scenario}"]
+        if name == "happo":
+            happo_done.add(scenario)
+            opens.append(f"MATD3/{scenario}")
+        print(
+            f"[launcher] phase-1 DONE {name.upper()}/{scenario} "
+            f"— eligible: {', '.join(opens)}",
+            flush=True,
+        )
+    elif name == "maac":
+        maac_done.add(scenario)
+        print(
+            f"[launcher] MAAC DONE {scenario} — eligible: MATD3/{scenario}",
+            flush=True,
+        )
+    elif name == "matd3":
+        print(f"[launcher] MATD3 DONE {scenario}", flush=True)
+
+
 def _run_backfill_schedule(
     *,
     phase1_jobs: Sequence[Mapping[str, object]],
     phase2_jobs: Sequence[Mapping[str, object]],
     max_workers: int,
     submit_fn,
+    skip_fn=None,
 ) -> int:
     """Scenario-paired dynamic backfill with an OR dependency for MATD3.
 
     Per scenario S:
-      * Start ALL phase-1 jobs (HAPPO+MASAC) up to the concurrency cap.
+      * Start phase-1 jobs (HAPPO+MASAC) that are not ``--skip-completed``; completed
+        jobs are omitted synchronously (no subprocess, no VRAM) before the pool starts.
       * MAAC/S becomes eligible when any phase-1 job for S (HAPPO/S or MASAC/S) completes.
       * MATD3/S becomes eligible when HAPPO/S completes OR MAAC/S completes (OR gate),
         so MATD3 never has to wait specifically for MAAC if HAPPO already freed a slot,
@@ -1561,10 +1648,21 @@ def _run_backfill_schedule(
         return sorted(ready, key=_job_backfill_weight)
 
     def _start_job(pool: ThreadPoolExecutor, job: Mapping[str, object], label: str) -> None:
+        key = (str(job.get("name", "")), str(job.get("scenario", "")))
+        if key in started:
+            return
+        if skip_fn is not None and skip_fn(job):
+            started.add(key)
+            name = str(job.get("name", ""))
+            scenario = str(job.get("scenario", ""))
+            _backfill_on_job_success(
+                name, scenario, p1_done=p1_done, happo_done=happo_done, maac_done=maac_done
+            )
+            return
         fut = submit_fn(pool, job)
         pending.add(fut)
         future_to_job[fut] = job
-        started.add((str(job.get("name", "")), str(job.get("scenario", ""))))
+        started.add(key)
         print(
             f"[launcher] {label} {str(job.get('name', '')).upper()}/{job.get('scenario', '?')}",
             flush=True,
@@ -1609,25 +1707,13 @@ def _run_backfill_schedule(
                     )
                     continue
 
-                if name in TWO_PHASE_P1_HM:
-                    p1_done.add(scenario)
-                    opens = [f"MAAC/{scenario}"]
-                    if name == "happo":
-                        happo_done.add(scenario)
-                        opens.append(f"MATD3/{scenario}")
-                    print(
-                        f"[launcher] phase-1 DONE {name.upper()}/{scenario} "
-                        f"— eligible: {', '.join(opens)}",
-                        flush=True,
-                    )
-                elif name == "maac":
-                    maac_done.add(scenario)
-                    print(
-                        f"[launcher] MAAC DONE {scenario} — eligible: MATD3/{scenario}",
-                        flush=True,
-                    )
-                elif name == "matd3":
-                    print(f"[launcher] MATD3 DONE {scenario}", flush=True)
+                _backfill_on_job_success(
+                    name,
+                    scenario,
+                    p1_done=p1_done,
+                    happo_done=happo_done,
+                    maac_done=maac_done,
+                )
 
             _admit_phase2(pool)
 
@@ -1735,11 +1821,41 @@ def run_dynamic_backfill_jobs(
             args=args,
         )
 
+    def _skip_fn(job: Mapping[str, object]) -> bool:
+        return try_skip_completed_job(
+            root=root,
+            manifest=manifest,
+            status_path=status_path,
+            job=job,
+            output_root=output_root,
+            args=args,
+        )
+
+    if args.skip_completed:
+        from citylearn_v3_training_common import build_jobs_resume_report
+
+        _plan = build_jobs_resume_report(
+            output_root,
+            target_episodes=int(args.episodes),
+            episode_time_steps=int(args.episode_time_steps),
+            happo_rollout_threads=int(getattr(args, "happo_n_rollout_threads", None) or 12),
+            seed=int(args.seed),
+        )
+        print(
+            f"[launcher] skip-completed plan: "
+            f"{_plan.get('completed', 0)} omitir | "
+            f"{_plan.get('resumable', 0)} reanudar | "
+            f"{int(_plan.get('pending', 0)) + int(_plan.get('restart_fresh', 0))} fresh "
+            f"(preview 2.1b / 7.1)",
+            flush=True,
+        )
+
     overall_rc = _run_backfill_schedule(
         phase1_jobs=phase1_jobs,
         phase2_jobs=phase2_jobs,
         max_workers=max_workers,
         submit_fn=_submit,
+        skip_fn=_skip_fn if args.skip_completed else None,
     )
     if overall_rc != 0:
         print("[launcher] dynamic backfill finished with one or more job failures.", flush=True)
