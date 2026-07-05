@@ -3580,23 +3580,7 @@ def summarize_madrl_output_run(
 ) -> Dict[str, object]:
     """Summarize one output root from existing artifacts only (no invented progress)."""
     output_root = Path(output_root)
-    if is_colab_fuse_restricted_path(output_root):
-        return {
-            "output_root": str(output_root),
-            "run_name": output_root.name,
-            "has_artifacts": False,
-            "stub_only": False,
-            "restorable": False,
-            "completed_jobs": 0,
-            "resumable_jobs": 0,
-            "pending_jobs": 0,
-            "episodes_done": 0,
-            "episodes_target": 0,
-            "progress_pct": 0.0,
-            "score": 0.0,
-            "report": {},
-            "fuse_restricted": True,
-        }
+    fuse_readonly = is_colab_fuse_restricted_path(output_root)
     try:
         raw_artifacts = madrl_output_run_has_artifacts(output_root)
         report = build_jobs_resume_report(
@@ -3652,6 +3636,7 @@ def summarize_madrl_output_run(
         "progress_pct": progress_pct,
         "score": score,
         "report": report,
+        "fuse_readonly": fuse_readonly,
     }
 
 
@@ -3690,6 +3675,85 @@ def audit_madrl_drive_output_runs(
     return {
         "parent": str(parent),
         "runs_found": len(runs),
+        "runs_with_artifacts": len(artifact_runs),
+        "summaries": summaries,
+        "best": best,
+        "preferred_output_root": str(preferred_output_root) if preferred_output_root else None,
+    }
+
+
+def map_writable_colab_output_root(
+    run_path: Path,
+    *,
+    gdrive_root: Optional[Path],
+) -> Path:
+    """Map a FUSE read-only run path to the writable ``gdrive_root/outputs/<run>``."""
+    run_path = Path(run_path)
+    if not is_colab_fuse_restricted_path(run_path):
+        return run_path
+    if gdrive_root is None:
+        return run_path
+    return Path(gdrive_root) / "outputs" / run_path.name
+
+
+def audit_colab_drive_output_sources(
+    base_output_parent: Path,
+    *,
+    mount_point: Optional[Path] = None,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+    preferred_output_root: Optional[Path] = None,
+    project_name: str = "MADRLCitytleranflexresdr",
+) -> Dict[str, object]:
+    """Audit MyDrive + canonical shared folder ``outputs/`` (read-only OK, no mirror)."""
+    parents: List[Path] = [Path(base_output_parent)]
+    if mount_point is not None:
+        for candidate in _candidate_output_dirs_on_colab_mount(
+            Path(mount_point),
+            project_name=project_name,
+        ):
+            if candidate not in parents:
+                parents.append(candidate)
+
+    by_name: Dict[str, Dict[str, object]] = {}
+    for parent in parents:
+        for run_path in list_madrl_v3_output_runs(parent):
+            summary = summarize_madrl_output_run(
+                run_path,
+                target_episodes=target_episodes,
+                episode_time_steps=episode_time_steps,
+                happo_rollout_threads=happo_rollout_threads,
+            )
+            name = str(summary.get("run_name") or run_path.name)
+            prev = by_name.get(name)
+            if prev is None or float(summary.get("score") or 0.0) > float(
+                prev.get("score") or 0.0
+            ):
+                by_name[name] = summary
+
+    summaries = list(by_name.values())
+    artifact_runs = [s for s in summaries if s.get("has_artifacts")]
+    best: Optional[Dict[str, object]] = None
+    if artifact_runs:
+        pref = str(preferred_output_root) if preferred_output_root else None
+
+        def _rank(s: Mapping[str, object]) -> tuple:
+            writable_bonus = 0 if s.get("fuse_readonly") else 1
+            is_pref = 1 if pref and str(s.get("output_root")) == pref else 0
+            return (
+                writable_bonus,
+                float(s.get("score") or 0.0),
+                is_pref,
+                str(s.get("run_name") or ""),
+            )
+
+        best = max(artifact_runs, key=_rank)
+
+    return {
+        "parent": str(base_output_parent),
+        "parents_scanned": [str(p) for p in parents],
+        "runs_found": len(summaries),
         "runs_with_artifacts": len(artifact_runs),
         "summaries": summaries,
         "best": best,
@@ -3874,7 +3938,12 @@ def discover_colab_gdrive_workspace(
     project_name: str = "MADRLCitytleranflexresdr",
     repo: Optional[Path] = None,
 ) -> Optional[Path]:
-    """Find the shared Drive workspace root (contains ``outputs/`` and pointer txt)."""
+    """Find writable Drive workspace (``outputs/`` + pointer txt).
+
+    Prefers MyDrive/MADRLCitytleranflexresdr; falls back to creating that path when
+    the canonical shared folder (``1ihH6RqL2KpevfCQEUXj7PP1aS2QYssAX``) only
+    appears on FUSE for reads.
+    """
     mount_point = Path(mount_point)
     mydrive = mount_point / "MyDrive"
     seeds: List[Path] = []
@@ -3887,6 +3956,13 @@ def discover_colab_gdrive_workspace(
                     seeds.append(child)
         except OSError:
             pass
+
+    fuse_shared = mount_point / ".shortcut-targets-by-id" / CANONICAL_SHARED_DRIVE_FOLDER_ID
+    fuse_has_outputs = False
+    for probe in (fuse_shared, fuse_shared / project_name):
+        if (probe / "outputs").is_dir() or (probe / "latest_colab_output_root.txt").is_file():
+            fuse_has_outputs = True
+            break
 
     seen: set = set()
     ranked: List[tuple] = []
@@ -3908,12 +3984,20 @@ def discover_colab_gdrive_workspace(
                 score += 1_000_000_000
         if has_pointer:
             score += 1.0
+        if "/MyDrive/" in str(seed).replace("\\", "/"):
+            score += 10_000_000
         ranked.append((score, seed))
 
-    if not ranked:
-        return None
-    ranked.sort(key=lambda item: (item[0], str(item[1])), reverse=True)
-    return ranked[0][1]
+    if ranked:
+        ranked.sort(key=lambda item: (item[0], str(item[1])), reverse=True)
+        return ranked[0][1]
+
+    if fuse_has_outputs and mydrive.is_dir():
+        bootstrap = mydrive / project_name
+        bootstrap.mkdir(parents=True, exist_ok=True)
+        (bootstrap / "outputs").mkdir(parents=True, exist_ok=True)
+        return bootstrap
+    return None
 
 
 def resolve_canonical_output_root_from_drive(
@@ -4000,6 +4084,10 @@ def _candidate_output_dirs_on_colab_mount(
 
     _add(mount_point / "MyDrive" / project_name / "outputs")
     _add(mount_point / "MyDrive" / "MADRL_CityLearn_v3" / project_name / "outputs")
+
+    fuse_shared = mount_point / ".shortcut-targets-by-id" / CANONICAL_SHARED_DRIVE_FOLDER_ID
+    _add(fuse_shared / "outputs")
+    _add(fuse_shared / project_name / "outputs")
 
     mydrive = mount_point / "MyDrive"
     if mydrive.is_dir():
@@ -4818,8 +4906,9 @@ def pick_colab_output_root(
                 "Ejecuta celda 1.5 (montar Drive) antes de 2.1."
             )
 
-    audit = audit_madrl_drive_output_runs(
+    audit = audit_colab_drive_output_sources(
         base_output_parent,
+        mount_point=Path(mount_point) if mount_point is not None else None,
         target_episodes=target_episodes,
         episode_time_steps=episode_time_steps,
         happo_rollout_threads=happo_rollout_threads,
@@ -4851,8 +4940,9 @@ def pick_colab_output_root(
             skip_fuse_mirror=skip_fuse_mirror,
         )
         print_colab_drive_binding_report(run_ready)
-        audit = audit_madrl_drive_output_runs(
+        audit = audit_colab_drive_output_sources(
             base_output_parent,
+            mount_point=Path(mount_point) if mount_point is not None else None,
             target_episodes=target_episodes,
             episode_time_steps=episode_time_steps,
             happo_rollout_threads=happo_rollout_threads,
@@ -4871,7 +4961,10 @@ def pick_colab_output_root(
 
     manual = str(resume_output_root or "").strip()
     if manual:
-        output_root = Path(manual)
+        output_root = map_writable_colab_output_root(
+            Path(manual),
+            gdrive_root=gdrive_path,
+        )
         resume_reason = "RESUME_OUTPUT_ROOT manual"
         mydrive_resumed = True
     elif force_new_run:
@@ -4881,7 +4974,10 @@ def pick_colab_output_root(
     elif auto_resume_latest:
         best = audit.get("best")
         if isinstance(best, Mapping):
-            output_root = Path(str(best["output_root"]))
+            output_root = map_writable_colab_output_root(
+                Path(str(best["output_root"])),
+                gdrive_root=gdrive_path,
+            )
             completed = int(best.get("completed_jobs") or 0)
             resumable = int(best.get("resumable_jobs") or 0)
             progress = float(best.get("progress_pct") or 0.0)
