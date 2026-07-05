@@ -918,6 +918,11 @@ def stop_live_progress_heartbeat(stop_event, thread, *, timeout_seconds: float =
         thread.join(timeout=timeout_seconds)
 
 
+def _colab_mydrive_mount_active() -> bool:
+    """True when running on Colab with the writable MyDrive FUSE mount."""
+    return os.path.isdir("/content/drive/MyDrive")
+
+
 def flush_filesystem_buffers() -> None:
     """Force OS-level flush of buffered writes to durable storage.
 
@@ -927,7 +932,16 @@ def flush_filesystem_buffers() -> None:
     ``os.sync()`` flushes every dirty buffer (including the FUSE backend) so the
     resumable artifacts survive an interruption. No-op on platforms without
     ``os.sync`` (e.g. Windows during local validation).
+
+    Skips global ``os.sync()`` on Colab MyDrive: with 3 parallel HAPPO jobs each
+    heartbeat called ``sync()`` and the mount stalled for many minutes (step frozen
+    at ~60/8760). Per-file ``fsync_file`` after critical writes remains in place.
     """
+    mode = str(os.environ.get("CITYLEARN_DRIVE_OS_SYNC", "auto")).strip().lower()
+    if mode in {"0", "false", "no", "skip", "off"}:
+        return
+    if mode == "auto" and _colab_mydrive_mount_active():
+        return
 
     sync = getattr(os, "sync", None)
     if not callable(sync):
@@ -1137,59 +1151,6 @@ def _stream_rewrite_csv_rows_lt_episode(
     Keeps rows with ``episode < completed_episodes``, deduplicating by ``dedup_keys``.
     Rewrites the file atomically when rows would be dropped; returns kept row count.
   """
-    path = Path(path)
-    if not path.is_file() or int(completed_episodes) <= 0:
-        return 0, None
-    completed = int(completed_episodes)
-    seen: set = set()
-    kept = 0
-    fieldnames: Optional[List[str]] = None
-    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.rewrite.tmp")
-    rewrite_needed = False
-    try:
-        with path.open("r", newline="", encoding="utf-8") as src:
-            reader = csv.DictReader(src)
-            fieldnames = list(reader.fieldnames or [])
-            if not fieldnames:
-                return 0, None
-            with tmp_path.open("w", newline="", encoding="utf-8") as dst:
-                writer = csv.DictWriter(dst, fieldnames=fieldnames, extrasaction="ignore")
-                writer.writeheader()
-                for row in reader:
-                    ep = _as_int(row.get("episode"))
-                    if ep is None or ep >= completed:
-                        rewrite_needed = True
-                        continue
-                    signature = tuple(str(row.get(k)) for k in dedup_keys)
-                    if signature in seen:
-                        rewrite_needed = True
-                        continue
-                    seen.add(signature)
-                    writer.writerow({key: _csv_safe(row.get(key)) for key in fieldnames})
-                    kept += 1
-        if rewrite_needed:
-            tmp_path.replace(path)
-            fsync_file(path)
-        else:
-            tmp_path.unlink(missing_ok=True)
-        return kept, fieldnames
-    except Exception:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
-        return 0, fieldnames
-
-
-def _stream_rewrite_csv_rows_lt_episode(
-    path: Path,
-    *,
-    completed_episodes: int,
-    dedup_keys: Sequence[str],
-) -> Tuple[int, Optional[List[str]]]:
-    """Stream-filter a large incremental CSV without loading it all into RAM.
-
-    Keeps rows with ``episode < completed_episodes``, deduplicating by ``dedup_keys``.
-    Rewrites the file atomically when rows would be dropped; returns kept row count.
-    """
     path = Path(path)
     if not path.is_file() or int(completed_episodes) <= 0:
         return 0, None
@@ -2385,6 +2346,57 @@ def _happo_live_progress_entered_final_episode(
     return False
 
 
+def happo_salvage_kpi_tail_job(
+    output_dir: Path,
+    *,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    rollout_threads: Optional[int] = None,
+    output_root: Optional[Path] = None,
+    allow_resume: bool = True,
+) -> bool:
+    """True for HAPPO ``completed_with_salvage`` at ep 49/50 missing audited KPIs (tail only)."""
+    output_dir = Path(output_dir)
+    if not _happo_salvage_missing_kpis(output_dir):
+        return False
+    roll = resolve_job_rollout_threads(output_dir, "happo", fallback=rollout_threads)
+    plan = discover_job_resume_plan(
+        output_dir,
+        algorithm="happo",
+        target_episodes=int(target_episodes),
+        episode_time_steps=int(episode_time_steps),
+        rollout_threads=int(roll),
+        allow_resume=allow_resume,
+        output_root=output_root,
+    )
+    if not plan.get("active"):
+        return False
+    return int(plan.get("remaining_episodes") or 0) <= 1
+
+
+def try_repair_happo_salvage_for_skip(
+    output_dir: Path,
+    *,
+    target_episodes: int,
+    output_root: Optional[Path] = None,
+    rollout_threads: Optional[int] = None,
+) -> bool:
+    """Backfill KPI JSON when possible so ``--skip-completed`` can omit re-training."""
+    output_dir = Path(output_dir)
+    repair_happo_results_json_kpi_audit(output_dir)
+    attempt_repair_happo_launcher_job(
+        output_dir,
+        target_episodes=int(target_episodes),
+        output_root=output_root,
+        rollout_threads=rollout_threads,
+    )
+    return job_counts_as_launcher_complete(
+        output_dir,
+        target_episodes=int(target_episodes),
+        output_root=output_root,
+    )
+
+
 def _happo_salvage_missing_kpis(output_dir: Path) -> bool:
     """True when HAPPO salvage results exist but KPI audit never completed (e.g. VecEnvWrapper)."""
     payload = read_job_results_json(output_dir)
@@ -3103,11 +3115,22 @@ def preview_job_launcher_decision(
         fallback=rollout_threads,
     )
 
-    skip = job_counts_as_launcher_complete(
-        output_dir,
-        target_episodes=target_episodes,
-        output_root=output_root,
-    )
+    if algo == "happo" and _happo_salvage_missing_kpis(output_dir):
+        if try_repair_happo_salvage_for_skip(
+            output_dir,
+            target_episodes=target_episodes,
+            output_root=output_root,
+            rollout_threads=roll,
+        ):
+            skip = True
+        else:
+            skip = False
+    else:
+        skip = job_counts_as_launcher_complete(
+            output_dir,
+            target_episodes=target_episodes,
+            output_root=output_root,
+        )
     blockers: List[str] = (
         []
         if skip
@@ -3165,6 +3188,23 @@ def preview_job_launcher_decision(
     if plan.get("active"):
         completed = int(plan.get("completed_episodes") or 0)
         remaining = int(plan.get("remaining_episodes") or max(0, target_episodes - completed))
+        if algo == "happo" and _happo_salvage_missing_kpis(output_dir) and remaining <= 1:
+            result.update(
+                {
+                    "action": "happo_salvage_kpi",
+                    "completed_episodes": completed,
+                    "remaining_episodes": remaining,
+                    "status_line": (
+                        f"SALVAGE KPI ep {completed}/{target_episodes} "
+                        f"(falta ep {target_episodes}; preferir celda 2.3 o 7.2 serial)"
+                    ),
+                    "launcher_line": (
+                        "RUN: salvage KPI tail — 7.2 usa 1 HAPPO serial + 1 rollout thread; "
+                        "o celda 2.3 (regenerate_happo_kpis)"
+                    ),
+                }
+            )
+            return result
         parts: List[str] = []
         if algo == "maac" and plan.get("maac_checkpoint"):
             parts.append(Path(str(plan["maac_checkpoint"])).name)
@@ -3248,6 +3288,8 @@ def validate_canonical_colab_skip_plan(
         if exp is None:
             continue
         if action != exp:
+            if exp == "resume" and action == "happo_salvage_kpi":
+                continue
             mismatches.append(
                 {
                     "job": f"{algo.upper()}/{scen}",
@@ -3301,9 +3343,9 @@ def assert_canonical_colab_skip_plan(
     lines.extend(
         [
             "  Accion:",
-            "  1) Re-ejecuta 1.2 -> 1.5 -> 2.1 (audita outputs/ en Drive sin mirror).",
-            "  2) Vuelve a 2.1b. Si HAPPO sigue sin checkpoints: celda 2.3 (salvage 49->50).",
-            "  3) NO ejecutes 7.2 hasta ver PASS aqui.",
+            "  1) git pull en Colab (celda 1.2) y re-ejecuta SOLO celda 7.2 (bootstrap standalone).",
+            "  2) Si HAPPO salvage persiste: celda 2.3 (regenerate_happo_kpis --execute).",
+            "  3) NO relances 3×HAPPO en paralelo hasta tener el fix os.sync + serial salvage.",
         ]
     )
     raise RuntimeError("\n".join(lines))
@@ -3467,7 +3509,7 @@ def build_jobs_resume_report(
             if action == "skip":
                 done += 1
                 episodes_done += target_episodes
-            elif action == "resume":
+            elif action in ("resume", "happo_salvage_kpi"):
                 resume += 1
                 episodes_done += completed
             elif action == "restart_fresh":
@@ -5078,6 +5120,362 @@ def notebook_jobs_resume_preview(
     if require_canonical_plan:
         assert_canonical_colab_skip_plan(report, output_root=Path(output_root))
     return report
+
+
+def _detect_usable_vcpus() -> int:
+    try:
+        sched_getaffinity = getattr(os, "sched_getaffinity", None)
+        if sched_getaffinity is not None:
+            return max(1, len(sched_getaffinity(0)))
+    except Exception:
+        pass
+    return max(1, int(os.cpu_count() or 12))
+
+
+def _alloc_phase1_torch_rollout(
+    usable_vcpus: int,
+    *,
+    max_rollout: int = 16,
+) -> Tuple[int, int]:
+    """Mirror notebook 6.1: maximize HAPPO rollout threads within vCPU budget."""
+    vcpus = max(1, int(usable_vcpus))
+    best = (1, 1)
+    for torch_t in (1, 2):
+        for rollout in range(1, max(1, int(max_rollout)) + 1):
+            if 3 * (torch_t + rollout) + 3 * torch_t <= vcpus:
+                best = (torch_t, rollout)
+    return best
+
+
+def _detect_vram_gib() -> float:
+    try:
+        import subprocess
+
+        mib = int(
+            subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            .strip()
+            .splitlines()[0]
+        )
+        return mib / 1024.0
+    except Exception:
+        return 80.0
+
+
+def colab_training_globals_defaults(
+    repo: Path,
+    output_root: Path,
+    *,
+    python_executable: str,
+    n_episodes: int = 50,
+    episode_steps: int = 8760,
+    seed: int = 0,
+) -> Dict[str, object]:
+    """Official two_phase_happo_masac notebook globals (cell 6.1) for cell 7.2 bootstrap."""
+    repo = Path(repo)
+    output_root = Path(output_root)
+    usable_vcpus = _detect_usable_vcpus()
+    p1_torch, happo_rollout = _alloc_phase1_torch_rollout(usable_vcpus)
+    vram_gib = _detect_vram_gib()
+    p2_torch = max(1, usable_vcpus // 6)
+    six_job_cuda_frac = 0.14 if vram_gib <= 85 else 0.15
+    six_job_masac_cuda_frac = 0.16 if vram_gib <= 85 else 0.22
+    try:
+        import psutil
+
+        ram_gib = psutil.virtual_memory().total / 1024**3
+    except Exception:
+        ram_gib = 177.0
+    ram_budget_jobs = max(6, int((ram_gib * 0.90) // 18))
+    phase1_vram = 3 * six_job_cuda_frac * vram_gib + 3 * six_job_masac_cuda_frac * vram_gib
+    extra_p2 = max(
+        0,
+        int((0.92 * vram_gib - phase1_vram) // max(six_job_cuda_frac * vram_gib, 1e-6)),
+    )
+    vram_budget_jobs = 6 + extra_p2
+    cap_auto = min(12, ram_budget_jobs, vram_budget_jobs)
+    max_concurrent = cap_auto if (usable_vcpus > 12 and cap_auto > 6) else 0
+    launcher = repo / "CityLearn" / "scripts" / "colab_a100_official_launcher.py"
+    return {
+        "REPO": str(repo),
+        "OUTPUT_ROOT": str(output_root),
+        "RESUME_OUTPUT_ROOT": str(output_root),
+        "PYTHON": python_executable,
+        "PROJECT_PYTHON": python_executable,
+        "SCHEMA_PATH": str(
+            repo / "CityLearn/data/datasets/citylearn_iquitos_2023_2025/schema.json"
+        ),
+        "LAUNCHER": str(launcher),
+        "MONITOR": str(repo / "CityLearn/scripts/colab_a100_live_monitor.py"),
+        "PROTOCOL_GUARD": str(repo / "CityLearn/scripts/colab_protocol_guard.py"),
+        "QUICK_TEST": False,
+        "N_EPISODES": int(n_episodes),
+        "EPISODES": int(n_episodes),
+        "EPISODE_STEPS": int(episode_steps),
+        "NUM_ENV_STEPS": int(n_episodes) * int(episode_steps),
+        "SEED": int(seed),
+        "USABLE_VCPUS": usable_vcpus,
+        "TWO_PHASE_P1_TORCH": p1_torch,
+        "HAPPO_ROLLOUT_THREADS": happo_rollout,
+        "HAPPO_GPU_ROLLOUT_REF": 8,
+        "TWO_PHASE_P2_TORCH": p2_torch,
+        "TORCH_THREADS": p2_torch,
+        "MAX_CONCURRENT_JOBS": max_concurrent,
+        "LIVE_PROGRESS_INT": 300,
+        "LIVE_HEARTBEAT_SEC": 120,
+        "EST_MIN_PER_EPISODE": 12,
+        "EST_MIN_BY_ALGO": {"happo": 11, "masac": 15, "matd3": 12, "maac": 8},
+        "SIX_JOB_CUDA_FRAC": six_job_cuda_frac,
+        "SIX_JOB_MASAC_CUDA_FRAC": six_job_masac_cuda_frac,
+        "SIX_JOB_MASAC_BUF": 4,
+        "SIX_JOB_MASAC_GIB": 8.0,
+        "SIX_JOB_MASAC_BATCH": 1,
+        "SIX_JOB_MATD3_BUF": 4096,
+        "SIX_JOB_MATD3_BATCH": 256,
+        "SIX_JOB_MATD3_HIDDEN": 256,
+        "SIX_JOB_MAAC_BUF": 450_000,
+        "SIX_JOB_MAAC_BATCH": 768,
+        "SIX_JOB_MAAC_HIDDEN": 768,
+        "SIX_JOB_MAAC_UPDATES": 12,
+        "MONITOR_INTERVAL": 120,
+        "AUTO_DISCONNECT_COLAB": False,
+        "AUTO_RUN_POST_TRAINING": True,
+        "POST_TRAINING_INCLUDE_SECTION_8": True,
+        "POST_TRAINING_INCLUDE_SECTION_9": True,
+        "LOG_TAIL": 4,
+        "ARTIFACT_PROFILE": "efficient",
+        "TRACE_INTERVAL": 8760,
+        "TRACE_DETAIL": "compact",
+        "GPU_PROFILE": "aws",
+        "CUDA_MEMORY_FRACTION": 0.92,
+        "SCENARIOS": ["E1", "E2", "E3"],
+        "ALGORITHMS": ["happo", "masac", "matd3", "maac"],
+        "EXECUTION_MODE": "two_phase_happo_masac",
+        "DYNAMIC_BACKFILL": True,
+        "LIVE_PROGRESS_STALE_SEC": 600,
+        "_created_new_run": False,
+        "_MYDRIVE_RESUMED": True,
+    }
+
+
+def colab_official_launcher_argv(cfg: Mapping[str, object]) -> List[str]:
+    """Build launcher argv from :func:`colab_training_globals_defaults` (notebook 7.0)."""
+    python = str(cfg["PYTHON"])
+    launcher = str(cfg["LAUNCHER"])
+    base: List[str] = [
+        python,
+        "-B",
+        launcher,
+        "--scenario",
+        "ALL",
+        "--seed",
+        str(cfg.get("SEED", 0)),
+        "--episode-time-steps",
+        str(cfg.get("EPISODE_STEPS", 8760)),
+        "--episodes",
+        str(cfg.get("EPISODES", 50)),
+        "--schema-path",
+        str(cfg["SCHEMA_PATH"]),
+        "--output-root",
+        str(cfg["OUTPUT_ROOT"]),
+        "--torch-threads",
+        str(cfg.get("TORCH_THREADS", 2)),
+        "--live-progress-interval",
+        str(cfg.get("LIVE_PROGRESS_INT", 300)),
+        "--live-heartbeat-seconds",
+        str(cfg.get("LIVE_HEARTBEAT_SEC", 120)),
+        "--artifact-profile",
+        str(cfg.get("ARTIFACT_PROFILE", "efficient")),
+        "--trace-record-interval",
+        str(cfg.get("TRACE_INTERVAL", 8760)),
+        "--trace-detail",
+        str(cfg.get("TRACE_DETAIL", "compact")),
+        "--gpu-profile",
+        str(cfg.get("GPU_PROFILE", "aws")),
+        "--cuda-memory-fraction",
+        str(cfg.get("CUDA_MEMORY_FRACTION", 0.92)),
+        "--require-a100",
+        "--smoke-imports",
+        "--oom-retry",
+        "--no-live-monitor",
+        "--happo-hidden-size",
+        "512",
+        "--happo-n-rollout-threads",
+        str(cfg.get("HAPPO_ROLLOUT_THREADS", 2)),
+        "--happo-num-mini-batch",
+        "0",
+        "--happo-gpu-rollout-ref",
+        str(cfg.get("HAPPO_GPU_ROLLOUT_REF", 8)),
+        "--happo-ppo-epoch",
+        "10",
+        "--happo-critic-epoch",
+        "10",
+        "--masac-critic-batch-size",
+        str(cfg.get("SIX_JOB_MASAC_BATCH", 1)),
+        "--masac-buffer-size",
+        str(cfg.get("SIX_JOB_MASAC_BUF", 4)),
+        "--masac-max-replay-buffer-gib",
+        str(cfg.get("SIX_JOB_MASAC_GIB", 8.0)),
+        "--masac-rnn-hidden-dim",
+        "64",
+        "--masac-qmix-hidden-dim",
+        "32",
+        "--masac-hyper-hidden-dim",
+        "64",
+        "--masac-preload-batch-device",
+        "auto",
+        "--masac-actor-sample-times",
+        "1",
+        "--masac-critic-train-steps",
+        "1",
+        "--matd3-batch-size",
+        str(cfg.get("SIX_JOB_MATD3_BATCH", 256)),
+        "--matd3-buffer-size",
+        str(cfg.get("SIX_JOB_MATD3_BUF", 4096)),
+        "--matd3-hidden-size",
+        str(cfg.get("SIX_JOB_MATD3_HIDDEN", 256)),
+        "--matd3-train-interval",
+        "100",
+        "--maac-batch-size",
+        str(cfg.get("SIX_JOB_MAAC_BATCH", 768)),
+        "--maac-buffer-length",
+        str(cfg.get("SIX_JOB_MAAC_BUF", 450_000)),
+        "--maac-hidden-size",
+        str(cfg.get("SIX_JOB_MAAC_HIDDEN", 768)),
+        "--maac-steps-per-update",
+        "50",
+        "--maac-num-updates",
+        str(cfg.get("SIX_JOB_MAAC_UPDATES", 12)),
+        "--execution-mode",
+        "two_phase_happo_masac",
+        "--two-phase-torch-threads",
+        str(cfg.get("TORCH_THREADS", 2)),
+        "--two-phase-p1-torch-threads",
+        str(cfg.get("TWO_PHASE_P1_TORCH", 1)),
+        "--two-phase-p2-torch-threads",
+        str(cfg.get("TWO_PHASE_P2_TORCH", 2)),
+        "--six-job-cuda-fraction",
+        str(cfg.get("SIX_JOB_CUDA_FRAC", 0.15)),
+        "--six-job-masac-cuda-fraction",
+        str(cfg.get("SIX_JOB_MASAC_CUDA_FRAC", 0.22)),
+        "--six-job-masac-buffer-size",
+        str(cfg.get("SIX_JOB_MASAC_BUF", 4)),
+        "--six-job-masac-max-replay-gib",
+        str(cfg.get("SIX_JOB_MASAC_GIB", 8.0)),
+        "--six-job-masac-critic-batch-size",
+        str(cfg.get("SIX_JOB_MASAC_BATCH", 1)),
+    ]
+    max_concurrent = int(cfg.get("MAX_CONCURRENT_JOBS") or 0)
+    if max_concurrent > 0:
+        base.extend(["--max-concurrent-jobs", str(max_concurrent)])
+    return base
+
+
+def bootstrap_colab_notebook_cell_72(
+    repo: Optional[Path] = None,
+    *,
+    python_executable: Optional[str] = None,
+    require_canonical_plan: bool = True,
+    verbose: bool = True,
+) -> Dict[str, object]:
+    """Self-contained bootstrap for notebook cell 7.2 (git pull → run ONLY 7.2).
+
+    Discovers Drive workspace + OUTPUT_ROOT, prints skip/resume plan, and returns
+    notebook globals plus launcher argv. Requires Colab with Drive already mounted
+    (celda 1.5 si el runtime se reinicio).
+    """
+    import sys
+
+    if not _in_google_colab():
+        raise RuntimeError("bootstrap_colab_notebook_cell_72 solo aplica en Google Colab.")
+
+    repo = Path(repo or "/content/MADRLCitytleranflexresdr")
+    if not (repo / "CityLearn").is_dir():
+        raise RuntimeError(
+            f"REPO invalido: {repo}. Ejecuta git pull en /content/MADRLCitytleranflexresdr."
+        )
+
+    mount_point = Path("/content/drive")
+    if not (mount_point / "MyDrive").is_dir():
+        raise RuntimeError(
+            "Google Drive no montado. Ejecuta SOLO celda 1.5 (mount Drive), luego 7.2."
+        )
+
+    python_executable = python_executable or sys.executable
+    gdrive_root = discover_colab_gdrive_workspace(
+        mount_point,
+        repo=repo,
+        audit_runs=False,
+    )
+    if gdrive_root is None:
+        gdrive_root = mount_point / "MyDrive" / "MADRLCitytleranflexresdr"
+        gdrive_root.mkdir(parents=True, exist_ok=True)
+
+    usable_vcpus = _detect_usable_vcpus()
+    _, happo_rollout = _alloc_phase1_torch_rollout(usable_vcpus)
+    preferred_run = preferred_canonical_run_name(repo)
+    output_root = resolve_colab_mydrive_resume_root(
+        gdrive_root,
+        repo=repo,
+        preferred_run_name=preferred_run,
+        happo_rollout_threads=happo_rollout,
+        require_canonical_plan=require_canonical_plan,
+    )
+    if output_root is None:
+        output_root = resolve_canonical_output_root_from_drive(
+            gdrive_root,
+            repo=repo,
+            happo_rollout_threads=happo_rollout,
+        )
+    if output_root is None:
+        raise RuntimeError(
+            "No se encontro run MADRL restaurable en Drive. "
+            f"Esperado: {preferred_run} bajo {gdrive_root}/outputs. "
+            "Si el runtime es nuevo, ejecuta 1.5 -> 2.1 una vez."
+        )
+
+    sync_output_root_pointer_files(repo, output_root, gdrive_root=gdrive_root)
+    globals_map = colab_training_globals_defaults(
+        repo,
+        output_root,
+        python_executable=python_executable,
+    )
+    globals_map["GDRIVE_ROOT"] = str(gdrive_root)
+
+    report = build_jobs_resume_report(
+        output_root,
+        target_episodes=int(globals_map["N_EPISODES"]),
+        episode_time_steps=int(globals_map["EPISODE_STEPS"]),
+        happo_rollout_threads=int(globals_map["HAPPO_ROLLOUT_THREADS"]),
+        seed=int(globals_map["SEED"]),
+    )
+    if verbose:
+        print("\n[7.2 bootstrap] Auto-discovered OUTPUT_ROOT (sin celdas 2.1/7.1):")
+        print(f"  REPO         : {repo}")
+        print(f"  GDRIVE_ROOT  : {gdrive_root}")
+        print(f"  OUTPUT_ROOT  : {output_root}")
+        print(
+            f"  Plan         : {report.get('completed', 0)} SKIP + "
+            f"{report.get('resumable', 0)} activos "
+            f"(HAPPO salvage serial si 3 tails 49/50)"
+        )
+        print_jobs_resume_report(report, show_footer_hint=False)
+        if require_canonical_plan:
+            assert_canonical_colab_skip_plan(report, output_root=output_root)
+
+    launcher_argv = colab_official_launcher_argv(globals_map)
+    return {
+        "repo": str(repo),
+        "gdrive_root": str(gdrive_root),
+        "output_root": str(output_root),
+        "globals": globals_map,
+        "resume_report": report,
+        "launcher_argv": launcher_argv,
+        "happo_rollout_threads": int(globals_map["HAPPO_ROLLOUT_THREADS"]),
+    }
 
 
 def plan_madrl_duplicate_run_cleanup(

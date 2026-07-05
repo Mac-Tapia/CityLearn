@@ -1098,10 +1098,15 @@ def run_one_job(
     job_output_dir = path_for_status(root, job_run_dir)
 
     if args.skip_completed and name == "happo":
-        from citylearn_v3_training_common import attempt_repair_happo_launcher_job
+        from citylearn_v3_training_common import (
+            happo_salvage_kpi_tail_job,
+            repair_happo_results_json_kpi_audit,
+            try_repair_happo_salvage_for_skip,
+        )
 
-        attempt_repair_happo_launcher_job(
-            resolve_status_path(root, job_output_dir),
+        job_path = resolve_status_path(root, job_output_dir)
+        try_repair_happo_salvage_for_skip(
+            job_path,
             target_episodes=int(args.episodes),
             output_root=output_root,
             rollout_threads=int(args.happo_n_rollout_threads),
@@ -1141,6 +1146,32 @@ def run_one_job(
                     f"RUN {name.upper()}/{scenario}: not skipping — {'; '.join(blockers)}",
                     flush=True,
                 )
+
+    if name == "happo":
+        from citylearn_v3_training_common import happo_salvage_kpi_tail_job
+
+        job_path = resolve_status_path(root, job_output_dir)
+        if happo_salvage_kpi_tail_job(
+            job_path,
+            target_episodes=int(args.episodes),
+            episode_time_steps=int(args.episode_time_steps),
+            rollout_threads=int(args.happo_n_rollout_threads),
+            output_root=output_root,
+        ):
+            job = _patch_job_args(
+                job,
+                {
+                    "--n-rollout-threads": "1",
+                    "--torch-threads": "1",
+                    "--live-progress-interval": "300",
+                    "--live-heartbeat-seconds": "300",
+                },
+            )
+            print(
+                f"[launcher] HAPPO salvage KPI tail {scenario}: "
+                "n_rollout_threads=1, live-progress/heartbeat=300 (Drive-safe)",
+                flush=True,
+            )
 
     label = f"{scenario}_{name}"
     suffix = "" if attempt == 0 else f"_retry{attempt}"
@@ -1730,6 +1761,46 @@ def _run_backfill_schedule(
     return overall_rc
 
 
+def _happo_salvage_tail_serial_mode(
+    *,
+    root: Path,
+    jobs: List[Dict[str, object]],
+    output_root: Path,
+    args: argparse.Namespace,
+) -> bool:
+    """True when every pending HAPPO job is a salvage KPI tail (49/50) — run serially."""
+    from citylearn_v3_training_common import (
+        happo_salvage_kpi_tail_job,
+        job_counts_as_launcher_complete,
+    )
+
+    pending_tail = 0
+    pending_other = 0
+    for job in jobs:
+        if str(job.get("name", "")).lower() != "happo":
+            continue
+        scenario = str(job.get("scenario", ""))
+        job_run_dir = run_dir(output_root, "happo", scenario, args.seed)
+        job_output_dir = path_for_status(root, job_run_dir)
+        if job_counts_as_launcher_complete(
+            job_output_dir,
+            target_episodes=int(args.episodes),
+            output_root=output_root,
+        ):
+            continue
+        if happo_salvage_kpi_tail_job(
+            job_output_dir,
+            target_episodes=int(args.episodes),
+            episode_time_steps=int(args.episode_time_steps),
+            rollout_threads=int(args.happo_n_rollout_threads),
+            output_root=output_root,
+        ):
+            pending_tail += 1
+        else:
+            pending_other += 1
+    return pending_tail > 0 and pending_other == 0
+
+
 def run_dynamic_backfill_jobs(
     *,
     root: Path,
@@ -1818,6 +1889,17 @@ def run_dynamic_backfill_jobs(
         scenarios = sorted({str(j.get("scenario", "")) for j in phase2_jobs})
         deps = ", ".join(f"MATD3/{s}<-(HAPPO/{s} or MAAC/{s})" for s in scenarios)
         print(f"[launcher] phase-2 dependencies: {deps}", flush=True)
+
+    if _happo_salvage_tail_serial_mode(
+        root=root, jobs=jobs, output_root=output_root, args=args
+    ):
+        if max_workers > 1:
+            print(
+                "[launcher] HAPPO salvage KPI tails (49/50): concurrency -> 1 "
+                "(serial; evita bloqueo Drive/FUSE con 3×HAPPO en paralelo)",
+                flush=True,
+            )
+        max_workers = 1
 
     def _submit(pool: ThreadPoolExecutor, job: Mapping[str, object]):
         return pool.submit(
