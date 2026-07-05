@@ -343,10 +343,8 @@ def prepare_colab_cell_72_standalone(
         sys.path.insert(0, str(scripts))
     from citylearn_v3_training_common import (
         assert_canonical_colab_skip_plan,
-        build_jobs_resume_report,
-        discover_colab_gdrive_workspace,
+        bootstrap_colab_notebook_cell_72,
         notebook_jobs_resume_preview,
-        resolve_colab_mydrive_resume_root,
     )
 
     repo_path = Path(repo or ns.get("REPO") or "/content/MADRLCitytleranflexresdr")
@@ -362,60 +360,34 @@ def prepare_colab_cell_72_standalone(
         print("[7.2 bootstrap] Montando Google Drive...")
         drive.mount("/content/drive")
 
-    gdrive = discover_colab_gdrive_workspace(mount, repo=repo_path, audit_runs=False)
-    if gdrive is None:
-        raise RuntimeError("No se encontro workspace MADRL en Drive. Ejecuta celda 1.5 o 1.2.")
-
     manual = str(resume_output_root or ns.get("RESUME_OUTPUT_ROOT") or ns.get("OUTPUT_ROOT") or "").strip()
-    target_ep = int(ns.get("N_EPISODES", ns.get("EPISODES", 50)) or 50)
-    ep_steps = int(ns.get("EPISODE_STEPS", 8760) or 8760)
-
-    output_root = None
     if manual and Path(manual).is_dir():
-        output_root = Path(manual)
-    if output_root is None:
-        output_root = resolve_colab_mydrive_resume_root(
-            gdrive,
-            repo=repo_path,
-            resume_output_root=manual or None,
-            target_episodes=target_ep,
-            episode_time_steps=ep_steps,
-            require_canonical_plan=True,
-        )
-    if output_root is None:
-        output_root = resolve_colab_mydrive_resume_root(
-            gdrive,
-            repo=repo_path,
-            resume_output_root=manual or None,
-            target_episodes=target_ep,
-            episode_time_steps=ep_steps,
-            require_canonical_plan=False,
-        )
-    if output_root is None:
-        raise RuntimeError(
-            "No hay OUTPUT_ROOT reanudable en Drive. Ejecuta celda 2.1 o define RESUME_OUTPUT_ROOT."
-        )
+        ns["RESUME_OUTPUT_ROOT"] = manual
+        ns["OUTPUT_ROOT"] = manual
 
-    config = colab_a100_training_config(
+    boot = bootstrap_colab_notebook_cell_72(
         repo_path,
-        output_root=output_root,
-        gdrive_root=gdrive,
-        target_episodes=target_ep,
-        episode_steps=ep_steps,
+        python_executable=str(ns.get("PROJECT_PYTHON") or ns.get("PYTHON") or sys.executable),
+        require_canonical_plan=False,
+        verbose=False,
     )
+    config = dict(boot["globals"])
     ns.update(config)
     bind_cell_72_helpers(ns, config)
+
+    target_ep = int(config.get("N_EPISODES", 50))
+    ep_steps = int(config.get("EPISODE_STEPS", 8760))
+    output_root = Path(str(config["OUTPUT_ROOT"]))
 
     print("\n[7.2 bootstrap] Modo standalone — sin celdas 1.5/2.1/7.1")
     print(f"[7.2 bootstrap] OUTPUT_ROOT = {output_root}")
     print(f"[7.2 bootstrap] HAPPO rollout_threads = {config['HAPPO_ROLLOUT_THREADS']}")
-
-    report = build_jobs_resume_report(
-        output_root,
-        target_episodes=target_ep,
-        episode_time_steps=ep_steps,
-        happo_rollout_threads=int(config["HAPPO_ROLLOUT_THREADS"]),
+    print(
+        "[7.2 bootstrap] Launcher: 9 SKIP + 3 HAPPO salvage (serial, n_rollout=1) "
+        "cuando aplique"
     )
+
+    report = boot["resume_report"]
     notebook_jobs_resume_preview(
         output_root,
         target_episodes=target_ep,
