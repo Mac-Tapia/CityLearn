@@ -211,6 +211,63 @@ def _iter_selective_mirror_sources(fuse_src: Path) -> List[Path]:
     return sorted(sources, key=_priority)
 
 
+def _mirror_plan_score(report: Mapping[str, object]) -> tuple:
+    return (
+        int(report.get("completed") or 0),
+        int(report.get("resumable") or 0),
+        int(report.get("episodes_done") or 0),
+    )
+
+
+def fuse_mirror_plan_incomplete(
+    fuse_src: Path,
+    workspace_dst: Path,
+    *,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+) -> bool:
+    """True when MyDrive lacks skip/resume artefacts that exist on the FUSE canonical run."""
+    fuse_src = Path(fuse_src)
+    workspace_dst = Path(workspace_dst)
+    if not drive_path_is_dir(fuse_src):
+        return False
+    try:
+        fuse_report = build_jobs_resume_report(
+            fuse_src,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        )
+        ws_report = build_jobs_resume_report(
+            workspace_dst,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        )
+    except _DRIVE_FUSE_IO_ERRORS:
+        return True
+    return _mirror_plan_score(fuse_report) > _mirror_plan_score(ws_report)
+
+
+def _mirror_should_copy_file(src: Path, dst: Path) -> bool:
+    if not drive_path_is_file(src):
+        return False
+    if not drive_path_exists(dst):
+        return True
+    rel = str(src).replace("\\", "/").lower()
+    if rel.endswith("/results.json") or rel.endswith(".pt") or rel.endswith(".pth"):
+        return True
+    if rel.endswith("/timeseries.csv") or rel.endswith(f"/{JOB_LAUNCHER_COMPLETE_MARKER.lower()}"):
+        return True
+    if JOB_LAUNCHER_COMPLETE_MARKER.lower() in rel:
+        return True
+    try:
+        return dst.stat().st_size < src.stat().st_size
+    except OSError:
+        return True
+
+
 def _mirror_workspace_ready(workspace_dst: Path) -> bool:
     if not madrl_output_run_has_artifacts(workspace_dst):
         return False
@@ -276,7 +333,8 @@ def mirror_fuse_run_to_workspace(
         except _DRIVE_FUSE_IO_ERRORS:
             report["skipped"] = int(report["skipped"]) + 1
             continue
-        if drive_path_exists(dst_file):
+        if not _mirror_should_copy_file(src_file, dst_file):
+            report["skipped"] = int(report["skipped"]) + 1
             continue
         try:
             shutil.copy2(src_file, dst_file, follow_symlinks=False)
@@ -295,14 +353,7 @@ def mirror_fuse_run_to_workspace(
             )
             last_progress = now
 
-        if idx % progress_every == 0 and _mirror_workspace_ready(workspace_dst):
-            report["ok"] = True
-            report["early_exit"] = True
-            _log("[..] Mirror suficiente para resume; deteniendo copia anticipada.")
-            break
-
-    if not report.get("ok"):
-        report["ok"] = _mirror_workspace_ready(workspace_dst)
+    report["ok"] = _mirror_workspace_ready(workspace_dst)
     if verbose:
         _log(
             f"[..] Mirror terminado: copied={report['copied']} "
@@ -4143,15 +4194,42 @@ def ensure_colab_output_run_ready(
     ranked = _rank_runs(mount_runs)
     api_report: Optional[Dict[str, object]] = None
     workspace_summary = _workspace_run_restorable(workspace_run)
+    mirror_incomplete = (
+        fuse_src is not None
+        and fuse_mirror_plan_incomplete(
+            fuse_src,
+            workspace_run,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        )
+    )
 
-    if workspace_summary is None and fuse_src is not None:
-        _log("[..] Copiando artefactos resume desde FUSE a MyDrive...")
+    if fuse_src is not None and (workspace_summary is None or mirror_incomplete):
+        if mirror_incomplete and workspace_summary is not None:
+            _log(
+                "[..] MyDrive incompleto vs FUSE (faltan results.json/checkpoints skip/resume); "
+                "re-sincronizando..."
+            )
+        else:
+            _log("[..] Copiando artefactos resume desde FUSE a MyDrive...")
         mirror_report = mirror_fuse_run_to_workspace(
             fuse_src,
             workspace_run,
             verbose=verbose,
         )
         workspace_summary = _workspace_run_restorable(workspace_run)
+        if mirror_incomplete and fuse_mirror_plan_incomplete(
+            fuse_src,
+            workspace_run,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        ):
+            _log(
+                "[WARN] Tras mirror, MyDrive sigue por debajo del plan FUSE; "
+                "revisa permisos FUSE o ejecuta 2.3 (HAPPO salvage)."
+            )
 
     need_workspace_link = (
         allow_drive_api_shortcut
