@@ -3344,54 +3344,80 @@ _DRIVE_API_SCOPES = (
 )
 
 
-def list_madrl_runs_on_colab_mount(
+def _candidate_output_dirs_on_colab_mount(
     mount_point: Path,
     *,
     project_name: str = "MADRLCitytleranflexresdr",
-    max_outputs_depth: int = 8,
 ) -> List[Path]:
-    """Find every ``outputs/madrl_v3_*`` run visible under a Colab Drive mount."""
+    """Fast, bounded list of ``outputs/`` dirs (never full MyDrive ``rglob``)."""
     mount_point = Path(mount_point)
-    found: List[Path] = []
+    candidates: List[Path] = []
     seen: set = set()
-    seeds = [mount_point / "MyDrive" / project_name / "outputs"]
+
+    def _add(path: Path) -> None:
+        key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(path)
+
+    _add(mount_point / "MyDrive" / project_name / "outputs")
+    _add(mount_point / "MyDrive" / "MADRL_CityLearn_v3" / project_name / "outputs")
+
+    shortcut_root = mount_point / ".shortcut-targets-by-id" / CANONICAL_SHARED_DRIVE_FOLDER_ID
+    _add(shortcut_root / "outputs")
+
     mydrive = mount_point / "MyDrive"
     if mydrive.is_dir():
         try:
-            for outputs in mydrive.rglob("outputs"):
-                if not outputs.is_dir():
+            for child in mydrive.iterdir():
+                if not child.is_dir():
                     continue
-                try:
-                    rel = outputs.relative_to(mydrive)
-                except ValueError:
-                    continue
-                if len(rel.parts) > max_outputs_depth:
-                    continue
-                seeds.append(outputs)
-        except OSError:
-            pass
-
-    shortcut_root = mount_point / ".shortcut-targets-by-id" / CANONICAL_SHARED_DRIVE_FOLDER_ID
-    if shortcut_root.is_dir():
-        seeds.append(shortcut_root / "outputs")
-        try:
-            for outputs in shortcut_root.rglob("outputs"):
-                if outputs.is_dir():
-                    seeds.append(outputs)
+                name_lower = child.name.lower()
+                if project_name.lower() in name_lower or "madrl" in name_lower:
+                    _add(child / "outputs")
+                    try:
+                        for sub in child.iterdir():
+                            if sub.is_dir() and (
+                                project_name.lower() in sub.name.lower()
+                                or "madrl" in sub.name.lower()
+                            ):
+                                _add(sub / "outputs")
+                    except OSError:
+                        pass
         except OSError:
             pass
 
     shareddrives = mount_point / "Shareddrives"
     if shareddrives.is_dir():
         try:
-            for outputs in shareddrives.rglob("outputs"):
-                if not outputs.is_dir():
+            for shared in shareddrives.iterdir():
+                if not shared.is_dir():
                     continue
-                seeds.append(outputs)
+                name_lower = shared.name.lower()
+                if project_name.lower() in name_lower or "madrl" in name_lower:
+                    _add(shared / "outputs")
         except OSError:
             pass
 
-    for outputs in seeds:
+    return candidates
+
+
+def list_madrl_runs_on_colab_mount(
+    mount_point: Path,
+    *,
+    project_name: str = "MADRLCitytleranflexresdr",
+    max_outputs_depth: int = 8,
+) -> List[Path]:
+    """Find ``outputs/madrl_v3_*`` runs under known Colab Drive paths only."""
+    del max_outputs_depth  # kept for API compatibility; scan is already bounded
+    mount_point = Path(mount_point)
+    found: List[Path] = []
+    seen: set = set()
+    for outputs in _candidate_output_dirs_on_colab_mount(
+        mount_point,
+        project_name=project_name,
+    ):
         if not outputs.is_dir():
             continue
         for run_path in list_madrl_v3_output_runs(outputs):
@@ -3408,18 +3434,22 @@ def _colab_drive_api_credentials():
     creds = None
     if _in_google_colab():
         try:
-            from google.colab import auth as colab_auth
-
-            # Safe AFTER drive.mount(): reuses the OAuth session from the mount popup.
-            colab_auth.authenticate_user()
-        except Exception:
-            pass
-        try:
             from google.colab import _google_auth
 
             creds = _google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
         except Exception:
             creds = None
+        if creds is None:
+            try:
+                from google.colab import auth as colab_auth
+
+                # Only if mount token not yet visible to API client (may prompt once).
+                colab_auth.authenticate_user()
+                from google.colab import _google_auth
+
+                creds = _google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
+            except Exception:
+                creds = None
         if creds is None:
             try:
                 from google.auth import default
@@ -3561,7 +3591,7 @@ def ensure_shared_canonical_run_on_mount(
     workspace_outputs: Path,
     run_name: str,
     shared_folder_id: str = CANONICAL_SHARED_DRIVE_FOLDER_ID,
-    wait_seconds: float = 8.0,
+    wait_seconds: float = 3.0,
 ) -> Dict[str, object]:
     """Create a Drive shortcut to the shared canonical run when it is missing locally."""
     workspace_outputs = Path(workspace_outputs)
@@ -3671,10 +3701,16 @@ def bind_colab_drive_workspace(
     episode_time_steps: int = 8760,
     happo_rollout_threads: Optional[int] = None,
     allow_drive_api_shortcut: bool = True,
+    verbose: bool = True,
 ) -> Dict[str, object]:
     """Bind Colab globals to the best restorable MADRL run visible on Drive (zero manual paths)."""
     mount_point = Path(mount_point)
     repo = Path(repo)
+
+    def _log(message: str) -> None:
+        if verbose:
+            print(message, flush=True)
+
     default_workspace = Path(
         default_workspace or (mount_point / "MyDrive" / project_name)
     )
@@ -3700,20 +3736,23 @@ def bind_colab_drive_workspace(
         ranked.sort(key=lambda item: (item["score"], item["run_path"].name), reverse=True)
         return ranked
 
+    _log("[..] Escaneando runs MADRL en paths conocidos de Drive...")
     mount_runs = list_madrl_runs_on_colab_mount(
         mount_point,
         project_name=project_name,
     )
+    _log(f"[..] Carpetas run en mount: {len(mount_runs)}")
     ranked = _rank_runs(mount_runs)
     api_report: Optional[Dict[str, object]] = None
 
     if not ranked and allow_drive_api_shortcut:
+        _log("[..] Run canonico no visible; intentando shortcut via Drive API...")
         api_report = ensure_shared_canonical_run_on_mount(
             mount_point,
             workspace_outputs=default_outputs,
             run_name=preferred_run_name,
         )
-        for _retry in range(4):
+        for _retry in range(3):
             mount_runs = list_madrl_runs_on_colab_mount(
                 mount_point,
                 project_name=project_name,
@@ -3721,8 +3760,9 @@ def bind_colab_drive_workspace(
             ranked = _rank_runs(mount_runs)
             if ranked:
                 break
-            if _retry < 3:
-                time.sleep(5)
+            if _retry < 2:
+                _log("[..] Esperando que el shortcut aparezca en el mount...")
+                time.sleep(3)
 
     summaries = [
         summarize_madrl_output_run(
