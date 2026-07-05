@@ -14,6 +14,7 @@ from citylearn_v3_training_common import (
     add_common_citylearn_args,
     add_external_path,
     citylearn_v3_training_report,
+    clamp_happo_n_rollout_threads,
     configure_torch_runtime,
     ensure_project_paths,
     ensure_artifact_layout,
@@ -88,6 +89,7 @@ def main() -> int:
         else output_dir.parent
     )
     rollout_threads = max(1, int(args.n_rollout_threads))
+    rollout_threads = clamp_happo_n_rollout_threads(rollout_threads)
     # Mantener acotado el minibatch de GPU al escalar rollouts: mas workers agrandan el
     # buffer numpy (RAM de sistema) pero num_mini_batch divide el batch -> VRAM por update
     # ~constante. mini_batch_size = n_rollout_threads * episode_length / num_mini_batch.

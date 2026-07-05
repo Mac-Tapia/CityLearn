@@ -2220,26 +2220,29 @@ def _resolve_auto_happo_rollout_threads(args: argparse.Namespace) -> None:
     """Fill --happo-n-rollout-threads from usable vCPUs when left unset.
 
     Convergence-neutral: only parallel env collection (SubprocVecEnv), not learning
-    dynamics. Mirrors the notebook ``_alloc_phase1`` rollout formula: prefer torch_t=2,
-    then pick the largest rollout with 3*(torch_t+rollout)+3*torch_t <= vcpus.
-    Backward-compatible: 12 vCPU -> 2 (today's default), ~26 vCPU -> 4.
+    dynamics. Capped at HAPPO_COLAB_ROLLOUT_THREADS_MAX (4): high-vCPU runtimes used
+    to pick 12 and thrash CPU with 3 parallel HAPPO jobs (~0.17 steps/s).
+    12 vCPU -> 2, ~26 vCPU -> 4.
     """
-    if getattr(args, "happo_n_rollout_threads", None) is not None:
-        return
+    from citylearn_v3_training_common import (
+        clamp_happo_n_rollout_threads,
+        recommend_happo_rollout_threads,
+    )
 
     vcpus = _usable_vcpus()
-    best_rollout = 2
-    for torch_t in (2, 1):
-        candidate = 2
-        valid = False
-        for rollout in range(1, 17):
-            if 3 * (torch_t + rollout) + 3 * torch_t <= vcpus:
-                candidate = rollout
-                valid = True
-        if valid:
-            best_rollout = candidate
-            break
+    if getattr(args, "happo_n_rollout_threads", None) is not None:
+        raw = int(args.happo_n_rollout_threads)
+        clamped = clamp_happo_n_rollout_threads(raw, usable_vcpus=vcpus)
+        if clamped != raw:
+            print(
+                f"[launcher] happo_n_rollout_threads clamped {raw} -> {clamped} "
+                f"(usable_vcpus={vcpus})",
+                flush=True,
+            )
+        args.happo_n_rollout_threads = clamped
+        return
 
+    best_rollout = recommend_happo_rollout_threads(usable_vcpus=vcpus)
     args.happo_n_rollout_threads = best_rollout
     print(
         f"[launcher] auto-rollout (usable_vcpus={vcpus}): "

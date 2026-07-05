@@ -89,7 +89,7 @@ def add_common_citylearn_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--schema-path", default=None, help="Optional CityLearn v2 schema path.")
     parser.add_argument("--scenario", default="E1", help="CityLearn v3 scenario label.")
     parser.add_argument("--seed", default=0, type=int, help="Random seed.")
-    parser.add_argument("--episode-time-steps", default=4, type=int, help="Episode length for the launcher.")
+    parser.add_argument("--episode-time-steps", default=8760, type=int, help="Episode length for the launcher.")
     parser.add_argument("--output-dir", default=None, help="Directory for logs, models and summaries.")
     parser.add_argument(
         "--normalize-observations",
@@ -450,7 +450,16 @@ def job_run_dir_for_launcher(
 
 def resolve_output_dir(output_dir: Optional[str], algorithm: str, scenario: str, seed: int) -> Path:
     base = Path(output_dir) if output_dir else DEFAULT_OUTPUT_ROOT / normalize_algorithm_dir(algorithm)
-    path = base / normalize_scenario_dir(scenario, seed)
+    scen = scenario.strip().upper()
+    seed = int(seed)
+    simple = normalize_scenario_dir(scen, seed)
+    legacy = f"{scen}_seed_{seed}"
+    # Callers such as regenerate_happo_kpis may pass the full run folder (HAPPO/E1 or
+    # happo/E1_seed_0). Do not append the scenario segment twice.
+    if base.name in {simple, legacy}:
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+    path = base / simple
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -734,6 +743,112 @@ def read_csv_rows(path: Path) -> List[Dict[str, object]]:
             return [dict(row) for row in csv.DictReader(file)]
     except Exception:
         return []
+
+
+def _stream_rewrite_csv_rows_lt_episode(
+    path: Path,
+    *,
+    completed_episodes: int,
+    dedup_keys: Sequence[str],
+) -> Tuple[int, Optional[List[str]]]:
+    """Stream-filter a large incremental CSV without loading it all into RAM.
+
+    Keeps rows with ``episode < completed_episodes``, deduplicating by ``dedup_keys``.
+    Rewrites the file atomically when rows would be dropped; returns kept row count.
+  """
+    path = Path(path)
+    if not path.is_file() or int(completed_episodes) <= 0:
+        return 0, None
+    completed = int(completed_episodes)
+    seen: set = set()
+    kept = 0
+    fieldnames: Optional[List[str]] = None
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.rewrite.tmp")
+    rewrite_needed = False
+    try:
+        with path.open("r", newline="", encoding="utf-8") as src:
+            reader = csv.DictReader(src)
+            fieldnames = list(reader.fieldnames or [])
+            if not fieldnames:
+                return 0, None
+            with tmp_path.open("w", newline="", encoding="utf-8") as dst:
+                writer = csv.DictWriter(dst, fieldnames=fieldnames, extrasaction="ignore")
+                writer.writeheader()
+                for row in reader:
+                    ep = _as_int(row.get("episode"))
+                    if ep is None or ep >= completed:
+                        rewrite_needed = True
+                        continue
+                    signature = tuple(str(row.get(k)) for k in dedup_keys)
+                    if signature in seen:
+                        rewrite_needed = True
+                        continue
+                    seen.add(signature)
+                    writer.writerow({key: _csv_safe(row.get(key)) for key in fieldnames})
+                    kept += 1
+        if rewrite_needed:
+            tmp_path.replace(path)
+            fsync_file(path)
+        else:
+            tmp_path.unlink(missing_ok=True)
+        return kept, fieldnames
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        return 0, fieldnames
+
+
+def _stream_rewrite_csv_rows_lt_episode(
+    path: Path,
+    *,
+    completed_episodes: int,
+    dedup_keys: Sequence[str],
+) -> Tuple[int, Optional[List[str]]]:
+    """Stream-filter a large incremental CSV without loading it all into RAM.
+
+    Keeps rows with ``episode < completed_episodes``, deduplicating by ``dedup_keys``.
+    Rewrites the file atomically when rows would be dropped; returns kept row count.
+    """
+    path = Path(path)
+    if not path.is_file() or int(completed_episodes) <= 0:
+        return 0, None
+    completed = int(completed_episodes)
+    seen: set = set()
+    kept = 0
+    fieldnames: Optional[List[str]] = None
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.rewrite.tmp")
+    rewrite_needed = False
+    try:
+        with path.open("r", newline="", encoding="utf-8") as src:
+            reader = csv.DictReader(src)
+            fieldnames = list(reader.fieldnames or [])
+            if not fieldnames:
+                return 0, None
+            with tmp_path.open("w", newline="", encoding="utf-8") as dst:
+                writer = csv.DictWriter(dst, fieldnames=fieldnames, extrasaction="ignore")
+                writer.writeheader()
+                for row in reader:
+                    ep = _as_int(row.get("episode"))
+                    if ep is None or ep >= completed:
+                        rewrite_needed = True
+                        continue
+                    signature = tuple(str(row.get(k)) for k in dedup_keys)
+                    if signature in seen:
+                        rewrite_needed = True
+                        continue
+                    seen.add(signature)
+                    writer.writerow({key: _csv_safe(row.get(key)) for key in fieldnames})
+                    kept += 1
+        if rewrite_needed:
+            tmp_path.replace(path)
+            fsync_file(path)
+        else:
+            tmp_path.unlink(missing_ok=True)
+        return kept, fieldnames
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        return 0, fieldnames
 
 
 def _dedup_rows_keep_first(
@@ -1212,7 +1327,7 @@ def job_meets_launcher_complete_requirements(
         rollout_threads=roll,
     ):
         return True
-    if happo_gap_complete:
+    if happo_gap_complete and _results_have_audited_kpis(payload):
         return True
     if not _results_have_audited_kpis(payload):
         return False
@@ -1270,6 +1385,41 @@ def _infer_rollout_threads(payload: Optional[Mapping[str, object]]) -> int:
         if value is not None and value > 0:
             return value
     return 1
+
+
+# CityLearn env.step is single-threaded and heavy; >4 SubprocVecEnv workers per job
+# rarely raise FPS and oversubscribe Colab when 3 HAPPO jobs run in phase 1.
+HAPPO_COLAB_ROLLOUT_THREADS_MAX = 4
+
+
+def recommend_happo_rollout_threads(*, usable_vcpus: int = 12) -> int:
+    """Rollout threads per HAPPO job for 3-way parallel phase-1 (HAPPO+MASAC)."""
+    vcpus = max(1, int(usable_vcpus))
+    best = 1
+    for torch_t in (2, 1):
+        for rollout in range(1, HAPPO_COLAB_ROLLOUT_THREADS_MAX + 1):
+            if 3 * (torch_t + rollout) + 3 * torch_t <= vcpus:
+                best = rollout
+    return best
+
+
+def clamp_happo_n_rollout_threads(
+    value: Optional[int],
+    *,
+    fallback: Optional[int] = None,
+    usable_vcpus: Optional[int] = None,
+) -> int:
+    """Reject poisoned salvage values (e.g. n_rollout_threads=12 on 12-vCPU A100)."""
+    vcpus = max(1, int(usable_vcpus)) if usable_vcpus is not None else 12
+    recommended = recommend_happo_rollout_threads(usable_vcpus=vcpus)
+    fb = int(fallback) if fallback is not None and int(fallback) > 0 else recommended
+    fb = min(max(1, fb), recommended)
+    if value is None or int(value) <= 0:
+        return fb
+    stored = int(value)
+    if stored > recommended:
+        return fb
+    return max(1, stored)
 
 
 def read_job_launcher_complete_marker(output_dir: Path) -> Optional[Dict[str, object]]:
@@ -1852,6 +2002,29 @@ def _happo_live_progress_entered_final_episode(
     return False
 
 
+def _happo_salvage_missing_kpis(output_dir: Path) -> bool:
+    """True when HAPPO salvage results exist but KPI audit never completed (e.g. VecEnvWrapper)."""
+    payload = read_job_results_json(output_dir)
+    if not payload or _payload_algorithm(payload) != "happo":
+        return False
+    status = str(payload.get("status") or "").lower()
+    hyper = dict(payload.get("hyperparameters") or {})
+    salvage = (
+        status == "completed_with_salvage"
+        or bool(hyper.get("run_completed_with_salvage"))
+        or bool(payload.get("salvage_reason"))
+        or bool(hyper.get("run_error"))
+    )
+    if not salvage:
+        return False
+    if _results_have_audited_kpis(payload):
+        return False
+    axis = payload.get("project_axis_metrics")
+    if isinstance(axis, Mapping) and axis:
+        return False
+    return True
+
+
 def _happo_last_episode_flush_gap_complete(
     output_root: Optional[Path],
     output_dir: Path,
@@ -1865,8 +2038,13 @@ def _happo_last_episode_flush_gap_complete(
     Occurs when training finished and ``results.json`` is ``completed_with_salvage``, yet the
     last env step never flushed to ``timeseries.csv`` (HAPPO rarely sets ``all_done`` on
     step 8759). Without this guard, cell 2.1b / 7.2 re-run the same single episode forever.
+
+    Salvage without audited KPIs (VecEnvWrapper tail crash) is never treated as complete:
+    those jobs must resume via cell 2.3 / ``regenerate_happo_kpis.py``.
     """
     target_episodes = max(1, int(target_episodes))
+    if _happo_salvage_missing_kpis(output_dir):
+        return False
     if not _checkpoint_exists_for_algorithm(Path(output_dir), "happo"):
         return False
 
@@ -2368,6 +2546,8 @@ def discover_job_resume_plan(
     target_episodes = max(1, int(target_episodes))
     episode_time_steps = max(1, int(episode_time_steps))
     rollout_threads = max(1, int(rollout_threads))
+    if algorithm.lower() == "happo":
+        rollout_threads = clamp_happo_n_rollout_threads(rollout_threads)
     checkpoints_dir = output_dir / CHECKPOINT_DIR_NAME
 
     plan: Dict[str, object] = {
@@ -2420,6 +2600,13 @@ def discover_job_resume_plan(
         output_dir / DATA_DIR_NAME,
         episode_time_steps=episode_time_steps,
     )
+    salvage_payload = read_job_results_json(output_dir) or {}
+    salvage_hyper = dict(salvage_payload.get("hyperparameters") or {})
+    job_resume = salvage_hyper.get("job_resume")
+    if isinstance(job_resume, Mapping) and bool(job_resume.get("active")):
+        jr_done = _as_int(job_resume.get("completed_episodes"))
+        if jr_done is not None and jr_done > 0:
+            completed = max(completed, int(jr_done))
 
     model_dir: Optional[Path] = None
     maac_ckpt: Optional[Path] = None
@@ -2497,16 +2684,18 @@ def resolve_job_rollout_threads(
     algorithm: str,
     *,
     fallback: Optional[int] = None,
+    usable_vcpus: Optional[int] = None,
 ) -> int:
-    """Rollout threads for skip/resume preview; prefer persisted hyperparameters."""
+    """Rollout threads for skip/resume; clamp poisoned salvage hyperparameters."""
     output_dir = Path(output_dir)
     payload = read_job_results_json(output_dir)
     from_payload = _infer_rollout_threads(payload)
     if algorithm.lower() == "happo":
-        if from_payload > 1:
-            return from_payload
-        if fallback is not None and int(fallback) > 0:
-            return int(fallback)
+        return clamp_happo_n_rollout_threads(
+            from_payload,
+            fallback=fallback,
+            usable_vcpus=usable_vcpus,
+        )
     return max(1, from_payload)
 
 
@@ -2763,6 +2952,450 @@ def print_jobs_resume_report(
         print("  Tras 7.1, vuelve a ejecutar esta celda 2.1b para confirmar HAPPO rollout_threads.")
         print(f"  7.2 usa --skip-completed (omite COMPLETOS) y resume intra-job (continua los")
         print(f"  REANUDABLES desde su ultimo checkpoint) hasta completar los {target} episodios.")
+
+
+def list_madrl_v3_output_runs(parent: Path) -> List[Path]:
+    """All ``madrl_v3_*`` directories under a Drive/local outputs parent."""
+    parent = Path(parent)
+    if not parent.is_dir():
+        return []
+    try:
+        runs = [p for p in parent.glob("madrl_v3_*") if p.is_dir()]
+    except OSError:
+        return []
+    return sorted(runs, key=lambda p: p.name)
+
+
+def madrl_output_run_has_artifacts(output_root: Path) -> bool:
+    """True when the run tree holds at least one restorable MADRL job folder."""
+    output_root = Path(output_root)
+    status_path = output_root / "official_full_status.json"
+    if status_path.is_file():
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            if status.get("jobs"):
+                return True
+        except Exception:
+            pass
+    for algo in DEFAULT_REPORT_ALGORITHMS:
+        for scen in DEFAULT_REPORT_SCENARIOS:
+            run_dir = resolve_existing_job_run_dir(output_root, algo, scen, 0)
+            if run_dir is not None and job_run_dir_has_artifacts(run_dir):
+                return True
+    return False
+
+
+def summarize_madrl_output_run(
+    output_root: Path,
+    *,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+) -> Dict[str, object]:
+    """Summarize one output root from existing artifacts only (no invented progress)."""
+    output_root = Path(output_root)
+    has_artifacts = madrl_output_run_has_artifacts(output_root)
+    report = build_jobs_resume_report(
+        output_root,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+        happo_rollout_threads=happo_rollout_threads,
+    )
+    completed = int(report.get("completed") or 0)
+    resumable = int(report.get("resumable") or 0)
+    pending = int(report.get("pending") or 0)
+    progress_pct = float(report.get("progress_pct") or 0.0)
+    episodes_done = int(report.get("episodes_done") or 0)
+    score = 0.0
+    if has_artifacts:
+        score = (
+            completed * 1_000_000
+            + episodes_done * 1_000
+            + resumable * 10_000
+            + progress_pct
+        )
+    return {
+        "output_root": str(output_root),
+        "run_name": output_root.name,
+        "has_artifacts": has_artifacts,
+        "completed_jobs": completed,
+        "resumable_jobs": resumable,
+        "pending_jobs": pending,
+        "episodes_done": episodes_done,
+        "episodes_target": int(report.get("episodes_target") or 0),
+        "progress_pct": progress_pct,
+        "score": score,
+        "report": report,
+    }
+
+
+def audit_madrl_drive_output_runs(
+    parent: Path,
+    *,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+    preferred_output_root: Optional[Path] = None,
+) -> Dict[str, object]:
+    """Audit every ``madrl_v3_*`` folder; rank by artifact-grounded completeness."""
+    parent = Path(parent)
+    runs = list_madrl_v3_output_runs(parent)
+    summaries: List[Dict[str, object]] = [
+        summarize_madrl_output_run(
+            run_path,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        )
+        for run_path in runs
+    ]
+
+    artifact_runs = [s for s in summaries if s.get("has_artifacts")]
+    best: Optional[Dict[str, object]] = None
+    if artifact_runs:
+        pref = str(preferred_output_root) if preferred_output_root else None
+
+        def _rank(s: Mapping[str, object]) -> tuple:
+            is_pref = 1 if pref and str(s.get("output_root")) == pref else 0
+            return (float(s.get("score") or 0.0), is_pref, str(s.get("run_name") or ""))
+
+        best = max(artifact_runs, key=_rank)
+
+    return {
+        "parent": str(parent),
+        "runs_found": len(runs),
+        "runs_with_artifacts": len(artifact_runs),
+        "summaries": summaries,
+        "best": best,
+        "preferred_output_root": str(preferred_output_root) if preferred_output_root else None,
+    }
+
+
+def select_best_resume_output_root(
+    parent: Path,
+    *,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+    preferred_output_root: Optional[Path] = None,
+) -> Optional[Dict[str, object]]:
+    """Pick the most complete existing run; never prefer empty timestamp stubs."""
+    audit = audit_madrl_drive_output_runs(
+        parent,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+        happo_rollout_threads=happo_rollout_threads,
+        preferred_output_root=preferred_output_root,
+    )
+    best = audit.get("best")
+    return dict(best) if isinstance(best, Mapping) else None
+
+
+def print_madrl_drive_runs_audit(
+    audit: Mapping[str, object],
+    *,
+    selected: Optional[Mapping[str, object]] = None,
+) -> None:
+    """Human-readable audit of all ``madrl_v3_*`` runs (notebook cell 2.1)."""
+    parent = str(audit.get("parent") or "")
+    summaries = list(audit.get("summaries") or [])
+    selected_root = str((selected or audit.get("best") or {}).get("output_root") or "")
+    print("=" * 72)
+    print(f"  AUDITORIA runs MADRL en: {parent}")
+    print(
+        f"  Carpetas madrl_v3_*: {audit.get('runs_found', 0)}  "
+        f"(con artefactos: {audit.get('runs_with_artifacts', 0)})"
+    )
+    print("=" * 72)
+    if not summaries:
+        print("  (ninguna carpeta madrl_v3_* — se creara run nuevo si procede)")
+        print("=" * 72)
+        return
+    for summary in summaries:
+        mark = " << SELECTED" if selected_root and str(summary.get("output_root")) == selected_root else ""
+        empty = " [VACIO — sin checkpoints/results]" if not summary.get("has_artifacts") else ""
+        print(
+            f"  {summary.get('run_name')}: "
+            f"completos={summary.get('completed_jobs')}/12  "
+            f"reanudables={summary.get('resumable_jobs')}  "
+            f"pendientes={summary.get('pending_jobs')}  "
+            f"~{float(summary.get('progress_pct') or 0.0):.1f}% ep{empty}{mark}"
+        )
+    print("-" * 72)
+    if selected_root:
+        sel = dict(selected or audit.get("best") or {})
+        print(f"  Run seleccionado: {Path(selected_root).name}")
+        print(
+            f"    {sel.get('completed_jobs', 0)}/12 jobs completos, "
+            f"{sel.get('resumable_jobs', 0)} reanudables desde checkpoint"
+        )
+    elif int(audit.get("runs_with_artifacts") or 0) > 0:
+        print("  AVISO: hay runs con artefactos pero ninguno seleccionado.")
+    print("=" * 72)
+
+
+def load_training_common_module(repo: Path):
+    """Import ``citylearn_v3_training_common`` from ``CityLearn/scripts`` (notebook cells)."""
+    import importlib
+    import sys
+
+    scripts_dir = Path(repo) / "CityLearn" / "scripts"
+    scripts_key = str(scripts_dir)
+    if scripts_key not in sys.path:
+        sys.path.insert(0, scripts_key)
+    sys.modules.pop("citylearn_v3_training_common", None)
+    mod = importlib.import_module("citylearn_v3_training_common")
+    required = (
+        "build_jobs_resume_report",
+        "pick_colab_output_root",
+        "audit_madrl_drive_output_runs",
+        "print_madrl_drive_runs_audit",
+    )
+    missing = [name for name in required if not hasattr(mod, name)]
+    if missing:
+        common_py = scripts_dir / "citylearn_v3_training_common.py"
+        raise RuntimeError(
+            "citylearn_v3_training_common desactualizado "
+            f"(faltan {', '.join(missing)}). Archivo: {common_py}. "
+            "Ejecuta celda 1.2 (hard sync CityLearn)."
+        )
+    return mod
+
+
+def read_preferred_output_root_hint(repo: Path) -> Optional[Path]:
+    """Read ``outputs/latest_colab_output_root.txt`` when it points to an existing run."""
+    repo = Path(repo)
+    hint_path = repo / "outputs" / "latest_colab_output_root.txt"
+    if not hint_path.is_file():
+        return None
+    raw = hint_path.read_text(encoding="utf-8").strip()
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = (repo / candidate).resolve()
+    return candidate if candidate.is_dir() else None
+
+
+def sync_output_root_pointer_files(
+    repo: Path,
+    output_root: Path,
+    *,
+    gdrive_root: Optional[Path] = None,
+) -> None:
+    """Keep launcher/monitor fallback pointers aligned with the active ``OUTPUT_ROOT``."""
+    repo = Path(repo)
+    output_root = Path(output_root)
+    text = str(output_root)
+    (repo / "outputs").mkdir(parents=True, exist_ok=True)
+    for latest_name in ("latest_colab_output_root.txt", "latest_visible_training_output_root.txt"):
+        try:
+            (repo / "outputs" / latest_name).write_text(text, encoding="utf-8")
+        except OSError:
+            pass
+        if gdrive_root:
+            try:
+                (Path(gdrive_root) / latest_name).write_text(text, encoding="utf-8")
+            except OSError:
+                pass
+
+
+def refresh_colab_live_monitor_once(
+    repo: Path,
+    output_root: Path,
+    *,
+    python_executable: str,
+    log_tail: int = 8,
+) -> int:
+    """Single-shot monitor refresh after ``OUTPUT_ROOT`` changes (cell 2.1 / 7.3)."""
+    import subprocess
+
+    monitor = Path(repo) / "CityLearn" / "scripts" / "colab_a100_live_monitor.py"
+    if not monitor.is_file():
+        return 0
+    proc = subprocess.run(
+        [
+            python_executable,
+            "-B",
+            str(monitor),
+            "--output-root",
+            str(output_root),
+            "--once",
+            "--log-tail",
+            str(max(1, int(log_tail))),
+        ],
+        cwd=str(repo),
+        check=False,
+    )
+    return int(proc.returncode)
+
+
+def pick_colab_output_root(
+    base_output_parent: Path,
+    *,
+    run_label: str,
+    resume_output_root: Optional[str] = None,
+    auto_resume_latest: bool = True,
+    force_new_run: bool = False,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+    repo: Optional[Path] = None,
+    in_colab: bool = False,
+    gdrive_root: Optional[Path] = None,
+    print_audit: bool = True,
+) -> Dict[str, object]:
+    """Select ``OUTPUT_ROOT`` from Drive artifacts (never prefer empty timestamp stubs)."""
+    base_output_parent = Path(base_output_parent)
+    repo_path = Path(repo) if repo else None
+    preferred = read_preferred_output_root_hint(repo_path) if repo_path else None
+
+    if in_colab and str(base_output_parent).startswith("/content/drive/"):
+        if not base_output_parent.parent.exists():
+            raise RuntimeError(
+                f"Drive outputs no accesible: {base_output_parent}. "
+                "Ejecuta celda 1.5 (montar Drive) antes de 2.1."
+            )
+
+    audit = audit_madrl_drive_output_runs(
+        base_output_parent,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+        happo_rollout_threads=happo_rollout_threads,
+        preferred_output_root=preferred,
+    )
+
+    created_new_run = False
+    output_root: Path
+    resume_reason: str
+
+    manual = str(resume_output_root or "").strip()
+    if manual:
+        output_root = Path(manual)
+        resume_reason = "RESUME_OUTPUT_ROOT manual"
+    elif force_new_run:
+        output_root = base_output_parent / run_label
+        resume_reason = "NUEVO run (FORCE_NEW_RUN)"
+        created_new_run = True
+    elif auto_resume_latest:
+        best = audit.get("best")
+        if isinstance(best, Mapping):
+            output_root = Path(str(best["output_root"]))
+            resume_reason = (
+                "AUTO-RESUME mejor run por artefactos "
+                f"({best.get('completed_jobs', 0)}/12 completos, "
+                f"~{float(best.get('progress_pct') or 0.0):.1f}%)"
+            )
+        elif int(audit.get("runs_with_artifacts") or 0) > 0:
+            raise RuntimeError(
+                "Hay carpetas madrl_v3_* con artefactos MADRL en Drive pero no se pudo "
+                "seleccionar un run. Define RESUME_OUTPUT_ROOT manualmente en celda 2.1."
+            )
+        elif list_madrl_v3_output_runs(base_output_parent):
+            output_root = base_output_parent / run_label
+            resume_reason = "NUEVO run (runs previos vacios, sin artefactos MADRL)"
+            created_new_run = True
+        else:
+            output_root = base_output_parent / run_label
+            resume_reason = "NUEVO run (no habia runs previos)"
+            created_new_run = True
+    else:
+        output_root = base_output_parent / run_label
+        resume_reason = "NUEVO run (AUTO_RESUME_LATEST=False)"
+        created_new_run = True
+
+    selected = None
+    if not created_new_run:
+        for summary in audit.get("summaries") or []:
+            if str(summary.get("output_root")) == str(output_root):
+                selected = summary
+                break
+        if selected is None and isinstance(audit.get("best"), Mapping):
+            if str(audit["best"].get("output_root")) == str(output_root):
+                selected = audit["best"]
+
+    if print_audit:
+        print_madrl_drive_runs_audit(audit, selected=selected)
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    if repo_path is not None:
+        sync_output_root_pointer_files(repo_path, output_root, gdrive_root=gdrive_root)
+
+    return {
+        "output_root": str(output_root),
+        "resume_output_root": None if created_new_run else str(output_root),
+        "resume_reason": resume_reason,
+        "created_new_run": created_new_run,
+        "audit": audit,
+        "selected_summary": selected,
+    }
+
+
+def notebook_jobs_resume_preview(
+    output_root: Path,
+    *,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+    label: str = "",
+    show_footer_hint: bool = True,
+) -> Dict[str, object]:
+    """Single notebook entry point for cells 2.1b and 7.1 (no duplicated loop)."""
+    if label:
+        print(f"\n[{label}] Preview skip/resume (artefactos en Drive, fuente unica):")
+    report = build_jobs_resume_report(
+        Path(output_root),
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+        happo_rollout_threads=happo_rollout_threads,
+    )
+    print_jobs_resume_report(report, show_footer_hint=show_footer_hint)
+    return report
+
+
+def plan_madrl_duplicate_run_cleanup(
+    parent: Path,
+    *,
+    active_output_root: Optional[Path] = None,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+) -> Dict[str, object]:
+    """Runs to keep/delete using the same artifact score as cell 2.1 (cell 2.1c)."""
+    parent = Path(parent)
+    active = Path(active_output_root).resolve() if active_output_root else None
+    audit = audit_madrl_drive_output_runs(
+        parent,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+        happo_rollout_threads=happo_rollout_threads,
+    )
+    summaries = list(audit.get("summaries") or [])
+    if not summaries:
+        return {"keep": [], "delete": [], "audit": audit}
+
+    ranked = sorted(
+        summaries,
+        key=lambda s: (float(s.get("score") or 0.0), str(s.get("run_name") or "")),
+        reverse=True,
+    )
+    keep: set = set()
+    if ranked:
+        keep.add(str(ranked[0]["output_root"]))
+    if active is not None:
+        keep.add(str(active))
+
+    delete = [
+        str(s["output_root"])
+        for s in summaries
+        if str(s["output_root"]) not in keep
+    ]
+    return {
+        "keep": sorted(keep),
+        "delete": delete,
+        "audit": audit,
+        "summaries": summaries,
+    }
 
 
 def write_job_resume_manifest(output_dir: Path, plan: Mapping[str, object]) -> Path:
@@ -5006,42 +5639,37 @@ class CityLearnV3BackendAdapter:
                 ),
             )
 
-        # timeseries: keep only fully-completed episodes (episode < completed) and
-        # dedup by (episode, episode_step) keeping the first occurrence, so a buggy
-        # prior run that appended duplicate low-episode rows cannot corrupt integrity.
-        ts_rows = read_csv_rows(self._incremental_ts_path) if self._incremental_ts_path else []
-        kept_ts = _dedup_rows_keep_first(
-            [r for r in ts_rows if (_as_int(r.get("episode")) or 0) < completed],
-            ("episode", "episode_step"),
-        )
-        if kept_ts:
-            self.timeseries_records = list(kept_ts)
-            self._ts_fieldnames = sorted({k for r in kept_ts for k in r.keys()})
-            self._ts_flushed_count = len(kept_ts)
-            write_csv(self._incremental_ts_path, kept_ts)  # clean truncation
-            for row in kept_ts:
-                ep = _as_int(row.get("episode"))
-                if ep is not None:
-                    self._update_reward_accumulators(int(ep), row)
-            summary["timeseries_rows"] = len(kept_ts)
-            if self.live_progress_path is not None:
-                self.write_live_heartbeat(
-                    stage="resume_preload",
-                    note=f"Timeseries preload complete ({len(kept_ts)} rows retained).",
-                )
+        # timeseries: stream-filter on disk (49 ep x 8760 rows ~= 400k+; loading all
+        # into RAM on Google Drive can stall resume for many minutes before step 1).
+        if self._incremental_ts_path is not None:
+            kept_ts_count, ts_fields = _stream_rewrite_csv_rows_lt_episode(
+                self._incremental_ts_path,
+                completed_episodes=completed,
+                dedup_keys=("episode", "episode_step"),
+            )
+            if kept_ts_count > 0:
+                self.timeseries_records = []
+                self._ts_fieldnames = sorted(ts_fields) if ts_fields else None
+                self._ts_flushed_count = kept_ts_count
+                summary["timeseries_rows"] = kept_ts_count
+                if self.live_progress_path is not None:
+                    self.write_live_heartbeat(
+                        stage="resume_preload",
+                        note=f"Timeseries preload complete ({kept_ts_count} rows retained, stream).",
+                    )
 
-        # trace: same completed-episode filter + dedup (per agent within a step).
-        trace_rows = read_csv_rows(self._incremental_trace_path) if self._incremental_trace_path else []
-        kept_trace = _dedup_rows_keep_first(
-            [r for r in trace_rows if (_as_int(r.get("episode")) or 0) < completed],
-            ("episode", "episode_step", "agent"),
-        )
-        if kept_trace:
-            self.trace_records = list(kept_trace)
-            self._trace_fieldnames = sorted({k for r in kept_trace for k in r.keys()})
-            self._trace_flushed_count = len(kept_trace)
-            write_csv(self._incremental_trace_path, kept_trace)
-            summary["trace_rows"] = len(kept_trace)
+        # trace: same streaming filter (can be much larger than timeseries).
+        if self._incremental_trace_path is not None:
+            kept_trace_count, trace_fields = _stream_rewrite_csv_rows_lt_episode(
+                self._incremental_trace_path,
+                completed_episodes=completed,
+                dedup_keys=("episode", "episode_step", "agent"),
+            )
+            if kept_trace_count > 0:
+                self.trace_records = []
+                self._trace_fieldnames = sorted(trace_fields) if trace_fields else None
+                self._trace_flushed_count = kept_trace_count
+                summary["trace_rows"] = kept_trace_count
 
         # Continue numbering from the completed-episode boundary.
         self.global_step = completed * episode_length
