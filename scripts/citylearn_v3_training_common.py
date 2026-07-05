@@ -3172,6 +3172,13 @@ def load_training_common_module(repo: Path):
     return mod
 
 
+CANONICAL_SHARED_DRIVE_FOLDER_ID = "1ihH6RqL2KpevfCQEUXj7PP1aS2QYssAX"
+DEFAULT_CANONICAL_RUN_NAME = "madrl_v3_20260627_164047"
+CANONICAL_SHARED_DRIVE_URL = (
+    "https://drive.google.com/drive/folders/1ihH6RqL2KpevfCQEUXj7PP1aS2QYssAX"
+)
+
+
 def read_preferred_output_root_hint(
     repo: Path,
     *,
@@ -3304,6 +3311,438 @@ def resolve_canonical_output_root_from_drive(
         if best is not None:
             return Path(str(best["output_root"]))
     return None
+
+
+def preferred_canonical_run_name(repo: Optional[Path] = None) -> str:
+    """Return canonical run folder name from repo pointer files or the project default."""
+    repo_path = Path(repo) if repo else None
+    hinted = read_preferred_output_root_hint(repo_path or Path("."))
+    if hinted is not None:
+        return hinted.name
+    for pointer in (
+        (repo_path / "outputs" / "latest_colab_output_root.txt") if repo_path else None,
+        Path("outputs") / "latest_colab_output_root.txt",
+    ):
+        if pointer is not None and pointer.is_file():
+            raw = pointer.read_text(encoding="utf-8").strip()
+            if raw:
+                return Path(raw).name
+    return DEFAULT_CANONICAL_RUN_NAME
+
+
+def list_madrl_runs_on_colab_mount(
+    mount_point: Path,
+    *,
+    project_name: str = "MADRLCitytleranflexresdr",
+    max_outputs_depth: int = 8,
+) -> List[Path]:
+    """Find every ``outputs/madrl_v3_*`` run visible under a Colab Drive mount."""
+    mount_point = Path(mount_point)
+    found: List[Path] = []
+    seen: set = set()
+    seeds = [mount_point / "MyDrive" / project_name / "outputs"]
+    mydrive = mount_point / "MyDrive"
+    if mydrive.is_dir():
+        try:
+            for outputs in mydrive.rglob("outputs"):
+                if not outputs.is_dir():
+                    continue
+                try:
+                    rel = outputs.relative_to(mydrive)
+                except ValueError:
+                    continue
+                if len(rel.parts) > max_outputs_depth:
+                    continue
+                seeds.append(outputs)
+        except OSError:
+            pass
+
+    for outputs in seeds:
+        if not outputs.is_dir():
+            continue
+        for run_path in list_madrl_v3_output_runs(outputs):
+            key = str(run_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(run_path)
+    return sorted(found, key=lambda p: p.name)
+
+
+def _colab_drive_api_service():
+    """Return an authenticated Drive v3 client in Colab after ``drive.mount``."""
+    try:
+        from google.auth import default
+        from googleapiclient.discovery import build
+    except ImportError:
+        return None
+    creds, _ = default(
+        scopes=[
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/drive.file",
+        ]
+    )
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def _drive_api_list_folders(
+    service,
+    parent_id: str,
+    name: str,
+) -> List[Dict[str, str]]:
+    safe_name = str(name).replace("'", "\\'")
+    query = (
+        f"'{parent_id}' in parents and name = '{safe_name}' "
+        "and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    )
+    resp = (
+        service.files()
+        .list(
+            q=query,
+            fields="files(id,name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        )
+        .execute()
+    )
+    return list(resp.get("files") or [])
+
+
+def _drive_api_list_files(
+    service,
+    parent_id: str,
+    name: str,
+    *,
+    mime_type: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    safe_name = str(name).replace("'", "\\'")
+    query = f"'{parent_id}' in parents and name = '{safe_name}' and trashed = false"
+    if mime_type:
+        query += f" and mimeType = '{mime_type}'"
+    resp = (
+        service.files()
+        .list(
+            q=query,
+            fields="files(id,name,mimeType,shortcutDetails)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        )
+        .execute()
+    )
+    return list(resp.get("files") or [])
+
+
+def _drive_api_mydrive_folder_id(service, *parts: str) -> Optional[str]:
+    parent_id = "root"
+    for part in parts:
+        folders = _drive_api_list_folders(service, parent_id, part)
+        if not folders:
+            return None
+        parent_id = folders[0]["id"]
+    return parent_id
+
+
+def _drive_api_read_text_file(service, parent_id: str, name: str) -> Optional[str]:
+    files = _drive_api_list_files(service, parent_id, name)
+    if not files:
+        return None
+    file_id = files[0]["id"]
+    payload = service.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
+    if isinstance(payload, bytes):
+        return payload.decode("utf-8")
+    return str(payload)
+
+
+def _drive_api_ensure_shortcut(
+    service,
+    *,
+    parent_id: str,
+    name: str,
+    target_id: str,
+) -> bool:
+    existing = _drive_api_list_files(
+        service,
+        parent_id,
+        name,
+        mime_type="application/vnd.google-apps.shortcut",
+    )
+    for item in existing:
+        shortcut = item.get("shortcutDetails") or {}
+        if str(shortcut.get("targetId") or "") == str(target_id):
+            return False
+    body = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.shortcut",
+        "parents": [parent_id],
+        "shortcutDetails": {"targetId": target_id},
+    }
+    service.files().create(body=body, supportsAllDrives=True).execute()
+    return True
+
+
+def ensure_shared_canonical_run_on_mount(
+    mount_point: Path,
+    *,
+    workspace_outputs: Path,
+    run_name: str,
+    shared_folder_id: str = CANONICAL_SHARED_DRIVE_FOLDER_ID,
+    wait_seconds: float = 8.0,
+) -> Dict[str, object]:
+    """Create a Drive shortcut to the shared canonical run when it is missing locally."""
+    workspace_outputs = Path(workspace_outputs)
+    workspace_outputs.mkdir(parents=True, exist_ok=True)
+    local_run = workspace_outputs / run_name
+    report: Dict[str, object] = {
+        "run_name": run_name,
+        "shared_folder_id": shared_folder_id,
+        "local_run": str(local_run),
+        "shared_folder_accessible": False,
+        "shared_run_found": False,
+        "shortcut_created": False,
+        "pointer_synced": False,
+        "local_run_restorable": False,
+        "error": None,
+    }
+
+    summary = summarize_madrl_output_run(local_run)
+    if summary.get("has_artifacts"):
+        report["local_run_restorable"] = True
+        return report
+
+    service = _colab_drive_api_service()
+    if service is None:
+        report["error"] = "googleapiclient no disponible"
+        return report
+
+    try:
+        shared_probe = (
+            service.files()
+            .get(fileId=shared_folder_id, fields="id,name", supportsAllDrives=True)
+            .execute()
+        )
+        report["shared_folder_accessible"] = bool(shared_probe.get("id"))
+    except Exception as exc:
+        report["error"] = f"sin acceso a carpeta compartida: {exc}"
+        return report
+
+    outputs_remote = _drive_api_list_folders(service, shared_folder_id, "outputs")
+    if not outputs_remote:
+        report["error"] = "carpeta compartida sin outputs/"
+        return report
+    outputs_id = outputs_remote[0]["id"]
+
+    run_remote = _drive_api_list_folders(service, outputs_id, run_name)
+    if not run_remote:
+        report["error"] = f"run compartido no encontrado: {run_name}"
+        return report
+    report["shared_run_found"] = True
+    run_target_id = run_remote[0]["id"]
+
+    workspace_root = workspace_outputs.parent
+    rel_parts = workspace_root.relative_to(mount_point / "MyDrive").parts
+    outputs_parent_id = _drive_api_mydrive_folder_id(service, *rel_parts, "outputs")
+    if outputs_parent_id is None:
+        workspace_parent_id = _drive_api_mydrive_folder_id(service, *rel_parts)
+        if workspace_parent_id is None:
+            report["error"] = (
+                f"workspace Drive no encontrado via API: {'/'.join(rel_parts)}"
+            )
+            return report
+        created = service.files().create(
+            body={
+                "name": "outputs",
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [workspace_parent_id],
+            },
+            fields="id",
+            supportsAllDrives=True,
+        ).execute()
+        outputs_parent_id = created["id"]
+
+    report["shortcut_created"] = _drive_api_ensure_shortcut(
+        service,
+        parent_id=outputs_parent_id,
+        name=run_name,
+        target_id=run_target_id,
+    )
+
+    pointer_text = _drive_api_read_text_file(service, shared_folder_id, "latest_colab_output_root.txt")
+    if pointer_text:
+        pointer_path = workspace_root / "latest_colab_output_root.txt"
+        pointer_path.write_text(pointer_text.strip() + "\n", encoding="utf-8")
+        report["pointer_synced"] = True
+
+    if wait_seconds > 0:
+        time.sleep(wait_seconds)
+
+    summary = summarize_madrl_output_run(local_run)
+    report["local_run_restorable"] = bool(summary.get("has_artifacts"))
+    if not report["local_run_restorable"]:
+        report["error"] = (
+            "shortcut creado pero el mount aun no muestra checkpoints; "
+            "re-ejecuta celda 1.5 tras unos segundos"
+        )
+    return report
+
+
+def bind_colab_drive_workspace(
+    mount_point: Path,
+    *,
+    repo: Path,
+    project_name: str = "MADRLCitytleranflexresdr",
+    default_workspace: Optional[Path] = None,
+    preferred_run_name: Optional[str] = None,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+    allow_drive_api_shortcut: bool = True,
+) -> Dict[str, object]:
+    """Bind Colab globals to the best restorable MADRL run visible on Drive (zero manual paths)."""
+    mount_point = Path(mount_point)
+    repo = Path(repo)
+    default_workspace = Path(
+        default_workspace or (mount_point / "MyDrive" / project_name)
+    )
+    preferred_run_name = preferred_run_name or preferred_canonical_run_name(repo)
+    default_outputs = default_workspace / "outputs"
+    default_outputs.mkdir(parents=True, exist_ok=True)
+
+    def _rank_runs(run_paths: Sequence[Path]) -> List[Dict[str, object]]:
+        ranked: List[Dict[str, object]] = []
+        for run_path in run_paths:
+            summary = summarize_madrl_output_run(
+                run_path,
+                target_episodes=target_episodes,
+                episode_time_steps=episode_time_steps,
+                happo_rollout_threads=happo_rollout_threads,
+            )
+            if not summary.get("has_artifacts"):
+                continue
+            score = float(summary.get("score") or 0.0)
+            if run_path.name == preferred_run_name:
+                score += 10_000_000_000
+            ranked.append({"summary": summary, "score": score, "run_path": run_path})
+        ranked.sort(key=lambda item: (item["score"], item["run_path"].name), reverse=True)
+        return ranked
+
+    mount_runs = list_madrl_runs_on_colab_mount(
+        mount_point,
+        project_name=project_name,
+    )
+    ranked = _rank_runs(mount_runs)
+    api_report: Optional[Dict[str, object]] = None
+
+    if not ranked and allow_drive_api_shortcut:
+        api_report = ensure_shared_canonical_run_on_mount(
+            mount_point,
+            workspace_outputs=default_outputs,
+            run_name=preferred_run_name,
+        )
+        mount_runs = list_madrl_runs_on_colab_mount(
+            mount_point,
+            project_name=project_name,
+        )
+        ranked = _rank_runs(mount_runs)
+
+    summaries = [
+        summarize_madrl_output_run(
+            run_path,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        )
+        for run_path in mount_runs
+    ]
+    stub_runs = [s for s in summaries if s.get("stub_only")]
+    best = ranked[0] if ranked else None
+
+    gdrive_root = default_workspace
+    output_root: Optional[Path] = None
+    if best is not None:
+        run_path = Path(str(best["run_path"]))
+        output_root = run_path
+        gdrive_root = run_path.parent.parent
+
+    pointer_path = gdrive_root / "latest_colab_output_root.txt"
+    pointer_value = None
+    if pointer_path.is_file():
+        pointer_value = pointer_path.read_text(encoding="utf-8").strip()
+    elif (repo / "outputs" / "latest_colab_output_root.txt").is_file():
+        pointer_value = (
+            repo / "outputs" / "latest_colab_output_root.txt"
+        ).read_text(encoding="utf-8").strip()
+        pointer_path.write_text(pointer_value + "\n", encoding="utf-8")
+
+    is_correct_drive = bool(best is not None)
+    binding: Dict[str, object] = {
+        "mount_point": str(mount_point),
+        "project_name": project_name,
+        "gdrive_root": str(gdrive_root),
+        "outputs_parent": str(gdrive_root / "outputs"),
+        "output_root": str(output_root) if output_root is not None else None,
+        "preferred_run_name": preferred_run_name,
+        "pointer_path": str(pointer_path),
+        "pointer_value": pointer_value,
+        "is_correct_drive": is_correct_drive,
+        "mount_runs": [str(p) for p in mount_runs],
+        "stub_runs": [str(s.get("run_name") or "") for s in stub_runs],
+        "selected_summary": best["summary"] if best else None,
+        "api_report": api_report,
+        "shared_folder_url": CANONICAL_SHARED_DRIVE_URL,
+    }
+
+    if output_root is not None:
+        sync_output_root_pointer_files(repo, output_root, gdrive_root=gdrive_root)
+
+    if not is_correct_drive:
+        stub_names = ", ".join(binding["stub_runs"]) or "(ninguno)"
+        api_err = ""
+        if isinstance(api_report, Mapping):
+            api_err = str(api_report.get("error") or "")
+        raise RuntimeError(
+            "Drive montado pero sin run MADRL restaurable.\n"
+            f"  Workspace: {gdrive_root}\n"
+            f"  Runs STUB detectados: {stub_names}\n"
+            f"  Run canonico esperado: {preferred_run_name}\n"
+            f"  Carpeta compartida: {CANONICAL_SHARED_DRIVE_URL}\n"
+            + (f"  Drive API: {api_err}\n" if api_err else "")
+            + "  Usa la misma cuenta Google en Colab que tiene acceso al folder compartido "
+            "y re-ejecuta 1.2 -> 1.5."
+        )
+
+    return binding
+
+
+def print_colab_drive_binding_report(binding: Mapping[str, object]) -> None:
+    """Human-readable verification for notebook cell 1.5."""
+    print(f"[OK] Workspace Drive: {binding.get('gdrive_root')}")
+    print(f"[OK] Outputs MADRL: {binding.get('outputs_parent')}")
+    pointer_value = binding.get("pointer_value")
+    if pointer_value:
+        print(f"[OK] Puntero Drive: {pointer_value}")
+    output_root = binding.get("output_root")
+    if output_root:
+        print(f"[OK] Run canonico restaurable: {output_root}")
+    selected = binding.get("selected_summary")
+    if isinstance(selected, Mapping):
+        print(
+            "[OK] Progreso artefactos: "
+            f"{selected.get('completed_jobs', 0)}/12 jobs, "
+            f"~{float(selected.get('progress_pct') or 0.0):.1f}%"
+        )
+    api_report = binding.get("api_report")
+    if isinstance(api_report, Mapping):
+        if api_report.get("shortcut_created"):
+            print("[OK] Shortcut automatico creado hacia run compartido")
+        if api_report.get("pointer_synced"):
+            print("[OK] Puntero sincronizado desde carpeta compartida")
+        if api_report.get("error") and binding.get("is_correct_drive"):
+            print(f"[WARN] Drive API: {api_report.get('error')}")
+    stub_runs = binding.get("stub_runs") or []
+    if stub_runs:
+        print(f"[INFO] Runs STUB ignorados: {', '.join(stub_runs)}")
+    if not binding.get("is_correct_drive"):
+        print("[FAIL] Drive sin run restaurable; revisa cuenta Colab vs carpeta compartida.")
 
 
 def sync_output_root_pointer_files(
@@ -3458,10 +3897,9 @@ def pick_colab_output_root(
                     raise RuntimeError(
                         "Drive solo tiene runs STUB (p. ej. results.json salvage copiado sin "
                         f"checkpoints .pt): {', '.join(stub_names)}. "
-                        "Usa la carpeta compartida MADRLCitytleranflexresdr "
-                        "(https://drive.google.com/drive/folders/1ihH6RqL2KpevfCQEUXj7PP1aS2QYssAX): "
-                        "añádela a Mi unidad, ejecuta celda 1.5 y verifica "
-                        "outputs/madrl_v3_20260627_164047 con checkpoints."
+                        "Re-ejecuta celdas 1.2 -> 1.5 para enlazar automaticamente el run "
+                        f"compartido ({CANONICAL_SHARED_DRIVE_URL}). "
+                        f"Run esperado: {DEFAULT_CANONICAL_RUN_NAME}."
                     )
                 output_root = base_output_parent / run_label
                 resume_reason = "NUEVO run (runs previos vacios, sin artefactos MADRL)"
