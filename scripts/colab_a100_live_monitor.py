@@ -48,15 +48,66 @@ def resolve_path(root: Path, value: str) -> Path:
 
 
 def resolve_output_root(root: Path, requested: str) -> Optional[Path]:
+    """Resolve OUTPUT_ROOT the same way as notebook cells 7.0/7.2."""
+    gdrive_root = None
+    try:
+        import sys
+
+        scripts = root / "CityLearn" / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        from citylearn_v3_training_common import (
+            discover_colab_gdrive_workspace,
+            read_preferred_output_root_hint,
+            resolve_notebook_output_root,
+        )
+
+        mydrive = Path("/content/drive/MyDrive")
+        if mydrive.is_dir():
+            gdrive_root = discover_colab_gdrive_workspace(mydrive, repo=root)
+
+        resolved = resolve_notebook_output_root(
+            root,
+            output_root=requested or None,
+            gdrive_root=gdrive_root,
+        )
+        if resolved:
+            path = Path(resolved)
+            if not path.is_absolute():
+                for base in filter(
+                    None,
+                    [
+                        gdrive_root,
+                        gdrive_root / "outputs" if gdrive_root else None,
+                        root,
+                        root / "outputs",
+                    ],
+                ):
+                    trial = (base / path).resolve()
+                    if trial.is_dir():
+                        return trial
+                path = resolve_path(root, str(path))
+            if path.is_absolute() or path.exists():
+                return path
+        if not requested:
+            hinted = read_preferred_output_root_hint(root, gdrive_root=gdrive_root)
+            if hinted is not None:
+                return hinted
+    except Exception:
+        pass
+
     if requested:
-        return resolve_path(root, requested)
+        path = resolve_path(root, requested)
+        return path if path.exists() else None
 
     for rel in ("outputs/latest_colab_output_root.txt", "outputs/latest_visible_training_output_root.txt"):
         path = root / rel
         if path.exists():
             value = path.read_text(encoding="utf-8").strip()
             if value:
-                return resolve_path(root, value)
+                candidate = resolve_path(root, value)
+                if candidate.exists():
+                    return candidate
 
     outputs = root / "outputs"
     if outputs.exists():
@@ -96,7 +147,92 @@ def result_artifact_exists(run_dir: Path) -> bool:
     return (run_dir / "data" / "results.json").exists() or (run_dir / "results.json").exists()
 
 
-def job_state(status: Mapping[str, object], algorithm: str, scenario: str, root: Path) -> str:
+def _status_happo_rollout_threads(status: Mapping[str, object]) -> Optional[int]:
+    for container in (status, dict(status.get("parallelization") or {})):
+        for key in ("happo_rollout_threads", "happo_n_rollout_threads", "n_rollout_threads"):
+            raw = container.get(key)
+            if raw is None:
+                continue
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+    return None
+
+
+def _launcher_action_for_job_dir(
+    status: Mapping[str, object],
+    *,
+    output_dir: Path,
+    algorithm: str,
+    root: Path,
+) -> str:
+    try:
+        from citylearn_v3_training_common import preview_job_launcher_decision
+    except ImportError:
+        return "run_fresh"
+    episodes = int(status.get("episodes") or 0) or 50
+    output_root = path_for_job(root, str(status.get("output_root", "")))
+    algo = algorithm.lower()
+    dec = preview_job_launcher_decision(
+        output_dir,
+        algorithm=algo,
+        target_episodes=episodes,
+        episode_time_steps=int(status.get("episode_time_steps") or 8760),
+        rollout_threads=_status_happo_rollout_threads(status) if algo == "happo" else None,
+        output_root=output_root,
+    )
+    return str(dec.get("action") or "run_fresh")
+
+
+def _launcher_resume_report(
+    status: Mapping[str, object],
+    root: Path,
+    *,
+    monitor_output_root: Optional[Path] = None,
+) -> Optional[Dict[str, object]]:
+    """Same skip/resume truth as cells 2.1b / 7.2 ``--skip-completed``."""
+    try:
+        from citylearn_v3_training_common import build_jobs_resume_report
+
+        output_root = monitor_output_root or path_for_job(
+            root, str(status.get("output_root", ""))
+        )
+        episodes = int(status.get("episodes") or 0)
+        if episodes <= 0:
+            return None
+        return build_jobs_resume_report(
+            output_root,
+            target_episodes=episodes,
+            episode_time_steps=int(status.get("episode_time_steps") or 8760),
+            happo_rollout_threads=_status_happo_rollout_threads(status),
+            seed=int(status.get("seed") or 0),
+        )
+    except Exception:
+        return None
+
+
+def _resume_row_map(report: Optional[Mapping[str, object]]) -> Dict[tuple, Mapping[str, object]]:
+    if not report:
+        return {}
+    rows = report.get("jobs") or []
+    return {
+        (str(row.get("algorithm", "")).lower(), str(row.get("scenario", "")).upper()): row
+        for row in rows
+        if isinstance(row, Mapping)
+    }
+
+
+def job_state(
+    status: Mapping[str, object],
+    algorithm: str,
+    scenario: str,
+    root: Path,
+    *,
+    resume_map: Optional[Mapping[tuple, Mapping[str, object]]] = None,
+) -> str:
     jobs = [
         job
         for job in status.get("jobs", [])
@@ -130,8 +266,25 @@ def job_state(status: Mapping[str, object], algorithm: str, scenario: str, root:
             scenario,
             int(status.get("seed") or 0),
         )
-    if result_artifact_exists(run_dir):
+    row = (resume_map or {}).get((algorithm.lower(), scenario.upper()))
+    if row:
+        action = str(row.get("action") or "")
+        if action == "skip":
+            return "skip/artifact"
+        if action == "resume":
+            return "resume/artifact"
+        if action in {"run_fresh", "restart_fresh"}:
+            return "queued"
+    action = _launcher_action_for_job_dir(
+        status,
+        output_dir=run_dir,
+        algorithm=algorithm,
+        root=root,
+    )
+    if action == "skip":
         return "done/artifact"
+    if action == "resume":
+        return "running"
     return "queued"
 
 
@@ -193,16 +346,24 @@ def _artifact_complete_for_job(
 ) -> bool:
     """True when on-disk artifacts prove the job is done (same as --skip-completed)."""
     try:
-        from citylearn_v3_training_common import job_counts_as_launcher_complete
+        from citylearn_v3_training_common import preview_job_launcher_decision
 
         output_dir = path_for_job(root, str(job.get("output_dir") or ""))
         episodes = int(status.get("episodes") or 0)
+        if episodes <= 0:
+            episodes = 50
         output_root = path_for_job(root, str(status.get("output_root", "")))
-        return job_counts_as_launcher_complete(
+        algo = str(job.get("name") or "").lower()
+        roll = _status_happo_rollout_threads(status) if algo == "happo" else None
+        decision = preview_job_launcher_decision(
             output_dir,
-            target_episodes=episodes if episodes > 0 else None,
+            algorithm=algo,
+            target_episodes=episodes,
+            episode_time_steps=int(status.get("episode_time_steps") or 8760),
+            rollout_threads=roll,
             output_root=output_root,
         )
+        return str(decision.get("action") or "") == "skip"
     except Exception:
         return False
 
@@ -579,6 +740,40 @@ def print_parallelization(status: Mapping[str, object], root: Path) -> None:
             print("  ATENCION       : stagger detectado — re-ejecuta celdas 1.2, 6.1, 7.0, 7.1 con two_phase_happo_masac")
 
 
+def print_skip_resume_plan(status: Mapping[str, object], output_root: Path) -> None:
+    report = _launcher_resume_report(
+        status, project_root(), monitor_output_root=output_root
+    )
+    if not report:
+        return
+    completed = int(report.get("completed") or 0)
+    resumable = int(report.get("resumable") or 0)
+    pending = int(report.get("pending") or 0) + int(report.get("restart_fresh") or 0)
+    print("")
+    print(
+        "Plan skip/resume (artefactos): "
+        f"{completed} SKIP | {resumable} REANUDA | {pending} pendientes"
+    )
+    try:
+        from citylearn_v3_training_common import (
+            DEFAULT_CANONICAL_RUN_NAME,
+            validate_canonical_colab_skip_plan,
+        )
+
+        if DEFAULT_CANONICAL_RUN_NAME in output_root.name:
+            validation = validate_canonical_colab_skip_plan(report)
+            if validation.get("ok"):
+                print("[OK] Plan canonico listo: 9 SKIP + 3 REANUDA (HAPPO 49/50)")
+            else:
+                print(
+                    "[WARN] Plan canonico NO listo: "
+                    f"{validation.get('completed')} SKIP + {validation.get('resumable')} REANUDA "
+                    "(re-ejecuta 2.1 -> 2.1b antes de 7.2)"
+                )
+    except Exception:
+        pass
+
+
 def print_status(status: Mapping[str, object], root: Path) -> None:
     print(f"Estado global: {status.get('status')}")
     print(
@@ -591,10 +786,14 @@ def print_status(status: Mapping[str, object], root: Path) -> None:
         )
     )
     print(f"CUDA: {status.get('cuda')} | Torch: {status.get('torch')}")
+    resume_map = _resume_row_map(_launcher_resume_report(status, root))
     print("")
     print("Plan completo por eje y MADRL")
     for scenario in status.get("scenarios", []) or [status.get("scenario")]:
-        states = [f"{algorithm}:{job_state(status, algorithm, str(scenario), root)}" for algorithm in ALGORITHMS]
+        states = [
+            f"{algorithm}:{job_state(status, algorithm, str(scenario), root, resume_map=resume_map)}"
+            for algorithm in ALGORITHMS
+        ]
         print(f"  {scenario}: " + " | ".join(states))
 
 
@@ -865,6 +1064,34 @@ def render_once(output_root: Path, log_tail: int) -> None:
         print(f"No existe estado: {status_path}")
         return
 
+    try:
+        from citylearn_v3_training_common import (
+            DEFAULT_CANONICAL_RUN_NAME,
+            build_jobs_resume_report,
+            validate_canonical_colab_skip_plan,
+        )
+
+        if output_root.name == DEFAULT_CANONICAL_RUN_NAME:
+            episodes = int(status.get("episodes") or 50)
+            report = build_jobs_resume_report(
+                output_root,
+                target_episodes=episodes,
+                episode_time_steps=int(status.get("episode_time_steps") or 8760),
+                happo_rollout_threads=_status_happo_rollout_threads(status),
+                seed=int(status.get("seed") or 0),
+            )
+            validation = validate_canonical_colab_skip_plan(report)
+            ok_tag = "OK" if validation.get("ok") else "WARN"
+            print("")
+            print(
+                f"Skip/resume [{ok_tag}]: {report.get('completed')} SKIP + "
+                f"{report.get('resumable')} REANUDA + "
+                f"{report.get('pending')} pendientes "
+                f"(~{float(report.get('progress_pct') or 0.0):.1f}% global)"
+            )
+    except Exception:
+        pass
+
     exec_mode = execution_mode(status)
     if exec_mode != "two_phase_happo_masac":
         print("")
@@ -877,6 +1104,7 @@ def render_once(output_root: Path, log_tail: int) -> None:
         print("")
 
     print_status(status, root)
+    print_skip_resume_plan(status, output_root)
     print_parallelization(status, root)
     print_progress(status, root)
     print_gpu()
