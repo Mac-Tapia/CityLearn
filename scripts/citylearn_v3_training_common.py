@@ -83,17 +83,145 @@ def colab_workspace_run_path(workspace_root: Path, run_name: str) -> Path:
     return Path(workspace_root) / "outputs" / run_name
 
 
-def restricted_canonical_run_visible(mount_point: Path, run_name: str) -> bool:
-    """True when canonical run folder is visible only via restricted FUSE shortcut."""
+def fuse_canonical_run_candidates(
+    mount_point: Path,
+    run_name: str,
+    *,
+    project_name: str = "MADRLCitytleranflexresdr",
+    shared_folder_id: str = "1ihH6RqL2KpevfCQEUXj7PP1aS2QYssAX",
+) -> List[Path]:
+    """Known FUSE layouts for the shared MADRLCitytleranflexresdr folder on Colab."""
+    base = Path(mount_point) / ".shortcut-targets-by-id" / shared_folder_id
+    return [
+        base / project_name / "outputs" / run_name,
+        base / "outputs" / run_name,
+    ]
+
+
+def resolve_fuse_canonical_run_path(
+    mount_point: Path,
+    run_name: str,
+    *,
+    project_name: str = "MADRLCitytleranflexresdr",
+) -> Optional[Path]:
+    for candidate in fuse_canonical_run_candidates(
+        mount_point,
+        run_name,
+        project_name=project_name,
+    ):
+        if drive_path_is_dir(candidate):
+            return candidate
+    return None
+
+
+def restricted_canonical_run_visible(
+    mount_point: Path,
+    run_name: str,
+    *,
+    project_name: str = "MADRLCitytleranflexresdr",
+) -> bool:
+    return resolve_fuse_canonical_run_path(
+        mount_point,
+        run_name,
+        project_name=project_name,
+    ) is not None
+
+
+def mirror_fuse_run_to_workspace(
+    fuse_src: Path,
+    workspace_dst: Path,
+    *,
+    verbose: bool = True,
+) -> Dict[str, object]:
+    """Copy a FUSE-visible shared run into writable MyDrive (best-effort, no Drive API)."""
+    fuse_src = Path(fuse_src)
+    workspace_dst = Path(workspace_dst)
+    report: Dict[str, object] = {
+        "fuse_src": str(fuse_src),
+        "workspace_dst": str(workspace_dst),
+        "copied": 0,
+        "skipped": 0,
+        "ok": False,
+    }
+    if not drive_path_is_dir(fuse_src):
+        report["error"] = "fuse_src_missing"
+        return report
+
+    workspace_dst.mkdir(parents=True, exist_ok=True)
+
+    def _log(msg: str) -> None:
+        if verbose:
+            print(msg, flush=True)
+
+    _log(f"[..] Copiando artefactos FUSE -> {workspace_dst} ...")
+    for root, _dirs, files in os.walk(fuse_src, topdown=True):
+        rel = Path(root).relative_to(fuse_src)
+        target_root = workspace_dst / rel
+        try:
+            target_root.mkdir(parents=True, exist_ok=True)
+        except _DRIVE_FUSE_IO_ERRORS:
+            report["skipped"] = int(report["skipped"]) + 1
+            continue
+        for fname in files:
+            src_file = Path(root) / fname
+            dst_file = target_root / fname
+            if drive_path_exists(dst_file):
+                continue
+            try:
+                shutil.copy2(src_file, dst_file, follow_symlinks=False)
+                report["copied"] = int(report["copied"]) + 1
+            except _DRIVE_FUSE_IO_ERRORS:
+                report["skipped"] = int(report["skipped"]) + 1
+
+    report["ok"] = madrl_output_run_has_artifacts(workspace_dst)
+    if verbose:
+        _log(
+            f"[..] Mirror terminado: copied={report['copied']} "
+            f"skipped={report['skipped']} restorable={report['ok']}"
+        )
+    return report
+
+
+def ensure_colab_drive_api_auth(*, verbose: bool = True) -> Optional[str]:
+    """Initialize Colab user OAuth with Drive scopes (call after ``drive.mount``)."""
+    if not _in_google_colab():
+        return None
+    try:
+        from google.colab import auth as colab_auth
+        from google.colab import _google_auth
+
+        colab_auth.authenticate_user(scopes=list(_DRIVE_API_SCOPES))
+        creds = _google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
+        if creds is None:
+            if verbose:
+                print("[WARN] OAuth Drive API: credenciales no disponibles tras authenticate_user", flush=True)
+            return None
+        info = _google_auth.get_user_info() or {}
+        email = str(info.get("email") or "").strip() or None
+        if verbose and email:
+            print(f"[OK] Cuenta Colab/Drive: {email}", flush=True)
+        return email
+    except Exception as exc:
+        if verbose:
+            print(f"[WARN] OAuth Drive API: {exc}", flush=True)
+        return None
+
+
+def prepare_colab_drive_mount_context(
+    mount_point: Path,
+    *,
+    project_name: str = "MADRLCitytleranflexresdr",
+    default_workspace: Optional[Path] = None,
+) -> Dict[str, str]:
+    """Fast cell 1.5 setup: workspace paths only (no artifact scan)."""
     mount_point = Path(mount_point)
-    shortcut_outputs = (
-        mount_point
-        / ".shortcut-targets-by-id"
-        / CANONICAL_SHARED_DRIVE_FOLDER_ID
-        / "outputs"
-        / run_name
-    )
-    return drive_path_is_dir(shortcut_outputs)
+    workspace = Path(default_workspace or (mount_point / "MyDrive" / project_name))
+    outputs = workspace / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    return {
+        "gdrive_root": str(workspace),
+        "outputs_parent": str(outputs),
+    }
 
 
 def ensure_project_paths() -> None:
@@ -3514,43 +3642,29 @@ def list_madrl_runs_on_colab_mount(
 
 def _colab_drive_api_credentials():
     """User OAuth credentials for Drive API (post ``drive.mount``, Colab-safe)."""
-    creds = None
-    if _in_google_colab():
-        try:
-            from google.colab import _google_auth
-
-            creds = _google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
-        except Exception:
-            creds = None
-        if creds is None:
-            try:
-                from google.colab import auth as colab_auth
-
-                # Only if mount token not yet visible to API client (may prompt once).
-                colab_auth.authenticate_user()
-                from google.colab import _google_auth
-
-                creds = _google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
-            except Exception:
-                creds = None
-        if creds is None:
-            try:
-                from google.auth import default
-                from google.auth.transport.requests import Request
-
-                creds, _ = default(scopes=list(_DRIVE_API_SCOPES))
-                if creds is not None and creds.expired and getattr(creds, "refresh_token", None):
-                    creds.refresh(Request())
-            except Exception:
-                creds = None
-    if creds is None:
+    if not _in_google_colab():
         try:
             from google.auth import default
 
             creds, _ = default(scopes=list(_DRIVE_API_SCOPES))
+            return creds
         except Exception:
             return None
-    return creds
+    try:
+        from google.colab import _google_auth
+
+        creds = _google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
+        if creds is not None:
+            return creds
+    except Exception:
+        pass
+    ensure_colab_drive_api_auth(verbose=False)
+    try:
+        from google.colab import _google_auth
+
+        return _google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
+    except Exception:
+        return None
 
 
 def _colab_drive_api_service():
@@ -3839,20 +3953,34 @@ def bind_colab_drive_workspace(
         return None
 
     workspace_run = colab_workspace_run_path(default_workspace, preferred_run_name)
-    restricted_visible = restricted_canonical_run_visible(mount_point, preferred_run_name)
+    fuse_src = resolve_fuse_canonical_run_path(
+        mount_point,
+        preferred_run_name,
+        project_name=project_name,
+    )
+    restricted_visible = fuse_src is not None
+    mirror_report: Optional[Dict[str, object]] = None
 
-    _log("[..] Escaneando runs MADRL en paths conocidos de Drive...")
+    _log("[..] Escaneando runs MADRL en MyDrive...")
     mount_runs = list_madrl_runs_on_colab_mount(
         mount_point,
         project_name=project_name,
     )
-    _log(f"[..] Carpetas run en mount (MyDrive): {len(mount_runs)}")
-    if restricted_visible:
-        _log("[..] Run canonico visible via shortcut FUSE (se enlazara en MyDrive)...")
+    _log(f"[..] Carpetas run en MyDrive: {len(mount_runs)}")
+    if restricted_visible and fuse_src is not None:
+        _log(f"[..] Run canonico visible en FUSE: {fuse_src}")
 
     ranked = _rank_runs(mount_runs)
     api_report: Optional[Dict[str, object]] = None
     workspace_summary = _workspace_run_restorable(workspace_run)
+
+    if workspace_summary is None and fuse_src is not None:
+        mirror_report = mirror_fuse_run_to_workspace(
+            fuse_src,
+            workspace_run,
+            verbose=verbose,
+        )
+        workspace_summary = _workspace_run_restorable(workspace_run)
 
     need_workspace_link = (
         allow_drive_api_shortcut
@@ -3864,39 +3992,33 @@ def bind_colab_drive_workspace(
         )
     )
     if need_workspace_link:
-        _log("[..] Creando/enlazando run canonico en MyDrive/outputs (writable)...")
+        _log("[..] Mirror FUSE insuficiente; intentando shortcut Drive API...")
         api_report = ensure_shared_canonical_run_on_mount(
             mount_point,
             workspace_outputs=default_outputs,
             run_name=preferred_run_name,
         )
-        for _retry in range(3):
+        for _retry in range(2):
             workspace_summary = _workspace_run_restorable(workspace_run)
             if workspace_summary is not None:
                 break
-            if _retry < 2:
+            if _retry < 1:
                 _log("[..] Esperando shortcut writable en MyDrive...")
                 time.sleep(3)
 
     if workspace_summary is None and not ranked and allow_drive_api_shortcut and api_report is None:
-        _log("[..] Run canonico no visible; intentando shortcut via Drive API...")
+        _log("[..] Run canonico no visible; ultimo intento Drive API...")
         api_report = ensure_shared_canonical_run_on_mount(
             mount_point,
             workspace_outputs=default_outputs,
             run_name=preferred_run_name,
         )
-        for _retry in range(3):
-            workspace_summary = _workspace_run_restorable(workspace_run)
-            if workspace_summary is not None:
-                break
-            if _retry < 2:
-                _log("[..] Esperando que el shortcut aparezca en el mount...")
-                time.sleep(3)
-            mount_runs = list_madrl_runs_on_colab_mount(
-                mount_point,
-                project_name=project_name,
-            )
-            ranked = _rank_runs(mount_runs)
+        workspace_summary = _workspace_run_restorable(workspace_run)
+        mount_runs = list_madrl_runs_on_colab_mount(
+            mount_point,
+            project_name=project_name,
+        )
+        ranked = _rank_runs(mount_runs)
 
     summaries = [
         summarize_madrl_output_run(
@@ -3957,6 +4079,7 @@ def bind_colab_drive_workspace(
         "stub_runs": [str(s.get("run_name") or "") for s in stub_runs],
         "selected_summary": selected_summary,
         "api_report": api_report,
+        "mirror_report": mirror_report,
         "shared_folder_url": CANONICAL_SHARED_DRIVE_URL,
     }
 
@@ -4004,6 +4127,12 @@ def print_colab_drive_binding_report(binding: Mapping[str, object]) -> None:
             "[OK] Progreso artefactos: "
             f"{selected.get('completed_jobs', 0)}/12 jobs, "
             f"~{float(selected.get('progress_pct') or 0.0):.1f}%"
+        )
+    mirror_report = binding.get("mirror_report")
+    if isinstance(mirror_report, Mapping) and mirror_report.get("ok"):
+        print(
+            f"[OK] Run canonico copiado desde FUSE "
+            f"({mirror_report.get('copied', 0)} archivos)"
         )
     api_report = binding.get("api_report")
     if isinstance(api_report, Mapping):
