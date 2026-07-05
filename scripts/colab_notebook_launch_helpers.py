@@ -1,6 +1,8 @@
-"""Notebook cell 7.2 bootstrap — run training without cells 1.5/2.1/6.1/7.0/7.1.
+"""Notebook cell 7.2 bootstrap — one cell resumes full Colab training.
 
-After ``git pull`` on Colab: interrupt stuck 7.2, re-run **only** cell 7.2.
+On Colab reconnect: run **only** cell 7.2. Bootstrap runs git hard sync (1.2),
+Drive mount (1.5), OUTPUT_ROOT discovery (2.1), training config (6.1/7.0), and
+skip/resume plan — then launches two_phase_happo_masac with --skip-completed.
 """
 
 from __future__ import annotations
@@ -13,6 +15,138 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+
+COLAB_REPO_URL = "https://github.com/Mac-Tapia/MADRLCitytleranflexresdr.git"
+COLAB_REPO_BRANCH = "codex/fix-madrl-traceability-docs"
+COLAB_DEFAULT_REPO = "/content/MADRLCitytleranflexresdr"
+CITYLEARN_URL = "https://github.com/Mac-Tapia/CityLearn.git"
+CITYLEARN_BRANCH = "codex/iquitos-distillation-madrl-docs"
+MAAC_URL = "https://github.com/Mac-Tapia/MAAC.git"
+MAAC_BRANCH = "codex/integrar-limpieza-diagnosticos"
+
+
+def _git_check(args: Sequence[str], *, cwd: Optional[Path] = None) -> None:
+    cmd = ["git", *[str(a) for a in args]]
+    print("+", " ".join(cmd), flush=True)
+    subprocess.check_call(cmd, cwd=str(cwd) if cwd else None)
+
+
+def _git_out(args: Sequence[str], *, cwd: Path) -> str:
+    return subprocess.check_output(
+        ["git", *[str(a) for a in args]],
+        text=True,
+        cwd=str(cwd),
+    ).strip()
+
+
+def colab_git_hard_sync(
+    repo: Path,
+    *,
+    clone_if_missing: bool = True,
+) -> Dict[str, str]:
+    """Mirror notebook cell 1.2: parent hard reset + CityLearn/MAAC live branches."""
+    repo = Path(repo)
+    citylearn_dir = repo / "CityLearn"
+    maac_dir = repo / "external" / "MAAC"
+
+    if not (repo / ".git").is_dir():
+        if not clone_if_missing:
+            raise RuntimeError(f"REPO sin .git: {repo}")
+        if repo.exists() and any(repo.iterdir()):
+            raise RuntimeError(
+                f"{repo} existe pero sin .git. Elimina la carpeta y vuelve a ejecutar 7.2."
+            )
+        print(f"[7.2 bootstrap] Clonando {COLAB_REPO_URL} ({COLAB_REPO_BRANCH})...")
+        _git_check(
+            [
+                "clone",
+                "--branch",
+                COLAB_REPO_BRANCH,
+                "--depth",
+                "1",
+                "--recurse-submodules",
+                "--shallow-submodules",
+                COLAB_REPO_URL,
+                str(repo),
+            ]
+        )
+    else:
+        origin = _git_out(["config", "--get", "remote.origin.url"], cwd=repo)
+        if origin != COLAB_REPO_URL:
+            raise RuntimeError(f"Repo apunta a {origin}; esperado {COLAB_REPO_URL}.")
+        print(f"[7.2 bootstrap] HARD SYNC origin/{COLAB_REPO_BRANCH}...")
+        _git_check(["fetch", "origin", COLAB_REPO_BRANCH], cwd=repo)
+        _git_check(["reset", "--hard", f"origin/{COLAB_REPO_BRANCH}"], cwd=repo)
+        _git_check(["clean", "-fd"], cwd=repo)
+        _git_check(["submodule", "sync", "--recursive"], cwd=repo)
+        _git_check(["submodule", "update", "--init", "--recursive", "--force"], cwd=repo)
+
+    print(f"[7.2 bootstrap] CityLearn -> {CITYLEARN_BRANCH}")
+    remotes = _git_out(["remote"], cwd=citylearn_dir).splitlines()
+    if "mac-tapia" not in remotes:
+        _git_check(["remote", "add", "mac-tapia", CITYLEARN_URL], cwd=citylearn_dir)
+    else:
+        _git_check(["remote", "set-url", "mac-tapia", CITYLEARN_URL], cwd=citylearn_dir)
+    _git_check(["fetch", "mac-tapia", CITYLEARN_BRANCH], cwd=citylearn_dir)
+    _git_check(["checkout", "-B", CITYLEARN_BRANCH, f"mac-tapia/{CITYLEARN_BRANCH}"], cwd=citylearn_dir)
+    _git_check(["clean", "-fd"], cwd=citylearn_dir)
+    cl_branch = _git_out(["rev-parse", "--abbrev-ref", "HEAD"], cwd=citylearn_dir)
+    if cl_branch == "HEAD":
+        _git_check(["checkout", "-B", CITYLEARN_BRANCH], cwd=citylearn_dir)
+        cl_branch = _git_out(["rev-parse", "--abbrev-ref", "HEAD"], cwd=citylearn_dir)
+    if cl_branch != CITYLEARN_BRANCH:
+        raise RuntimeError(f"CityLearn en rama {cl_branch!r}, esperado {CITYLEARN_BRANCH!r}")
+    cl_commit = _git_out(["rev-parse", "--short", "HEAD"], cwd=citylearn_dir)
+
+    print(f"[7.2 bootstrap] external/MAAC -> {MAAC_BRANCH}")
+    maac_remotes = _git_out(["remote"], cwd=maac_dir).splitlines()
+    if "mac-tapia" not in maac_remotes:
+        _git_check(["remote", "add", "mac-tapia", MAAC_URL], cwd=maac_dir)
+    else:
+        _git_check(["remote", "set-url", "mac-tapia", MAAC_URL], cwd=maac_dir)
+    _git_check(["fetch", "mac-tapia", MAAC_BRANCH], cwd=maac_dir)
+    _git_check(["checkout", "-B", MAAC_BRANCH, f"mac-tapia/{MAAC_BRANCH}"], cwd=maac_dir)
+    _git_check(["clean", "-fd"], cwd=maac_dir)
+    maac_branch = _git_out(["rev-parse", "--abbrev-ref", "HEAD"], cwd=maac_dir)
+    if maac_branch != MAAC_BRANCH:
+        raise RuntimeError(f"MAAC en rama {maac_branch!r}, esperado {MAAC_BRANCH!r}")
+    maac_commit = _git_out(["rev-parse", "--short", "HEAD"], cwd=maac_dir)
+
+    parent_head = _git_out(["rev-parse", "--short", "HEAD"], cwd=repo)
+    print(
+        f"[7.2 bootstrap] git OK: padre {COLAB_REPO_BRANCH}@{parent_head} | "
+        f"CityLearn@{cl_commit} | MAAC@{maac_commit}"
+    )
+    return {
+        "parent": parent_head,
+        "citylearn": cl_commit,
+        "maac": maac_commit,
+    }
+
+
+def colab_verify_repo_patches(repo: Path) -> None:
+    """Protocol guard + critical patches (cells 1.2 E/F)."""
+    repo = Path(repo)
+    guard = repo / "CityLearn/scripts/colab_protocol_guard.py"
+    patches = repo / "CityLearn/scripts/colab_verify_critical_patches.py"
+    if not guard.is_file():
+        raise FileNotFoundError(f"Falta {guard}")
+    if not patches.is_file():
+        raise FileNotFoundError(f"Falta {patches}")
+    subprocess.check_call([sys.executable, str(guard), "verify-repo", "--repo", str(repo)])
+    subprocess.check_call([sys.executable, str(patches), "--repo", str(repo)])
+    print("[7.2 bootstrap] protocol-guard + parches criticos OK", flush=True)
+
+
+def colab_mount_drive_if_needed() -> Path:
+    """Mount Google Drive (cell 1.5) when /content/drive/MyDrive is absent."""
+    mount = Path("/content/drive")
+    if not (mount / "MyDrive").is_dir():
+        from google.colab import drive  # type: ignore[import-not-found]
+
+        print("[7.2 bootstrap] Montando Google Drive...", flush=True)
+        drive.mount("/content/drive")
+    return mount
 
 
 def _in_colab() -> bool:
@@ -333,12 +467,28 @@ def prepare_colab_cell_72_standalone(
     *,
     repo: Optional[Path] = None,
     resume_output_root: Optional[str] = None,
+    skip_git_sync: bool = False,
 ) -> Dict[str, object]:
-    """Bootstrap Colab cell 7.2 without prior notebook cells (Drive audit + plan)."""
+    """Full Colab reconnect bootstrap: git 1.2 + Drive 1.5 + OUTPUT_ROOT 2.1 + config 6.1/7.0."""
     if not _in_colab():
         return {}
 
-    scripts = Path(__file__).resolve().parent
+    repo_path = Path(repo or ns.get("REPO") or COLAB_DEFAULT_REPO)
+    ns["REPO"] = str(repo_path)
+
+    if not skip_git_sync:
+        print("[7.2 bootstrap] (1/4) git hard sync...", flush=True)
+        colab_git_hard_sync(repo_path)
+        colab_verify_repo_patches(repo_path)
+    elif not (repo_path / "CityLearn").is_dir():
+        raise RuntimeError(
+            f"REPO invalido: {repo_path}. Quita skip_git_sync o ejecuta celda 1.2."
+        )
+
+    print("[7.2 bootstrap] (2/4) Google Drive...", flush=True)
+    colab_mount_drive_if_needed()
+
+    scripts = repo_path / "CityLearn" / "scripts"
     if str(scripts) not in sys.path:
         sys.path.insert(0, str(scripts))
     from citylearn_v3_training_common import (
@@ -347,24 +497,12 @@ def prepare_colab_cell_72_standalone(
         notebook_jobs_resume_preview,
     )
 
-    repo_path = Path(repo or ns.get("REPO") or "/content/MADRLCitytleranflexresdr")
-    if not (repo_path / "CityLearn").is_dir():
-        raise RuntimeError(
-            f"REPO invalido: {repo_path}. Ejecuta celda 1.2 (clone) o define REPO antes de 7.2."
-        )
-
-    mount = Path("/content/drive")
-    if not (mount / "MyDrive").is_dir():
-        from google.colab import drive  # type: ignore[import-not-found]
-
-        print("[7.2 bootstrap] Montando Google Drive...")
-        drive.mount("/content/drive")
-
     manual = str(resume_output_root or ns.get("RESUME_OUTPUT_ROOT") or ns.get("OUTPUT_ROOT") or "").strip()
     if manual and Path(manual).is_dir():
         ns["RESUME_OUTPUT_ROOT"] = manual
         ns["OUTPUT_ROOT"] = manual
 
+    print("[7.2 bootstrap] (3/4) OUTPUT_ROOT + plan skip/resume...", flush=True)
     boot = bootstrap_colab_notebook_cell_72(
         repo_path,
         python_executable=str(ns.get("PROJECT_PYTHON") or ns.get("PYTHON") or sys.executable),
@@ -379,12 +517,11 @@ def prepare_colab_cell_72_standalone(
     ep_steps = int(config.get("EPISODE_STEPS", 8760))
     output_root = Path(str(config["OUTPUT_ROOT"]))
 
-    print("\n[7.2 bootstrap] Modo standalone — sin celdas 1.5/2.1/7.1")
+    print("\n[7.2 bootstrap] (4/4) listo — celda unica (sin 1.2/1.5/2.1/6.1/7.0/7.1)")
     print(f"[7.2 bootstrap] OUTPUT_ROOT = {output_root}")
     print(f"[7.2 bootstrap] HAPPO rollout_threads = {config['HAPPO_ROLLOUT_THREADS']}")
     print(
-        "[7.2 bootstrap] Launcher: 9 SKIP + 3 HAPPO salvage (paralelo si VRAM, n_rollout=1) "
-        "cuando aplique"
+        "[7.2 bootstrap] Reanuda mismas carpetas Drive; salvage HAPPO en paralelo si VRAM alcanza"
     )
 
     report = boot["resume_report"]
