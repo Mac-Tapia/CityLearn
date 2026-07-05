@@ -398,6 +398,7 @@ def prepare_colab_drive_mount_context(
         mount_point,
         project_name=project_name,
         repo=repo,
+        audit_runs=False,
     )
     if discovered is not None:
         workspace = Path(discovered)
@@ -3937,12 +3938,17 @@ def discover_colab_gdrive_workspace(
     *,
     project_name: str = "MADRLCitytleranflexresdr",
     repo: Optional[Path] = None,
+    audit_runs: bool = True,
 ) -> Optional[Path]:
     """Find writable Drive workspace (``outputs/`` + pointer txt).
 
     Prefers MyDrive/MADRLCitytleranflexresdr; falls back to creating that path when
     the canonical shared folder (``1ihH6RqL2KpevfCQEUXj7PP1aS2QYssAX``) only
     appears on FUSE for reads.
+
+    When ``audit_runs=False`` (cell 1.5 mount-only), ranks candidates by pointer
+    file and ``outputs/`` presence only — no ``summarize_madrl_output_run`` /
+    ``build_jobs_resume_report``. Full run audit stays in ``pick_colab_output_root``.
     """
     mount_point = Path(mount_point)
     mydrive = mount_point / "MyDrive"
@@ -3975,13 +3981,16 @@ def discover_colab_gdrive_workspace(
         has_pointer = (seed / "latest_colab_output_root.txt").is_file()
         if not has_outputs and not has_pointer:
             continue
-        hint_run = read_preferred_output_root_hint(repo or Path("."), gdrive_root=seed)
         score = 0.0
-        if hint_run is not None:
-            summary = summarize_madrl_output_run(hint_run)
-            score = float(summary.get("score") or 0.0)
-            if summary.get("has_artifacts"):
-                score += 1_000_000_000
+        if audit_runs:
+            hint_run = read_preferred_output_root_hint(repo or Path("."), gdrive_root=seed)
+            if hint_run is not None:
+                summary = summarize_madrl_output_run(hint_run)
+                score = float(summary.get("score") or 0.0)
+                if summary.get("has_artifacts"):
+                    score += 1_000_000_000
+        elif has_outputs:
+            score += 0.5
         if has_pointer:
             score += 1.0
         if "/MyDrive/" in str(seed).replace("\\", "/"):
