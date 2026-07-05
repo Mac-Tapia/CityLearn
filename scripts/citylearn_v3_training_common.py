@@ -127,13 +127,117 @@ def restricted_canonical_run_visible(
     ) is not None
 
 
+_MIRROR_ROOT_FILES = (
+    "official_full_status.json",
+    "run_context_manifest.json",
+    "results.json",
+)
+_MIRROR_RESUMEN_FILES = (
+    "episode_audit.json",
+    "best_madrl_report.json",
+)
+_MIRROR_DATA_FILES = (
+    "results.json",
+    "timeseries.csv",
+    "training_summary.json",
+    JOB_LAUNCHER_COMPLETE_MARKER,
+)
+
+
+def _iter_selective_mirror_sources(fuse_src: Path) -> List[Path]:
+    """Resume/skip artifacts only (no figures, tables, logs)."""
+    fuse_src = Path(fuse_src)
+    sources: List[Path] = []
+    seen: set = set()
+
+    def _add(path: Path) -> None:
+        key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        sources.append(path)
+
+    for name in _MIRROR_ROOT_FILES:
+        candidate = fuse_src / name
+        if drive_path_is_file(candidate):
+            _add(candidate)
+
+    resumen = fuse_src / "resumen_comparativo"
+    if drive_path_is_dir(resumen):
+        for name in _MIRROR_RESUMEN_FILES:
+            candidate = resumen / name
+            if drive_path_is_file(candidate):
+                _add(candidate)
+
+    for algo in DEFAULT_REPORT_ALGORITHMS:
+        for scen in DEFAULT_REPORT_SCENARIOS:
+            run_dir = resolve_existing_job_run_dir(fuse_src, algo, scen, 0)
+            if run_dir is None or not drive_path_is_dir(run_dir):
+                continue
+            marker = run_dir / "live_progress.json"
+            if drive_path_is_file(marker):
+                _add(marker)
+            marker = run_dir / JOB_LAUNCHER_COMPLETE_MARKER
+            if drive_path_is_file(marker):
+                _add(marker)
+            data_dir = run_dir / DATA_DIR_NAME
+            if drive_path_is_dir(data_dir):
+                for name in _MIRROR_DATA_FILES:
+                    candidate = data_dir / name
+                    if drive_path_is_file(candidate):
+                        _add(candidate)
+            ckpt_dir = run_dir / CHECKPOINT_DIR_NAME
+            if not drive_path_is_dir(ckpt_dir):
+                continue
+            try:
+                for pattern in ("**/*.pt", "**/*.pth", "**/value_normalizer.pt"):
+                    for candidate in ckpt_dir.glob(pattern):
+                        if drive_path_is_file(candidate):
+                            _add(candidate)
+            except _DRIVE_FUSE_IO_ERRORS:
+                pass
+
+    def _priority(path: Path) -> tuple:
+        rel = str(path.relative_to(fuse_src)).replace("\\", "/").lower()
+        bucket = 2
+        if path.parent == fuse_src:
+            bucket = 0
+        elif "/happo/" in rel or rel.startswith("happo/"):
+            bucket = 1
+        elif path.suffix.lower() in {".pt", ".pth"}:
+            bucket = 1
+        return (bucket, len(path.parts), rel)
+
+    return sorted(sources, key=_priority)
+
+
+def _mirror_workspace_ready(workspace_dst: Path) -> bool:
+    if not madrl_output_run_has_artifacts(workspace_dst):
+        return False
+    for scen in DEFAULT_REPORT_SCENARIOS:
+        run_dir = resolve_existing_job_run_dir(workspace_dst, "happo", scen, 0)
+        if run_dir is None:
+            continue
+        ckpt_dir = run_dir / CHECKPOINT_DIR_NAME
+        if not drive_path_is_dir(ckpt_dir):
+            continue
+        try:
+            if any(ckpt_dir.rglob("*.pt")):
+                return True
+        except _DRIVE_FUSE_IO_ERRORS:
+            continue
+    return madrl_output_run_has_artifacts(workspace_dst)
+
+
 def mirror_fuse_run_to_workspace(
     fuse_src: Path,
     workspace_dst: Path,
     *,
     verbose: bool = True,
+    progress_every: int = 25,
+    progress_seconds: float = 15.0,
 ) -> Dict[str, object]:
-    """Copy a FUSE-visible shared run into writable MyDrive (best-effort, no Drive API)."""
+    """Copy resume/skip artifacts from FUSE into writable MyDrive (selective, fast)."""
     fuse_src = Path(fuse_src)
     workspace_dst = Path(workspace_dst)
     report: Dict[str, object] = {
@@ -141,6 +245,7 @@ def mirror_fuse_run_to_workspace(
         "workspace_dst": str(workspace_dst),
         "copied": 0,
         "skipped": 0,
+        "planned": 0,
         "ok": False,
     }
     if not drive_path_is_dir(fuse_src):
@@ -153,27 +258,49 @@ def mirror_fuse_run_to_workspace(
         if verbose:
             print(msg, flush=True)
 
-    _log(f"[..] Copiando artefactos FUSE -> {workspace_dst} ...")
-    for root, _dirs, files in os.walk(fuse_src, topdown=True):
-        rel = Path(root).relative_to(fuse_src)
-        target_root = workspace_dst / rel
+    sources = _iter_selective_mirror_sources(fuse_src)
+    report["planned"] = len(sources)
+    _log(
+        f"[..] Mirror selectivo FUSE -> MyDrive "
+        f"({len(sources)} artefactos resume/skip, no figures/logs)..."
+    )
+
+    last_progress = time.monotonic()
+    for idx, src_file in enumerate(sources, start=1):
+        rel = src_file.relative_to(fuse_src)
+        dst_file = workspace_dst / rel
         try:
-            target_root.mkdir(parents=True, exist_ok=True)
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
         except _DRIVE_FUSE_IO_ERRORS:
             report["skipped"] = int(report["skipped"]) + 1
             continue
-        for fname in files:
-            src_file = Path(root) / fname
-            dst_file = target_root / fname
-            if drive_path_exists(dst_file):
-                continue
-            try:
-                shutil.copy2(src_file, dst_file, follow_symlinks=False)
-                report["copied"] = int(report["copied"]) + 1
-            except _DRIVE_FUSE_IO_ERRORS:
-                report["skipped"] = int(report["skipped"]) + 1
+        if drive_path_exists(dst_file):
+            continue
+        try:
+            shutil.copy2(src_file, dst_file, follow_symlinks=False)
+            report["copied"] = int(report["copied"]) + 1
+        except _DRIVE_FUSE_IO_ERRORS:
+            report["skipped"] = int(report["skipped"]) + 1
 
-    report["ok"] = madrl_output_run_has_artifacts(workspace_dst)
+        now = time.monotonic()
+        if verbose and (
+            idx % progress_every == 0
+            or (now - last_progress) >= progress_seconds
+        ):
+            _log(
+                f"[..] Mirror progreso: {idx}/{len(sources)} "
+                f"copiados={report['copied']} omitidos={report['skipped']}"
+            )
+            last_progress = now
+
+        if idx % progress_every == 0 and _mirror_workspace_ready(workspace_dst):
+            report["ok"] = True
+            report["early_exit"] = True
+            _log("[..] Mirror suficiente para resume; deteniendo copia anticipada.")
+            break
+
+    if not report.get("ok"):
+        report["ok"] = _mirror_workspace_ready(workspace_dst)
     if verbose:
         _log(
             f"[..] Mirror terminado: copied={report['copied']} "
@@ -594,7 +721,7 @@ def resolve_existing_job_run_dir(
     """
     fallback: Optional[Path] = None
     for candidate in iter_job_run_dir_candidates(base, algorithm, scenario, seed):
-        if not candidate.is_dir():
+        if not drive_path_is_dir(candidate):
             continue
         if job_run_dir_has_artifacts(candidate):
             return candidate
