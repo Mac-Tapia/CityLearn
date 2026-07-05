@@ -4790,63 +4790,57 @@ def pick_colab_output_root(
     in_colab: bool = False,
     gdrive_root: Optional[Path] = None,
     mount_point: Optional[Path] = None,
-    ensure_shared_run: bool = True,
+    ensure_shared_run: bool = False,
     skip_fuse_mirror: bool = False,
     print_audit: bool = True,
 ) -> Dict[str, object]:
-    """Select ``OUTPUT_ROOT`` from Drive artifacts (never prefer empty timestamp stubs)."""
+    """Select ``OUTPUT_ROOT`` from MyDrive checkpoints/results (resume or fresh).
+
+    Reconnect: only reads ``base_output_parent`` on Drive — no mirror/copy.
+    FUSE bootstrap runs only when ``enable_shared_run=True`` and MyDrive has
+    zero restorable runs (first-time setup).
+    """
     base_output_parent = Path(base_output_parent)
     repo_path = Path(repo) if repo else None
     gdrive_path = Path(gdrive_root) if gdrive_root else None
     run_ready: Optional[Dict[str, object]] = None
-    fast_reconnect = False
-    mydrive_plan_ready = False
 
-    fast_root: Optional[Path] = None
-    if (
-        in_colab
-        and not force_new_run
-        and gdrive_path is not None
-        and repo_path is not None
-    ):
-        fast_root = resolve_colab_mydrive_resume_root(
-            gdrive_path,
-            repo=repo_path,
-            resume_output_root=str(resume_output_root or "") or None,
-            target_episodes=target_episodes,
-            episode_time_steps=episode_time_steps,
-            happo_rollout_threads=happo_rollout_threads,
-            require_canonical_plan=False,
-        )
-        if fast_root is not None:
-            fast_reconnect = True
-            mydrive_plan_ready = colab_mydrive_run_plan_ready(
-                fast_root,
-                target_episodes=target_episodes,
-                episode_time_steps=episode_time_steps,
-                happo_rollout_threads=happo_rollout_threads,
-                require_canonical_plan=(
-                    fast_root.name == preferred_canonical_run_name(repo_path)
-                ),
+    preferred = (
+        read_preferred_output_root_hint(repo_path or Path("."), gdrive_root=gdrive_path)
+        if repo_path or gdrive_path
+        else None
+    )
+
+    if in_colab and str(base_output_parent).startswith("/content/drive/"):
+        if not base_output_parent.parent.exists():
+            raise RuntimeError(
+                f"Drive outputs no accesible: {base_output_parent}. "
+                "Ejecuta celda 1.5 (montar Drive) antes de 2.1."
             )
-            if print_audit:
-                print(
-                    f"[OK] Reconexion: {fast_root.name} en tu MyDrive — "
-                    "sin OAuth, sin FUSE, sin mirror, sin audit pesado.",
-                    flush=True,
-                )
+
+    audit = audit_madrl_drive_output_runs(
+        base_output_parent,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+        happo_rollout_threads=happo_rollout_threads,
+        preferred_output_root=preferred,
+    )
+    runs_with_artifacts = int(audit.get("runs_with_artifacts") or 0)
 
     if (
         in_colab
         and ensure_shared_run
         and not force_new_run
-        and not fast_reconnect
+        and runs_with_artifacts == 0
         and mount_point is not None
         and gdrive_path is not None
         and repo_path is not None
     ):
         ensure_colab_drive_api_auth()
-        print("[..] Verificando run canonico (mirror FUSE + fallback API)...", flush=True)
+        print(
+            "[..] MyDrive sin checkpoints; bootstrap FUSE/API (solo 1a vez, opcional)...",
+            flush=True,
+        )
         run_ready = ensure_colab_output_run_ready(
             Path(mount_point),
             repo=repo_path,
@@ -4857,135 +4851,64 @@ def pick_colab_output_root(
             skip_fuse_mirror=skip_fuse_mirror,
         )
         print_colab_drive_binding_report(run_ready)
+        audit = audit_madrl_drive_output_runs(
+            base_output_parent,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+            preferred_output_root=preferred,
+        )
+        runs_with_artifacts = int(audit.get("runs_with_artifacts") or 0)
         if run_ready.get("is_ready") and not str(resume_output_root or "").strip():
             ready_root = str(run_ready.get("output_root") or "").strip()
             if ready_root:
                 resume_output_root = ready_root
 
-    preferred = (
-        read_preferred_output_root_hint(repo_path or Path("."), gdrive_root=gdrive_path)
-        if repo_path or gdrive_path
-        else None
-    )
-    canonical_from_drive: Optional[Path] = None
-    if gdrive_path is not None:
-        canonical_from_drive = resolve_canonical_output_root_from_drive(
-            gdrive_path,
-            repo=repo_path,
-            target_episodes=target_episodes,
-            episode_time_steps=episode_time_steps,
-            happo_rollout_threads=happo_rollout_threads,
-        )
-
-    if in_colab and str(base_output_parent).startswith("/content/drive/"):
-        if not base_output_parent.parent.exists():
-            raise RuntimeError(
-                f"Drive outputs no accesible: {base_output_parent}. "
-                "Ejecuta celda 1.5 (montar Drive) antes de 2.1."
-            )
-
-    if fast_reconnect and fast_root is not None:
-        output_root = fast_root
-        resume_reason = f"RECONEXION MyDrive ({output_root.name}; sin mirror)"
-        created_new_run = False
-        selected = summarize_madrl_output_run(
-            output_root,
-            target_episodes=target_episodes,
-            episode_time_steps=episode_time_steps,
-            happo_rollout_threads=happo_rollout_threads,
-        )
-        audit: Dict[str, object] = {
-            "summaries": [selected],
-            "best": selected,
-            "runs_with_artifacts": 1,
-            "fast_reconnect": True,
-        }
-        if print_audit:
-            print_madrl_drive_runs_audit(audit, selected=selected)
-        output_root.mkdir(parents=True, exist_ok=True)
-        if repo_path is not None:
-            sync_output_root_pointer_files(repo_path, output_root, gdrive_root=gdrive_path)
-        return {
-            "output_root": str(output_root),
-            "resume_output_root": str(output_root),
-            "resume_reason": resume_reason,
-            "created_new_run": created_new_run,
-            "audit": audit,
-            "selected_summary": selected,
-            "run_ready": run_ready,
-            "fast_reconnect": True,
-            "mydrive_plan_ready": mydrive_plan_ready,
-        }
-
-    audit = audit_madrl_drive_output_runs(
-        base_output_parent,
-        target_episodes=target_episodes,
-        episode_time_steps=episode_time_steps,
-        happo_rollout_threads=happo_rollout_threads,
-        preferred_output_root=preferred,
-    )
-
     created_new_run = False
     output_root: Path
     resume_reason: str
+    mydrive_resumed = False
 
     manual = str(resume_output_root or "").strip()
     if manual:
         output_root = Path(manual)
         resume_reason = "RESUME_OUTPUT_ROOT manual"
+        mydrive_resumed = True
     elif force_new_run:
         output_root = base_output_parent / run_label
         resume_reason = "NUEVO run (FORCE_NEW_RUN)"
         created_new_run = True
     elif auto_resume_latest:
-        if canonical_from_drive is not None:
-            output_root = canonical_from_drive
-            summary = summarize_madrl_output_run(
-                output_root,
-                target_episodes=target_episodes,
-                episode_time_steps=episode_time_steps,
-                happo_rollout_threads=happo_rollout_threads,
-            )
+        best = audit.get("best")
+        if isinstance(best, Mapping):
+            output_root = Path(str(best["output_root"]))
+            completed = int(best.get("completed_jobs") or 0)
+            resumable = int(best.get("resumable_jobs") or 0)
+            progress = float(best.get("progress_pct") or 0.0)
             resume_reason = (
-                "AUTO-RESUME run canonico desde Drive compartido "
-                f"({summary.get('completed_jobs', 0)}/12 completos, "
-                f"~{float(summary.get('progress_pct') or 0.0):.1f}%)"
+                f"AUTO-RESUME por checkpoints en Drive "
+                f"({completed} completos, {resumable} reanudables, ~{progress:.1f}%)"
             )
-        else:
-            best = audit.get("best")
-            if isinstance(best, Mapping):
-                output_root = Path(str(best["output_root"]))
-                resume_reason = (
-                    "AUTO-RESUME mejor run por artefactos "
-                    f"({best.get('completed_jobs', 0)}/12 completos, "
-                    f"~{float(best.get('progress_pct') or 0.0):.1f}%)"
-                )
-            elif int(audit.get("runs_with_artifacts") or 0) > 0:
+            mydrive_resumed = True
+        elif list_madrl_v3_output_runs(base_output_parent):
+            stub_names = [
+                str(s.get("run_name") or "")
+                for s in (audit.get("summaries") or [])
+                if s.get("stub_only")
+            ]
+            if stub_names:
                 raise RuntimeError(
-                    "Hay carpetas madrl_v3_* con artefactos MADRL en Drive pero no se pudo "
-                    "seleccionar un run. Define RESUME_OUTPUT_ROOT manualmente en celda 2.1."
+                    "Drive tiene runs STUB (sin checkpoints .pt): "
+                    f"{', '.join(stub_names)}. "
+                    "Usa 2.1c o RESUME_OUTPUT_ROOT con el run correcto."
                 )
-            elif list_madrl_v3_output_runs(base_output_parent):
-                stub_names = [
-                    str(s.get("run_name") or "")
-                    for s in (audit.get("summaries") or [])
-                    if s.get("stub_only")
-                ]
-                if stub_names:
-                    raise RuntimeError(
-                        "Drive solo tiene runs STUB (p. ej. results.json salvage copiado sin "
-                        f"checkpoints .pt): {', '.join(stub_names)}. "
-                        "Re-ejecuta celdas 1.2 -> 1.5 -> 2.1 para mirror/API del run "
-                        f"compartido ({CANONICAL_SHARED_DRIVE_URL}). "
-                        f"Run esperado: {DEFAULT_CANONICAL_RUN_NAME}."
-                    )
-                output_root = base_output_parent / run_label
-                resume_reason = "NUEVO run (runs previos vacios, sin artefactos MADRL)"
-                created_new_run = True
-            else:
-                output_root = base_output_parent / run_label
-                resume_reason = "NUEVO run (no habia runs previos)"
-                created_new_run = True
+            output_root = base_output_parent / run_label
+            resume_reason = "NUEVO run (carpetas previas sin checkpoints)"
+            created_new_run = True
+        else:
+            output_root = base_output_parent / run_label
+            resume_reason = "NUEVO run (no habia runs previos en Drive)"
+            created_new_run = True
     else:
         output_root = base_output_parent / run_label
         resume_reason = "NUEVO run (AUTO_RESUME_LATEST=False)"
@@ -5000,7 +4923,7 @@ def pick_colab_output_root(
         if selected is None and isinstance(audit.get("best"), Mapping):
             if str(audit["best"].get("output_root")) == str(output_root):
                 selected = audit["best"]
-        if selected is None and canonical_from_drive is not None and str(output_root) == str(canonical_from_drive):
+        if selected is None:
             selected = summarize_madrl_output_run(
                 output_root,
                 target_episodes=target_episodes,
@@ -5023,8 +4946,7 @@ def pick_colab_output_root(
         "audit": audit,
         "selected_summary": selected,
         "run_ready": run_ready,
-        "fast_reconnect": fast_reconnect,
-        "mydrive_plan_ready": mydrive_plan_ready,
+        "mydrive_resumed": mydrive_resumed,
     }
 
 
