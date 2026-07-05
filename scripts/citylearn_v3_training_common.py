@@ -339,16 +339,47 @@ def prepare_colab_drive_mount_context(
     *,
     project_name: str = "MADRLCitytleranflexresdr",
     default_workspace: Optional[Path] = None,
+    repo: Optional[Path] = None,
 ) -> Dict[str, str]:
-    """Fast cell 1.5 setup: workspace paths only (no artifact scan)."""
+    """Cell 1.5 only: mount workspace paths on MyDrive (no run audit, no copy)."""
     mount_point = Path(mount_point)
-    workspace = Path(default_workspace or (mount_point / "MyDrive" / project_name))
+    fallback = Path(default_workspace or (mount_point / "MyDrive" / project_name))
+    workspace = fallback
+    discovered = discover_colab_gdrive_workspace(
+        mount_point,
+        project_name=project_name,
+        repo=repo,
+    )
+    if discovered is not None:
+        workspace = Path(discovered)
     outputs = workspace / "outputs"
     outputs.mkdir(parents=True, exist_ok=True)
+    pointer_value = None
+    pointer_path = workspace / "latest_colab_output_root.txt"
+    if drive_path_is_file(pointer_path):
+        try:
+            pointer_value = pointer_path.read_text(encoding="utf-8").strip()
+        except _DRIVE_FUSE_IO_ERRORS:
+            pointer_value = None
     return {
         "gdrive_root": str(workspace),
         "outputs_parent": str(outputs),
+        "pointer_value": pointer_value or "",
+        "shared_folder_url": CANONICAL_SHARED_DRIVE_URL,
     }
+
+
+def print_colab_drive_mount_report(ctx: Mapping[str, object]) -> None:
+    """Human-readable output for notebook cell 1.5 (mount only)."""
+    print(f"[OK] Workspace Drive: {ctx.get('gdrive_root')}")
+    print(f"[OK] Outputs entrenamiento: {ctx.get('outputs_parent')}")
+    pointer_value = str(ctx.get("pointer_value") or "").strip()
+    if pointer_value:
+        print(f"[INFO] Puntero en Drive: {pointer_value}")
+    print(
+        "[INFO] Verificacion de runs/checkpoints: celda 2.1 "
+        "(esta celda solo monta MyDrive)."
+    )
 
 
 def ensure_project_paths() -> None:
@@ -1718,7 +1749,7 @@ def clamp_happo_n_rollout_threads(
         return fb
     stored = int(value)
     if stored > recommended:
-        return fb
+        return recommended
     return max(1, stored)
 
 
@@ -3570,6 +3601,22 @@ def read_preferred_output_root_hint(
     return None
 
 
+def resolve_notebook_output_root(
+    repo: Path,
+    *,
+    output_root: Optional[str] = None,
+    gdrive_root: Optional[Path] = None,
+) -> str:
+    """Resolve active OUTPUT_ROOT for notebook helpers (absolute paths)."""
+    explicit = str(output_root or "").strip()
+    if explicit:
+        return str(Path(explicit))
+    hinted = read_preferred_output_root_hint(repo, gdrive_root=gdrive_root)
+    if hinted is not None:
+        return str(hinted)
+    return ""
+
+
 def discover_colab_gdrive_workspace(
     mount_point: Path,
     *,
@@ -4011,17 +4058,17 @@ def ensure_shared_canonical_run_on_mount(
     if not report["local_run_restorable"]:
         report["error"] = (
             "shortcut creado pero el mount aun no muestra checkpoints; "
-            "re-ejecuta celda 1.5 tras unos segundos"
+            "re-ejecuta celda 2.1 tras unos segundos"
         )
     return report
 
 
-def bind_colab_drive_workspace(
+def ensure_colab_output_run_ready(
     mount_point: Path,
     *,
     repo: Path,
+    gdrive_root: Path,
     project_name: str = "MADRLCitytleranflexresdr",
-    default_workspace: Optional[Path] = None,
     preferred_run_name: Optional[str] = None,
     target_episodes: int = 50,
     episode_time_steps: int = 8760,
@@ -4029,19 +4076,17 @@ def bind_colab_drive_workspace(
     allow_drive_api_shortcut: bool = True,
     verbose: bool = True,
 ) -> Dict[str, object]:
-    """Bind Colab globals to the best restorable MADRL run visible on Drive (zero manual paths)."""
+    """Cell 2.1 prep: mirror FUSE / Drive API so canonical run is writable on MyDrive."""
     mount_point = Path(mount_point)
     repo = Path(repo)
+    gdrive_root = Path(gdrive_root)
 
     def _log(message: str) -> None:
         if verbose:
             print(message, flush=True)
 
-    default_workspace = Path(
-        default_workspace or (mount_point / "MyDrive" / project_name)
-    )
     preferred_run_name = preferred_run_name or preferred_canonical_run_name(repo)
-    default_outputs = default_workspace / "outputs"
+    default_outputs = gdrive_root / "outputs"
     default_outputs.mkdir(parents=True, exist_ok=True)
 
     def _rank_runs(run_paths: Sequence[Path]) -> List[Dict[str, object]]:
@@ -4079,7 +4124,7 @@ def bind_colab_drive_workspace(
             return summary
         return None
 
-    workspace_run = colab_workspace_run_path(default_workspace, preferred_run_name)
+    workspace_run = colab_workspace_run_path(gdrive_root, preferred_run_name)
     fuse_src = resolve_fuse_canonical_run_path(
         mount_point,
         preferred_run_name,
@@ -4102,6 +4147,7 @@ def bind_colab_drive_workspace(
     workspace_summary = _workspace_run_restorable(workspace_run)
 
     if workspace_summary is None and fuse_src is not None:
+        _log("[..] Copiando artefactos resume desde FUSE a MyDrive...")
         mirror_report = mirror_fuse_run_to_workspace(
             fuse_src,
             workspace_run,
@@ -4159,7 +4205,6 @@ def bind_colab_drive_workspace(
     stub_runs = [s for s in summaries if s.get("stub_only")]
     best = ranked[0] if ranked else None
 
-    gdrive_root = default_workspace
     output_root: Optional[Path] = None
     selected_summary: Optional[Dict[str, object]] = None
 
@@ -4169,13 +4214,11 @@ def bind_colab_drive_workspace(
     elif best is not None:
         run_path = Path(str(best["run_path"]))
         if is_colab_fuse_restricted_path(run_path):
-            raise RuntimeError(
-                f"Run MADRL legible solo en ruta FUSE restringida ({run_path}). "
-                f"Re-ejecuta celda 1.5 para enlazar en {workspace_run}."
-            )
-        output_root = run_path
-        gdrive_root = run_path.parent.parent
-        selected_summary = best["summary"]
+            selected_summary = None
+            output_root = None
+        else:
+            output_root = run_path
+            selected_summary = best["summary"]
 
     pointer_path = gdrive_root / "latest_colab_output_root.txt"
     pointer_value = None
@@ -4187,7 +4230,7 @@ def bind_colab_drive_workspace(
         ).read_text(encoding="utf-8").strip()
         pointer_path.write_text(pointer_value + "\n", encoding="utf-8")
 
-    is_correct_drive = (
+    is_ready = (
         output_root is not None
         and selected_summary is not None
         and bool(selected_summary.get("has_artifacts"))
@@ -4196,12 +4239,13 @@ def bind_colab_drive_workspace(
         "mount_point": str(mount_point),
         "project_name": project_name,
         "gdrive_root": str(gdrive_root),
-        "outputs_parent": str(gdrive_root / "outputs"),
+        "outputs_parent": str(default_outputs),
         "output_root": str(output_root) if output_root is not None else None,
         "preferred_run_name": preferred_run_name,
         "pointer_path": str(pointer_path),
         "pointer_value": pointer_value,
-        "is_correct_drive": is_correct_drive,
+        "is_ready": is_ready,
+        "is_correct_drive": is_ready,
         "mount_runs": [str(p) for p in mount_runs],
         "stub_runs": [str(s.get("run_name") or "") for s in stub_runs],
         "selected_summary": selected_summary,
@@ -4210,19 +4254,57 @@ def bind_colab_drive_workspace(
         "shared_folder_url": CANONICAL_SHARED_DRIVE_URL,
     }
 
-    if output_root is not None:
+    if output_root is not None and is_ready:
         sync_output_root_pointer_files(repo, output_root, gdrive_root=gdrive_root)
 
-    if not is_correct_drive:
-        stub_names = ", ".join(binding["stub_runs"]) or "(ninguno)"
+    return binding
+
+
+def bind_colab_drive_workspace(
+    mount_point: Path,
+    *,
+    repo: Path,
+    project_name: str = "MADRLCitytleranflexresdr",
+    default_workspace: Optional[Path] = None,
+    preferred_run_name: Optional[str] = None,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+    allow_drive_api_shortcut: bool = True,
+    verbose: bool = True,
+) -> Dict[str, object]:
+    """Legacy wrapper: ensure run ready on Drive and raise if not restorable."""
+    mount_point = Path(mount_point)
+    repo = Path(repo)
+    default_workspace = Path(
+        default_workspace or (mount_point / "MyDrive" / project_name)
+    )
+    binding = ensure_colab_output_run_ready(
+        mount_point,
+        repo=repo,
+        gdrive_root=default_workspace,
+        project_name=project_name,
+        preferred_run_name=preferred_run_name,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+        happo_rollout_threads=happo_rollout_threads,
+        allow_drive_api_shortcut=allow_drive_api_shortcut,
+        verbose=verbose,
+    )
+
+    if not binding.get("is_ready"):
+        preferred_run_name = str(binding.get("preferred_run_name") or preferred_canonical_run_name(repo))
+        gdrive_root = str(binding.get("gdrive_root") or default_workspace)
+        stub_names = ", ".join(binding.get("stub_runs") or []) or "(ninguno)"
         api_err = ""
+        api_report = binding.get("api_report")
         if isinstance(api_report, Mapping):
             api_err = str(api_report.get("error") or "")
         auth_hint = ""
         if "metadata.google.internal" in api_err or "googleapiclient" in api_err.lower():
             auth_hint = (
                 "  Drive API: abre el notebook en colab.research.google.com, acepta OAuth "
-                "Drive en celda 1.5 y usa la cuenta con acceso al folder compartido.\n"
+                "Drive en celda 2.1 y usa la cuenta con acceso al folder compartido.\n"
             )
         raise RuntimeError(
             "Drive montado pero sin run MADRL restaurable.\n"
@@ -4232,14 +4314,14 @@ def bind_colab_drive_workspace(
             f"  Carpeta compartida: {CANONICAL_SHARED_DRIVE_URL}\n"
             + (f"  Drive API: {api_err}\n" if api_err else "")
             + auth_hint
-            + "  Re-ejecuta 1.2 -> 1.5 con la misma cuenta Google que tiene acceso al folder."
+            + "  Re-ejecuta 1.2 -> 1.5 -> 2.1 con la misma cuenta Google que tiene acceso al folder."
         )
 
     return binding
 
 
 def print_colab_drive_binding_report(binding: Mapping[str, object]) -> None:
-    """Human-readable verification for notebook cell 1.5."""
+    """Human-readable verification for notebook cell 2.1 (run restore / mirror)."""
     print(f"[OK] Workspace Drive: {binding.get('gdrive_root')}")
     print(f"[OK] Outputs MADRL: {binding.get('outputs_parent')}")
     pointer_value = binding.get("pointer_value")
@@ -4272,7 +4354,7 @@ def print_colab_drive_binding_report(binding: Mapping[str, object]) -> None:
     stub_runs = binding.get("stub_runs") or []
     if stub_runs:
         print(f"[INFO] Runs STUB ignorados: {', '.join(stub_runs)}")
-    if not binding.get("is_correct_drive"):
+    if not binding.get("is_ready") and not binding.get("is_correct_drive"):
         print("[FAIL] Drive sin run restaurable; revisa cuenta Colab vs carpeta compartida.")
 
 
@@ -4342,12 +4424,40 @@ def pick_colab_output_root(
     repo: Optional[Path] = None,
     in_colab: bool = False,
     gdrive_root: Optional[Path] = None,
+    mount_point: Optional[Path] = None,
+    ensure_shared_run: bool = True,
     print_audit: bool = True,
 ) -> Dict[str, object]:
     """Select ``OUTPUT_ROOT`` from Drive artifacts (never prefer empty timestamp stubs)."""
     base_output_parent = Path(base_output_parent)
     repo_path = Path(repo) if repo else None
     gdrive_path = Path(gdrive_root) if gdrive_root else None
+    run_ready: Optional[Dict[str, object]] = None
+
+    if (
+        in_colab
+        and ensure_shared_run
+        and not force_new_run
+        and mount_point is not None
+        and gdrive_path is not None
+        and repo_path is not None
+    ):
+        ensure_colab_drive_api_auth()
+        print("[..] Verificando run canonico (mirror FUSE + fallback API)...", flush=True)
+        run_ready = ensure_colab_output_run_ready(
+            Path(mount_point),
+            repo=repo_path,
+            gdrive_root=gdrive_path,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        )
+        print_colab_drive_binding_report(run_ready)
+        if run_ready.get("is_ready") and not str(resume_output_root or "").strip():
+            ready_root = str(run_ready.get("output_root") or "").strip()
+            if ready_root:
+                resume_output_root = ready_root
+
     preferred = (
         read_preferred_output_root_hint(repo_path or Path("."), gdrive_root=gdrive_path)
         if repo_path or gdrive_path
@@ -4428,7 +4538,7 @@ def pick_colab_output_root(
                     raise RuntimeError(
                         "Drive solo tiene runs STUB (p. ej. results.json salvage copiado sin "
                         f"checkpoints .pt): {', '.join(stub_names)}. "
-                        "Re-ejecuta celdas 1.2 -> 1.5 para enlazar automaticamente el run "
+                        "Re-ejecuta celdas 1.2 -> 1.5 -> 2.1 para mirror/API del run "
                         f"compartido ({CANONICAL_SHARED_DRIVE_URL}). "
                         f"Run esperado: {DEFAULT_CANONICAL_RUN_NAME}."
                     )
@@ -4475,6 +4585,7 @@ def pick_colab_output_root(
         "created_new_run": created_new_run,
         "audit": audit,
         "selected_summary": selected,
+        "run_ready": run_ready,
     }
 
 
