@@ -49,6 +49,51 @@ FIGURES_DIR_NAME = "figures"
 TABLES_DIR_NAME = "tables"
 JOB_LAUNCHER_COMPLETE_MARKER = "job_launcher_complete.json"
 SPACE_BOUND = 1.0e6
+_DRIVE_FUSE_IO_ERRORS = (OSError, PermissionError)
+
+
+def drive_path_exists(path: Path) -> bool:
+    try:
+        return Path(path).exists()
+    except _DRIVE_FUSE_IO_ERRORS:
+        return False
+
+
+def drive_path_is_file(path: Path) -> bool:
+    try:
+        return Path(path).is_file()
+    except _DRIVE_FUSE_IO_ERRORS:
+        return False
+
+
+def drive_path_is_dir(path: Path) -> bool:
+    try:
+        return Path(path).is_dir()
+    except _DRIVE_FUSE_IO_ERRORS:
+        return False
+
+
+def is_colab_fuse_restricted_path(path: Path) -> bool:
+    """Colab FUSE paths that often raise EPERM on stat/read (not for OUTPUT_ROOT)."""
+    normalized = str(path).replace("\\", "/")
+    return ".shortcut-targets-by-id" in normalized
+
+
+def colab_workspace_run_path(workspace_root: Path, run_name: str) -> Path:
+    return Path(workspace_root) / "outputs" / run_name
+
+
+def restricted_canonical_run_visible(mount_point: Path, run_name: str) -> bool:
+    """True when canonical run folder is visible only via restricted FUSE shortcut."""
+    mount_point = Path(mount_point)
+    shortcut_outputs = (
+        mount_point
+        / ".shortcut-targets-by-id"
+        / CANONICAL_SHARED_DRIVE_FOLDER_ID
+        / "outputs"
+        / run_name
+    )
+    return drive_path_is_dir(shortcut_outputs)
 
 
 def ensure_project_paths() -> None:
@@ -389,20 +434,20 @@ def job_run_dir_has_artifacts(run_dir: Path) -> bool:
     """True when a run folder contains resume/skip signals (not an empty mkdir stub)."""
     run_dir = Path(run_dir)
     data = run_dir / DATA_DIR_NAME
-    if (data / "results.json").is_file():
+    if drive_path_is_file(data / "results.json"):
         return True
-    if (run_dir / "live_progress.json").is_file():
+    if drive_path_is_file(run_dir / "live_progress.json"):
         return True
-    if (data / JOB_LAUNCHER_COMPLETE_MARKER).is_file():
+    if drive_path_is_file(data / JOB_LAUNCHER_COMPLETE_MARKER):
         return True
-    if (run_dir / JOB_LAUNCHER_COMPLETE_MARKER).is_file():
+    if drive_path_is_file(run_dir / JOB_LAUNCHER_COMPLETE_MARKER):
         return True
     ckpt = run_dir / CHECKPOINT_DIR_NAME
-    if ckpt.is_dir():
+    if drive_path_is_dir(ckpt):
         try:
             if any(ckpt.rglob("*")):
                 return True
-        except OSError:
+        except _DRIVE_FUSE_IO_ERRORS:
             pass
     return False
 
@@ -1426,10 +1471,12 @@ def read_job_launcher_complete_marker(output_dir: Path) -> Optional[Dict[str, ob
     output_dir = Path(output_dir)
     for rel in (f"{DATA_DIR_NAME}/{JOB_LAUNCHER_COMPLETE_MARKER}", JOB_LAUNCHER_COMPLETE_MARKER):
         path = output_dir / rel
-        if not path.is_file():
+        if not drive_path_is_file(path):
             continue
         try:
             return json.loads(path.read_text(encoding="utf-8"))
+        except _DRIVE_FUSE_IO_ERRORS:
+            return None
         except Exception:
             return None
     return None
@@ -2853,7 +2900,7 @@ def build_jobs_resume_report(
     for algo in algorithms:
         for scen in scenarios:
             run_dir = resolve_existing_job_run_dir(output_root, algo, scen, seed)
-            if run_dir is None or not Path(run_dir).exists():
+            if run_dir is None or not drive_path_exists(run_dir):
                 rows.append(
                     {
                         "algorithm": algo,
@@ -2957,11 +3004,11 @@ def print_jobs_resume_report(
 def list_madrl_v3_output_runs(parent: Path) -> List[Path]:
     """All ``madrl_v3_*`` directories under a Drive/local outputs parent."""
     parent = Path(parent)
-    if not parent.is_dir():
+    if not drive_path_is_dir(parent):
         return []
     try:
-        runs = [p for p in parent.glob("madrl_v3_*") if p.is_dir()]
-    except OSError:
+        runs = [p for p in parent.glob("madrl_v3_*") if drive_path_is_dir(p)]
+    except _DRIVE_FUSE_IO_ERRORS:
         return []
     return sorted(runs, key=lambda p: p.name)
 
@@ -2970,11 +3017,13 @@ def madrl_output_run_has_artifacts(output_root: Path) -> bool:
     """True when the run tree holds at least one restorable MADRL job folder."""
     output_root = Path(output_root)
     status_path = output_root / "official_full_status.json"
-    if status_path.is_file():
+    if drive_path_is_file(status_path):
         try:
             status = json.loads(status_path.read_text(encoding="utf-8"))
             if status.get("jobs"):
                 return True
+        except _DRIVE_FUSE_IO_ERRORS:
+            pass
         except Exception:
             pass
     for algo in DEFAULT_REPORT_ALGORITHMS:
@@ -2994,13 +3043,48 @@ def summarize_madrl_output_run(
 ) -> Dict[str, object]:
     """Summarize one output root from existing artifacts only (no invented progress)."""
     output_root = Path(output_root)
-    raw_artifacts = madrl_output_run_has_artifacts(output_root)
-    report = build_jobs_resume_report(
-        output_root,
-        target_episodes=target_episodes,
-        episode_time_steps=episode_time_steps,
-        happo_rollout_threads=happo_rollout_threads,
-    )
+    if is_colab_fuse_restricted_path(output_root):
+        return {
+            "output_root": str(output_root),
+            "run_name": output_root.name,
+            "has_artifacts": False,
+            "stub_only": False,
+            "restorable": False,
+            "completed_jobs": 0,
+            "resumable_jobs": 0,
+            "pending_jobs": 0,
+            "episodes_done": 0,
+            "episodes_target": 0,
+            "progress_pct": 0.0,
+            "score": 0.0,
+            "report": {},
+            "fuse_restricted": True,
+        }
+    try:
+        raw_artifacts = madrl_output_run_has_artifacts(output_root)
+        report = build_jobs_resume_report(
+            output_root,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        )
+    except _DRIVE_FUSE_IO_ERRORS:
+        return {
+            "output_root": str(output_root),
+            "run_name": output_root.name,
+            "has_artifacts": False,
+            "stub_only": False,
+            "restorable": False,
+            "completed_jobs": 0,
+            "resumable_jobs": 0,
+            "pending_jobs": 0,
+            "episodes_done": 0,
+            "episodes_target": 0,
+            "progress_pct": 0.0,
+            "score": 0.0,
+            "report": {},
+            "fuse_error": True,
+        }
     completed = int(report.get("completed") or 0)
     resumable = int(report.get("resumable") or 0)
     pending = int(report.get("pending") or 0)
@@ -3364,9 +3448,6 @@ def _candidate_output_dirs_on_colab_mount(
     _add(mount_point / "MyDrive" / project_name / "outputs")
     _add(mount_point / "MyDrive" / "MADRL_CityLearn_v3" / project_name / "outputs")
 
-    shortcut_root = mount_point / ".shortcut-targets-by-id" / CANONICAL_SHARED_DRIVE_FOLDER_ID
-    _add(shortcut_root / "outputs")
-
     mydrive = mount_point / "MyDrive"
     if mydrive.is_dir():
         try:
@@ -3421,6 +3502,8 @@ def list_madrl_runs_on_colab_mount(
         if not outputs.is_dir():
             continue
         for run_path in list_madrl_v3_output_runs(outputs):
+            if is_colab_fuse_restricted_path(run_path):
+                continue
             key = str(run_path)
             if key in seen:
                 continue
@@ -3682,6 +3765,8 @@ def ensure_shared_canonical_run_on_mount(
 
     summary = summarize_madrl_output_run(local_run)
     report["local_run_restorable"] = bool(summary.get("has_artifacts"))
+    if not report["local_run_restorable"] and drive_path_is_dir(local_run):
+        report["local_run_restorable"] = madrl_output_run_has_artifacts(local_run)
     if not report["local_run_restorable"]:
         report["error"] = (
             "shortcut creado pero el mount aun no muestra checkpoints; "
@@ -3721,6 +3806,8 @@ def bind_colab_drive_workspace(
     def _rank_runs(run_paths: Sequence[Path]) -> List[Dict[str, object]]:
         ranked: List[Dict[str, object]] = []
         for run_path in run_paths:
+            if is_colab_fuse_restricted_path(run_path):
+                continue
             summary = summarize_madrl_output_run(
                 run_path,
                 target_episodes=target_episodes,
@@ -3732,20 +3819,66 @@ def bind_colab_drive_workspace(
             score = float(summary.get("score") or 0.0)
             if run_path.name == preferred_run_name:
                 score += 10_000_000_000
+            if "/MyDrive/" in str(run_path).replace("\\", "/"):
+                score += 1_000_000
             ranked.append({"summary": summary, "score": score, "run_path": run_path})
         ranked.sort(key=lambda item: (item["score"], item["run_path"].name), reverse=True)
         return ranked
+
+    def _workspace_run_restorable(workspace_run: Path) -> Optional[Dict[str, object]]:
+        if not drive_path_is_dir(workspace_run):
+            return None
+        summary = summarize_madrl_output_run(
+            workspace_run,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        )
+        if summary.get("has_artifacts"):
+            return summary
+        return None
+
+    workspace_run = colab_workspace_run_path(default_workspace, preferred_run_name)
+    restricted_visible = restricted_canonical_run_visible(mount_point, preferred_run_name)
 
     _log("[..] Escaneando runs MADRL en paths conocidos de Drive...")
     mount_runs = list_madrl_runs_on_colab_mount(
         mount_point,
         project_name=project_name,
     )
-    _log(f"[..] Carpetas run en mount: {len(mount_runs)}")
+    _log(f"[..] Carpetas run en mount (MyDrive): {len(mount_runs)}")
+    if restricted_visible:
+        _log("[..] Run canonico visible via shortcut FUSE (se enlazara en MyDrive)...")
+
     ranked = _rank_runs(mount_runs)
     api_report: Optional[Dict[str, object]] = None
+    workspace_summary = _workspace_run_restorable(workspace_run)
 
-    if not ranked and allow_drive_api_shortcut:
+    need_workspace_link = (
+        allow_drive_api_shortcut
+        and workspace_summary is None
+        and (
+            restricted_visible
+            or not ranked
+            or all(str(item["run_path"].name) != preferred_run_name for item in ranked)
+        )
+    )
+    if need_workspace_link:
+        _log("[..] Creando/enlazando run canonico en MyDrive/outputs (writable)...")
+        api_report = ensure_shared_canonical_run_on_mount(
+            mount_point,
+            workspace_outputs=default_outputs,
+            run_name=preferred_run_name,
+        )
+        for _retry in range(3):
+            workspace_summary = _workspace_run_restorable(workspace_run)
+            if workspace_summary is not None:
+                break
+            if _retry < 2:
+                _log("[..] Esperando shortcut writable en MyDrive...")
+                time.sleep(3)
+
+    if workspace_summary is None and not ranked and allow_drive_api_shortcut and api_report is None:
         _log("[..] Run canonico no visible; intentando shortcut via Drive API...")
         api_report = ensure_shared_canonical_run_on_mount(
             mount_point,
@@ -3753,16 +3886,17 @@ def bind_colab_drive_workspace(
             run_name=preferred_run_name,
         )
         for _retry in range(3):
+            workspace_summary = _workspace_run_restorable(workspace_run)
+            if workspace_summary is not None:
+                break
+            if _retry < 2:
+                _log("[..] Esperando que el shortcut aparezca en el mount...")
+                time.sleep(3)
             mount_runs = list_madrl_runs_on_colab_mount(
                 mount_point,
                 project_name=project_name,
             )
             ranked = _rank_runs(mount_runs)
-            if ranked:
-                break
-            if _retry < 2:
-                _log("[..] Esperando que el shortcut aparezca en el mount...")
-                time.sleep(3)
 
     summaries = [
         summarize_madrl_output_run(
@@ -3778,10 +3912,21 @@ def bind_colab_drive_workspace(
 
     gdrive_root = default_workspace
     output_root: Optional[Path] = None
-    if best is not None:
+    selected_summary: Optional[Dict[str, object]] = None
+
+    if workspace_summary is not None:
+        output_root = workspace_run
+        selected_summary = workspace_summary
+    elif best is not None:
         run_path = Path(str(best["run_path"]))
+        if is_colab_fuse_restricted_path(run_path):
+            raise RuntimeError(
+                f"Run MADRL legible solo en ruta FUSE restringida ({run_path}). "
+                f"Re-ejecuta celda 1.5 para enlazar en {workspace_run}."
+            )
         output_root = run_path
         gdrive_root = run_path.parent.parent
+        selected_summary = best["summary"]
 
     pointer_path = gdrive_root / "latest_colab_output_root.txt"
     pointer_value = None
@@ -3793,7 +3938,11 @@ def bind_colab_drive_workspace(
         ).read_text(encoding="utf-8").strip()
         pointer_path.write_text(pointer_value + "\n", encoding="utf-8")
 
-    is_correct_drive = bool(best is not None)
+    is_correct_drive = (
+        output_root is not None
+        and selected_summary is not None
+        and bool(selected_summary.get("has_artifacts"))
+    )
     binding: Dict[str, object] = {
         "mount_point": str(mount_point),
         "project_name": project_name,
@@ -3806,7 +3955,7 @@ def bind_colab_drive_workspace(
         "is_correct_drive": is_correct_drive,
         "mount_runs": [str(p) for p in mount_runs],
         "stub_runs": [str(s.get("run_name") or "") for s in stub_runs],
-        "selected_summary": best["summary"] if best else None,
+        "selected_summary": selected_summary,
         "api_report": api_report,
         "shared_folder_url": CANONICAL_SHARED_DRIVE_URL,
     }
