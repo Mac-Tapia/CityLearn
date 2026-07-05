@@ -3172,19 +3172,138 @@ def load_training_common_module(repo: Path):
     return mod
 
 
-def read_preferred_output_root_hint(repo: Path) -> Optional[Path]:
-    """Read ``outputs/latest_colab_output_root.txt`` when it points to an existing run."""
+def read_preferred_output_root_hint(
+    repo: Path,
+    *,
+    gdrive_root: Optional[Path] = None,
+) -> Optional[Path]:
+    """Read Drive pointer files; prefer ``GDRIVE_ROOT/latest_colab_output_root.txt`` (shared folder)."""
     repo = Path(repo)
-    hint_path = repo / "outputs" / "latest_colab_output_root.txt"
-    if not hint_path.is_file():
+    gdrive_root = Path(gdrive_root) if gdrive_root else None
+
+    def _resolve_raw(raw: str, base: Path) -> Optional[Path]:
+        raw = str(raw or "").strip()
+        if not raw:
+            return None
+        candidate = Path(raw)
+        if candidate.is_absolute():
+            return candidate if candidate.is_dir() else None
+        for root in (base, base / "outputs", repo, repo / "outputs"):
+            trial = (root / candidate).resolve()
+            if trial.is_dir():
+                return trial
         return None
-    raw = hint_path.read_text(encoding="utf-8").strip()
-    if not raw:
+
+    hint_sources: List[Path] = []
+    if gdrive_root is not None:
+        hint_sources.extend(
+            [
+                gdrive_root / "latest_colab_output_root.txt",
+                gdrive_root / "latest_visible_training_output_root.txt",
+                gdrive_root / "outputs" / "latest_colab_output_root.txt",
+                gdrive_root / "outputs" / "latest_visible_training_output_root.txt",
+            ]
+        )
+    hint_sources.extend(
+        [
+            repo / "outputs" / "latest_colab_output_root.txt",
+            repo / "outputs" / "latest_visible_training_output_root.txt",
+        ]
+    )
+
+    seen: set = set()
+    for hint_path in hint_sources:
+        key = str(hint_path)
+        if key in seen or not hint_path.is_file():
+            continue
+        seen.add(key)
+        base = gdrive_root if gdrive_root is not None else repo
+        resolved = _resolve_raw(hint_path.read_text(encoding="utf-8"), base)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def discover_colab_gdrive_workspace(
+    mount_point: Path,
+    *,
+    project_name: str = "MADRLCitytleranflexresdr",
+    repo: Optional[Path] = None,
+) -> Optional[Path]:
+    """Find the shared Drive workspace root (contains ``outputs/`` and pointer txt)."""
+    mount_point = Path(mount_point)
+    mydrive = mount_point / "MyDrive"
+    seeds: List[Path] = []
+    if mydrive.is_dir():
+        seeds.append(mydrive / project_name)
+        try:
+            for child in mydrive.iterdir():
+                name = child.name
+                if child.is_dir() and project_name.lower() in name.lower():
+                    seeds.append(child)
+        except OSError:
+            pass
+
+    seen: set = set()
+    ranked: List[tuple] = []
+    for seed in seeds:
+        key = str(seed)
+        if key in seen or not seed.is_dir():
+            continue
+        seen.add(key)
+        has_outputs = (seed / "outputs").is_dir()
+        has_pointer = (seed / "latest_colab_output_root.txt").is_file()
+        if not has_outputs and not has_pointer:
+            continue
+        hint_run = read_preferred_output_root_hint(repo or Path("."), gdrive_root=seed)
+        score = 0.0
+        if hint_run is not None:
+            summary = summarize_madrl_output_run(hint_run)
+            score = float(summary.get("score") or 0.0)
+            if summary.get("has_artifacts"):
+                score += 1_000_000_000
+        if has_pointer:
+            score += 1.0
+        ranked.append((score, seed))
+
+    if not ranked:
         return None
-    candidate = Path(raw)
-    if not candidate.is_absolute():
-        candidate = (repo / candidate).resolve()
-    return candidate if candidate.is_dir() else None
+    ranked.sort(key=lambda item: (item[0], str(item[1])), reverse=True)
+    return ranked[0][1]
+
+
+def resolve_canonical_output_root_from_drive(
+    gdrive_root: Path,
+    *,
+    repo: Optional[Path] = None,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+) -> Optional[Path]:
+    """Return restorable ``OUTPUT_ROOT`` from Drive pointer + artifact audit."""
+    gdrive_root = Path(gdrive_root)
+    hinted = read_preferred_output_root_hint(repo or Path("."), gdrive_root=gdrive_root)
+    if hinted is not None:
+        summary = summarize_madrl_output_run(
+            hinted,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        )
+        if summary.get("has_artifacts"):
+            return Path(str(summary["output_root"]))
+    outputs_parent = gdrive_root / "outputs"
+    if outputs_parent.is_dir():
+        best = select_best_resume_output_root(
+            outputs_parent,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+            preferred_output_root=hinted,
+        )
+        if best is not None:
+            return Path(str(best["output_root"]))
+    return None
 
 
 def sync_output_root_pointer_files(
@@ -3258,7 +3377,21 @@ def pick_colab_output_root(
     """Select ``OUTPUT_ROOT`` from Drive artifacts (never prefer empty timestamp stubs)."""
     base_output_parent = Path(base_output_parent)
     repo_path = Path(repo) if repo else None
-    preferred = read_preferred_output_root_hint(repo_path) if repo_path else None
+    gdrive_path = Path(gdrive_root) if gdrive_root else None
+    preferred = (
+        read_preferred_output_root_hint(repo_path or Path("."), gdrive_root=gdrive_path)
+        if repo_path or gdrive_path
+        else None
+    )
+    canonical_from_drive: Optional[Path] = None
+    if gdrive_path is not None:
+        canonical_from_drive = resolve_canonical_output_root_from_drive(
+            gdrive_path,
+            repo=repo_path,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        )
 
     if in_colab and str(base_output_parent).startswith("/content/drive/"):
         if not base_output_parent.parent.exists():
@@ -3288,42 +3421,55 @@ def pick_colab_output_root(
         resume_reason = "NUEVO run (FORCE_NEW_RUN)"
         created_new_run = True
     elif auto_resume_latest:
-        best = audit.get("best")
-        if isinstance(best, Mapping):
-            output_root = Path(str(best["output_root"]))
+        if canonical_from_drive is not None:
+            output_root = canonical_from_drive
+            summary = summarize_madrl_output_run(
+                output_root,
+                target_episodes=target_episodes,
+                episode_time_steps=episode_time_steps,
+                happo_rollout_threads=happo_rollout_threads,
+            )
             resume_reason = (
-                "AUTO-RESUME mejor run por artefactos "
-                f"({best.get('completed_jobs', 0)}/12 completos, "
-                f"~{float(best.get('progress_pct') or 0.0):.1f}%)"
+                "AUTO-RESUME run canonico desde Drive compartido "
+                f"({summary.get('completed_jobs', 0)}/12 completos, "
+                f"~{float(summary.get('progress_pct') or 0.0):.1f}%)"
             )
-        elif int(audit.get("runs_with_artifacts") or 0) > 0:
-            raise RuntimeError(
-                "Hay carpetas madrl_v3_* con artefactos MADRL en Drive pero no se pudo "
-                "seleccionar un run. Define RESUME_OUTPUT_ROOT manualmente en celda 2.1."
-            )
-        elif list_madrl_v3_output_runs(base_output_parent):
-            stub_names = [
-                str(s.get("run_name") or "")
-                for s in (audit.get("summaries") or [])
-                if s.get("stub_only")
-            ]
-            if stub_names:
-                raise RuntimeError(
-                    "Drive solo tiene runs STUB (p. ej. results.json salvage copiado sin "
-                    f"checkpoints .pt): {', '.join(stub_names)}. "
-                    "NO entrenes sobre ellos. Copia el run canónico "
-                    "madrl_v3_20260627_164047 bajo "
-                    f"{base_output_parent} (desde tu carpeta Drive compartida), "
-                    "luego re-ejecuta 2.1; o define RESUME_OUTPUT_ROOT con la ruta exacta "
-                    "del run que tenga HAPPO/*/checkpoints/."
-                )
-            output_root = base_output_parent / run_label
-            resume_reason = "NUEVO run (runs previos vacios, sin artefactos MADRL)"
-            created_new_run = True
         else:
-            output_root = base_output_parent / run_label
-            resume_reason = "NUEVO run (no habia runs previos)"
-            created_new_run = True
+            best = audit.get("best")
+            if isinstance(best, Mapping):
+                output_root = Path(str(best["output_root"]))
+                resume_reason = (
+                    "AUTO-RESUME mejor run por artefactos "
+                    f"({best.get('completed_jobs', 0)}/12 completos, "
+                    f"~{float(best.get('progress_pct') or 0.0):.1f}%)"
+                )
+            elif int(audit.get("runs_with_artifacts") or 0) > 0:
+                raise RuntimeError(
+                    "Hay carpetas madrl_v3_* con artefactos MADRL en Drive pero no se pudo "
+                    "seleccionar un run. Define RESUME_OUTPUT_ROOT manualmente en celda 2.1."
+                )
+            elif list_madrl_v3_output_runs(base_output_parent):
+                stub_names = [
+                    str(s.get("run_name") or "")
+                    for s in (audit.get("summaries") or [])
+                    if s.get("stub_only")
+                ]
+                if stub_names:
+                    raise RuntimeError(
+                        "Drive solo tiene runs STUB (p. ej. results.json salvage copiado sin "
+                        f"checkpoints .pt): {', '.join(stub_names)}. "
+                        "Usa la carpeta compartida MADRLCitytleranflexresdr "
+                        "(https://drive.google.com/drive/folders/1ihH6RqL2KpevfCQEUXj7PP1aS2QYssAX): "
+                        "añádela a Mi unidad, ejecuta celda 1.5 y verifica "
+                        "outputs/madrl_v3_20260627_164047 con checkpoints."
+                    )
+                output_root = base_output_parent / run_label
+                resume_reason = "NUEVO run (runs previos vacios, sin artefactos MADRL)"
+                created_new_run = True
+            else:
+                output_root = base_output_parent / run_label
+                resume_reason = "NUEVO run (no habia runs previos)"
+                created_new_run = True
     else:
         output_root = base_output_parent / run_label
         resume_reason = "NUEVO run (AUTO_RESUME_LATEST=False)"
@@ -3338,6 +3484,13 @@ def pick_colab_output_root(
         if selected is None and isinstance(audit.get("best"), Mapping):
             if str(audit["best"].get("output_root")) == str(output_root):
                 selected = audit["best"]
+        if selected is None and canonical_from_drive is not None and str(output_root) == str(canonical_from_drive):
+            selected = summarize_madrl_output_run(
+                output_root,
+                target_episodes=target_episodes,
+                episode_time_steps=episode_time_steps,
+                happo_rollout_threads=happo_rollout_threads,
+            )
 
     if print_audit:
         print_madrl_drive_runs_audit(audit, selected=selected)
