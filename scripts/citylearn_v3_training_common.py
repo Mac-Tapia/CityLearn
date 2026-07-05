@@ -952,16 +952,17 @@ def flush_filesystem_buffers() -> None:
         pass
 
 
-def fsync_file(path: Path) -> None:
+def fsync_file(path: Path, *, allow_mydrive: bool = False) -> None:
     """Best-effort durable flush of a single file to disk/Drive.
 
-    Skips on Colab MyDrive FUSE (``CITYLEARN_DRIVE_FSYNC=auto``): per-file fsync
-    on 3× parallel HAPPO live_progress writers stalls the mount for minutes.
+    On Colab MyDrive (``CITYLEARN_DRIVE_FSYNC=auto``) skips fsync by default.
+    Pass ``allow_mydrive=True`` for throttled live_progress flushes so the monitor
+    process sees worker updates across FUSE without global ``os.sync()``.
     """
     mode = str(os.environ.get("CITYLEARN_DRIVE_FSYNC", "auto")).strip().lower()
     if mode in {"0", "false", "no", "skip", "off"}:
         return
-    if mode == "auto" and _colab_mydrive_mount_active():
+    if mode == "auto" and _colab_mydrive_mount_active() and not allow_mydrive:
         return
 
     try:
@@ -977,6 +978,22 @@ def fsync_file(path: Path) -> None:
             os.close(fd)
         except OSError:
             pass
+
+
+def _live_progress_should_fsync(payload: Mapping[str, object]) -> bool:
+    """Throttled fsync for cross-process monitor on Drive; skip heartbeats."""
+    if payload.get("backend_training_active"):
+        return False
+    status = str(payload.get("live_status") or "")
+    if status.startswith(("happo_backend", "masac_backend", "matd3_backend", "maac_backend")):
+        return False
+
+    ep_step = int(payload.get("episode_step") or 0)
+    ep_len = max(int(payload.get("episode_time_steps") or 8760), 1)
+    if ep_step >= ep_len - 1 or status in {"training_finalized", "resume_preload_lightweight"}:
+        return True
+    # Visible to panel every 300 env steps without the global-step %300 stall bug.
+    return ep_step > 0 and ep_step % 300 == 0
 
 
 def _artifact_layout_payload(dirs: Mapping[str, Path]) -> Dict[str, str]:
@@ -8534,7 +8551,8 @@ class CityLearnV3BackendAdapter:
             f"{self.live_progress_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
         )
         tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
-        fsync_file(tmp_path)
+        do_fsync = _live_progress_should_fsync(payload)
+        fsync_file(tmp_path, allow_mydrive=do_fsync)
 
         try:
             tmp_path.replace(self.live_progress_path)
@@ -8545,7 +8563,7 @@ class CityLearnV3BackendAdapter:
             except PermissionError:
                 tmp_path.unlink(missing_ok=True)
                 return
-        fsync_file(self.live_progress_path)
+        fsync_file(self.live_progress_path, allow_mydrive=do_fsync)
 
     def kpi_summary(self) -> Dict[str, object]:
         return {
