@@ -1167,14 +1167,15 @@ def run_one_job(
                 {
                     "--n-rollout-threads": "1",
                     "--torch-threads": "1",
-                    "--live-progress-interval": "300",
-                    "--live-heartbeat-seconds": "300",
+                    "--live-progress-interval": "8760",
+                    "--live-heartbeat-seconds": "600",
+                    "--trace-record-interval": "0",
                     "--lightweight-resume-preload": None,
                 },
             )
             print(
                 f"[launcher] HAPPO salvage KPI tail {scenario}: "
-                "n_rollout_threads=1, live-progress/heartbeat=300 (Drive-safe)",
+                "n_rollout=1, live-progress=ep-boundary, heartbeat=600, trace=off (Drive-safe)",
                 flush=True,
             )
 

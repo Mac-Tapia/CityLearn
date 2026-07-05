@@ -953,7 +953,16 @@ def flush_filesystem_buffers() -> None:
 
 
 def fsync_file(path: Path) -> None:
-    """Best-effort durable flush of a single file to disk/Drive."""
+    """Best-effort durable flush of a single file to disk/Drive.
+
+    Skips on Colab MyDrive FUSE (``CITYLEARN_DRIVE_FSYNC=auto``): per-file fsync
+    on 3× parallel HAPPO live_progress writers stalls the mount for minutes.
+    """
+    mode = str(os.environ.get("CITYLEARN_DRIVE_FSYNC", "auto")).strip().lower()
+    if mode in {"0", "false", "no", "skip", "off"}:
+        return
+    if mode == "auto" and _colab_mydrive_mount_active():
+        return
 
     try:
         fd = os.open(str(path), os.O_RDONLY)
@@ -8321,9 +8330,11 @@ class CityLearnV3BackendAdapter:
         episode_length = max(int(self.episode_time_steps), 1)
         ep_step = int(timeseries_row.get("episode_step") or 0)
         is_episode_boundary = bool(timeseries_row.get("all_done")) or ep_step >= episode_length - 1
+        # Use episode_step (not global_step) so resumed jobs (e.g. ep 49 -> gs=428040)
+        # do not spuriously flush live_progress at ep_step 60 when 428100 % 300 == 0.
         if (
             not is_episode_boundary
-            and int(timeseries_row["global_step"]) % self.live_progress_interval != 0
+            and ep_step % self.live_progress_interval != 0
         ):
             return
 
