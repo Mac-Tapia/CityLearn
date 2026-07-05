@@ -68,6 +68,11 @@ def parse_args():
     parser.add_argument("--action-aggregation", default="mean", choices=("mean", "prod"))
     parser.add_argument("--cuda", action="store_true")
     parser.add_argument("--exp-name", default="citylearn_v3_happo")
+    parser.add_argument(
+        "--lightweight-resume-preload",
+        action="store_true",
+        help="Salvage KPI tail: skip streaming 49x8760 CSV rows from Drive; advance counters only.",
+    )
     return parser.parse_args()
 
 
@@ -133,6 +138,22 @@ def main() -> int:
     happo_resume_completed = (
         int(resume_plan["completed_episodes"]) if resume_plan.get("active") else 0
     )
+    from citylearn_v3_training_common import happo_salvage_kpi_tail_job
+
+    happo_lightweight_preload = bool(getattr(args, "lightweight_resume_preload", False))
+    if not happo_lightweight_preload and resume_plan.get("active"):
+        happo_lightweight_preload = happo_salvage_kpi_tail_job(
+            output_dir,
+            target_episodes=int(resume_plan.get("target_episodes") or args.episodes or 50),
+            episode_time_steps=int(args.episode_time_steps),
+            rollout_threads=rollout_threads,
+            output_root=training_output_root,
+        )
+    if happo_lightweight_preload:
+        print(
+            "[happo] lightweight resume preload (salvage KPI tail) — skip Drive CSV rewrite",
+            flush=True,
+        )
 
     def make_citylearn_train_env(env_name, seed, n_threads, env_args):
         def make_env(rank):
@@ -162,6 +183,7 @@ def main() -> int:
                     trace_detail=args.trace_detail,
                     normalize_observations=args.normalize_observations,
                     resume_completed_episodes=_rank_offset,
+                    resume_preload_lightweight=happo_lightweight_preload and rank == 0,
                 )
                 if rank == 0:
                     print(

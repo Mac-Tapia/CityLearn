@@ -484,6 +484,10 @@ def scenario_list(value: str) -> List[str]:
 
 def replace_arg(args: List[str], flag: str, value: object) -> List[str]:
     output = list(args)
+    if value is None:
+        if flag not in output:
+            output.append(flag)
+        return output
     if flag in output:
         idx = output.index(flag)
         if idx + 1 < len(output):
@@ -1165,6 +1169,7 @@ def run_one_job(
                     "--torch-threads": "1",
                     "--live-progress-interval": "300",
                     "--live-heartbeat-seconds": "300",
+                    "--lightweight-resume-preload": None,
                 },
             )
             print(

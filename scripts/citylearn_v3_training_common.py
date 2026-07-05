@@ -7484,6 +7484,7 @@ class CityLearnV3BackendAdapter:
         trace_detail: str = "full",
         normalize_observations: bool = True,
         resume_completed_episodes: int = 0,
+        resume_preload_lightweight: bool = False,
     ):
         ensure_project_paths()
         from citylearn.v3 import make_citylearn_v3_env, make_citylearn_v3_project_env
@@ -7678,7 +7679,10 @@ class CityLearnV3BackendAdapter:
         # SubprocVecEnv worker processes (where the live_progress/CSV-writing adapter
         # actually lives). Single-process backends (MASAC/MATD3/MAAC) can also use it.
         if int(resume_completed_episodes or 0) > 0:
-            self.preload_resume_artifacts(int(resume_completed_episodes))
+            self.preload_resume_artifacts(
+                int(resume_completed_episodes),
+                lightweight=bool(resume_preload_lightweight),
+            )
 
     def seed(self, seed: int) -> None:
         self.seed_value = int(seed)
@@ -7741,13 +7745,22 @@ class CityLearnV3BackendAdapter:
     def close(self) -> None:
         self.env.close()
 
-    def preload_resume_artifacts(self, completed_episodes: int) -> Dict[str, int]:
+    def preload_resume_artifacts(
+        self,
+        completed_episodes: int,
+        *,
+        lightweight: bool = False,
+    ) -> Dict[str, int]:
         """Resume-safe preload: keep prior per-step rows for already COMPLETED episodes
         so the resumed job continues timeseries.csv/trace.csv instead of restarting them.
 
         Truncates any partial-episode tail (that episode is re-run from checkpoint),
         rewrites the incremental CSVs to the clean kept set, and advances global_step /
         reset_count so episode numbering stays continuous (episodes 0..N seamless).
+
+        ``lightweight=True`` (HAPPO salvage KPI tail, 1 ep left): only advance step
+        counters — skip streaming ~49×8760 CSV rows from Google Drive FUSE (minutes of
+        idle GPU/RAM before env step 1).
         """
         summary = {"timeseries_rows": 0, "trace_rows": 0, "completed_episodes": 0}
         completed = max(0, int(completed_episodes))
@@ -7755,6 +7768,31 @@ class CityLearnV3BackendAdapter:
             return summary
 
         episode_length = max(int(self.episode_time_steps), 1)
+        if lightweight:
+            self.global_step = completed * episode_length
+            self.reset_count = completed
+            self.completed_episode_count = completed
+            summary["completed_episodes"] = completed
+            if self.live_progress_path is not None:
+                self._atomic_write_live_payload(
+                    {
+                        "global_step": self.global_step,
+                        "episode": completed,
+                        "episode_step": 0,
+                        "completed_episode_count": completed,
+                        "scenario": self.scenario,
+                        "algorithm": self.algorithm,
+                        "episode_time_steps": episode_length,
+                        "live_status": "resume_preload_lightweight",
+                        "live_status_note": (
+                            f"Skipped Drive CSV rewrite for {completed} completed episodes; "
+                            "continuing ep tail from checkpoint."
+                        ),
+                        "live_status_updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            return summary
+
         if self.live_progress_path is not None:
             self.write_live_heartbeat(
                 stage="resume_preload",
