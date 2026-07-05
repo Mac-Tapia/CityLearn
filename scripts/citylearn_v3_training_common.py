@@ -3300,7 +3300,7 @@ def assert_canonical_colab_skip_plan(
     lines.extend(
         [
             "  Accion:",
-            "  1) Re-ejecuta 1.2 -> 1.5 -> 2.1 (mirror FUSE completo; puede tardar 10-20 min).",
+            "  1) Re-ejecuta 1.2 -> 1.5 -> 2.1 (audita outputs/ en Drive sin mirror).",
             "  2) Vuelve a 2.1b. Si HAPPO sigue sin checkpoints: celda 2.3 (salvage 49->50).",
             "  3) NO ejecutes 7.2 hasta ver PASS aqui.",
         ]
