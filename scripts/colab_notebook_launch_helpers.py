@@ -383,7 +383,7 @@ def prepare_colab_cell_72_standalone(
     print(f"[7.2 bootstrap] OUTPUT_ROOT = {output_root}")
     print(f"[7.2 bootstrap] HAPPO rollout_threads = {config['HAPPO_ROLLOUT_THREADS']}")
     print(
-        "[7.2 bootstrap] Launcher: 9 SKIP + 3 HAPPO salvage (serial, n_rollout=1) "
+        "[7.2 bootstrap] Launcher: 9 SKIP + 3 HAPPO salvage (paralelo si VRAM, n_rollout=1) "
         "cuando aplique"
     )
 

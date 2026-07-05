@@ -3196,11 +3196,11 @@ def preview_job_launcher_decision(
                     "remaining_episodes": remaining,
                     "status_line": (
                         f"SALVAGE KPI ep {completed}/{target_episodes} "
-                        f"(falta ep {target_episodes}; preferir celda 2.3 o 7.2 serial)"
+                        f"(falta ep {target_episodes}; preferir celda 2.3 o 7.2 con VRAM suficiente)"
                     ),
                     "launcher_line": (
-                        "RUN: salvage KPI tail — 7.2 usa 1 HAPPO serial + 1 rollout thread; "
-                        "o celda 2.3 (regenerate_happo_kpis)"
+                        "RUN: salvage KPI tail — 7.2 paraleliza tails si VRAM alcanza "
+                        "(n_rollout=1); o celda 2.3 (regenerate_happo_kpis)"
                     ),
                 }
             )
@@ -5468,7 +5468,7 @@ def bootstrap_colab_notebook_cell_72(
         print(
             f"  Plan         : {report.get('completed', 0)} SKIP + "
             f"{report.get('resumable', 0)} activos "
-            f"(HAPPO salvage serial si 3 tails 49/50)"
+            f"(HAPPO salvage en paralelo si VRAM alcanza; CITYLEARN_HAPPO_SALVAGE_SERIAL=1 fuerza serial)"
         )
         print_jobs_resume_report(report, show_footer_hint=False)
         if require_canonical_plan:

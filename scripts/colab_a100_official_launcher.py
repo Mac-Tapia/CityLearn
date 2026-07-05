@@ -1766,14 +1766,14 @@ def _run_backfill_schedule(
     return overall_rc
 
 
-def _happo_salvage_tail_serial_mode(
+def _happo_salvage_tail_pending_count(
     *,
     root: Path,
     jobs: List[Dict[str, object]],
     output_root: Path,
     args: argparse.Namespace,
-) -> bool:
-    """True when every pending HAPPO job is a salvage KPI tail (49/50) — run serially."""
+) -> tuple[int, int]:
+    """Return (pending_salvage_tails, pending_other_happo) among incomplete HAPPO jobs."""
     from citylearn_v3_training_common import (
         happo_salvage_kpi_tail_job,
         job_counts_as_launcher_complete,
@@ -1803,7 +1803,90 @@ def _happo_salvage_tail_serial_mode(
             pending_tail += 1
         else:
             pending_other += 1
-    return pending_tail > 0 and pending_other == 0
+    return pending_tail, pending_other
+
+
+def _happo_salvage_tail_concurrency_cap(
+    *,
+    pending_tail: int,
+    pending_other: int,
+    vram_gib: float,
+    cuda_fraction: float,
+) -> Optional[int]:
+    """Parallel cap for salvage KPI tails only; None = no salvage-specific override.
+
+    Default (auto): run all salvage tails in parallel when VRAM fits (n_rollout=1
+    per job). Serial only on low VRAM or CITYLEARN_HAPPO_SALVAGE_SERIAL=1.
+    Drive stall (os.sync + CSV preload) is already mitigated elsewhere.
+    """
+    if pending_tail <= 0 or pending_other > 0:
+        return None
+
+    mode = str(os.environ.get("CITYLEARN_HAPPO_SALVAGE_SERIAL", "auto")).strip().lower()
+    if mode in {"1", "true", "yes", "force", "serial"}:
+        return 1
+
+    job_gib = float(cuda_fraction) * float(vram_gib)
+    usable_gib = 0.92 * float(vram_gib)
+    vram_parallel = max(1, int(usable_gib // max(job_gib, 1e-6)))
+    cap = min(pending_tail, vram_parallel)
+
+    if mode in {"0", "false", "no", "never", "parallel"}:
+        return cap
+
+    # auto: parallel when GPU fits all pending salvage jobs
+    return cap
+
+
+def _happo_salvage_tail_serial_mode(
+    *,
+    root: Path,
+    jobs: List[Dict[str, object]],
+    output_root: Path,
+    args: argparse.Namespace,
+) -> bool:
+    """Legacy helper: True only when salvage tails are forced to serial (cap == 1)."""
+    pending_tail, pending_other = _happo_salvage_tail_pending_count(
+        root=root, jobs=jobs, output_root=output_root, args=args
+    )
+    vram_gib = float(getattr(args, "_detected_vram_gib", 0.0) or 80.0)
+    cap = _happo_salvage_tail_concurrency_cap(
+        pending_tail=pending_tail,
+        pending_other=pending_other,
+        vram_gib=vram_gib,
+        cuda_fraction=_phase_cuda_fraction(args),
+    )
+    return cap == 1 and pending_tail > 0 and pending_other == 0
+
+
+def _is_happo_salvage_only_plan(
+    *,
+    root: Path,
+    jobs: List[Dict[str, object]],
+    output_root: Path,
+    args: argparse.Namespace,
+    pending_salvage: int,
+    pending_other_happo: int,
+) -> bool:
+    """True only for 9 SKIP + N HAPPO salvage tails — does not alter full two-phase runs."""
+    if pending_salvage <= 0 or pending_other_happo > 0:
+        return False
+    from citylearn_v3_training_common import job_counts_as_launcher_complete
+
+    for job in jobs:
+        name = str(job.get("name", "")).lower()
+        if name == "happo":
+            continue
+        scenario = str(job.get("scenario", ""))
+        job_run_dir = run_dir(output_root, name, scenario, args.seed)
+        job_output_dir = path_for_status(root, job_run_dir)
+        if not job_counts_as_launcher_complete(
+            job_output_dir,
+            target_episodes=int(args.episodes),
+            output_root=output_root,
+        ):
+            return False
+    return True
 
 
 def run_dynamic_backfill_jobs(
@@ -1895,16 +1978,42 @@ def run_dynamic_backfill_jobs(
         deps = ", ".join(f"MATD3/{s}<-(HAPPO/{s} or MAAC/{s})" for s in scenarios)
         print(f"[launcher] phase-2 dependencies: {deps}", flush=True)
 
-    if _happo_salvage_tail_serial_mode(
+    pending_salvage, pending_other_happo = _happo_salvage_tail_pending_count(
         root=root, jobs=jobs, output_root=output_root, args=args
+    )
+    salvage_cap = _happo_salvage_tail_concurrency_cap(
+        pending_tail=pending_salvage,
+        pending_other=pending_other_happo,
+        vram_gib=vram_gib,
+        cuda_fraction=cuda_fraction,
+    )
+    salvage_only = _is_happo_salvage_only_plan(
+        root=root,
+        jobs=jobs,
+        output_root=output_root,
+        args=args,
+        pending_salvage=pending_salvage,
+        pending_other_happo=pending_other_happo,
+    )
+    if (
+        salvage_only
+        and salvage_cap is not None
+        and max_workers > salvage_cap
     ):
-        if max_workers > 1:
+        if salvage_cap >= pending_salvage:
             print(
-                "[launcher] HAPPO salvage KPI tails (49/50): concurrency -> 1 "
-                "(serial; evita bloqueo Drive/FUSE con 3×HAPPO en paralelo)",
+                f"[launcher] HAPPO salvage-only (9 SKIP + {pending_salvage} tails): "
+                f"concurrency -> {salvage_cap} en paralelo "
+                f"(VRAM ~{cuda_fraction * vram_gib:.0f} GiB/job; two_phase sin cambios en runs completos)",
                 flush=True,
             )
-        max_workers = 1
+        else:
+            print(
+                f"[launcher] HAPPO salvage-only: concurrency {max_workers} -> {salvage_cap} "
+                f"(VRAM {vram_gib:.0f} GiB; CITYLEARN_HAPPO_SALVAGE_SERIAL=1 fuerza serial)",
+                flush=True,
+            )
+        max_workers = salvage_cap
 
     def _submit(pool: ThreadPoolExecutor, job: Mapping[str, object]):
         return pool.submit(
