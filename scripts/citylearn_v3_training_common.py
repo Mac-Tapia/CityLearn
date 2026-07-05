@@ -3308,6 +3308,107 @@ def assert_canonical_colab_skip_plan(
     raise RuntimeError("\n".join(lines))
 
 
+def colab_mydrive_run_plan_ready(
+    output_root: Path,
+    *,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+    require_canonical_plan: bool = False,
+) -> bool:
+    """True when a writable MyDrive run already has enough state to skip FUSE mirror."""
+    output_root = Path(output_root)
+    if not drive_path_is_dir(output_root):
+        return False
+    try:
+        if require_canonical_plan:
+            report = build_jobs_resume_report(
+                output_root,
+                target_episodes=target_episodes,
+                episode_time_steps=episode_time_steps,
+                happo_rollout_threads=happo_rollout_threads,
+            )
+            return bool(validate_canonical_colab_skip_plan(report).get("ok"))
+        summary = summarize_madrl_output_run(
+            output_root,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        )
+        return bool(summary.get("has_artifacts"))
+    except _DRIVE_FUSE_IO_ERRORS:
+        return False
+
+
+def resolve_colab_mydrive_resume_root(
+    gdrive_root: Path,
+    *,
+    repo: Optional[Path] = None,
+    resume_output_root: Optional[str] = None,
+    preferred_run_name: Optional[str] = None,
+    target_episodes: int = 50,
+    episode_time_steps: int = 8760,
+    happo_rollout_threads: Optional[int] = None,
+    require_canonical_plan: bool = False,
+) -> Optional[Path]:
+    """Pick a writable MyDrive run for Colab reconnect (no FUSE mirror)."""
+    gdrive_root = Path(gdrive_root)
+    preferred_run_name = preferred_run_name or (
+        preferred_canonical_run_name(repo) if repo is not None else DEFAULT_CANONICAL_RUN_NAME
+    )
+    candidates: List[Path] = []
+    manual = str(resume_output_root or "").strip()
+    if manual:
+        candidates.append(Path(manual))
+    candidates.append(colab_workspace_run_path(gdrive_root, preferred_run_name))
+    if repo is not None:
+        hinted = read_preferred_output_root_hint(repo, gdrive_root=gdrive_root)
+        if hinted is not None:
+            candidates.append(Path(hinted))
+    pointer = gdrive_root / "latest_colab_output_root.txt"
+    if drive_path_is_file(pointer):
+        try:
+            text = pointer.read_text(encoding="utf-8").strip()
+            if text:
+                hinted_path = Path(text)
+                if not hinted_path.is_absolute():
+                    hinted_path = gdrive_root / "outputs" / hinted_path.name
+                candidates.append(hinted_path)
+        except _DRIVE_FUSE_IO_ERRORS:
+            pass
+
+    seen: set = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if colab_mydrive_run_plan_ready(
+            path,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+            require_canonical_plan=require_canonical_plan,
+        ):
+            return path
+
+    if require_canonical_plan:
+        for path in candidates:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            if colab_mydrive_run_plan_ready(
+                path,
+                target_episodes=target_episodes,
+                episode_time_steps=episode_time_steps,
+                happo_rollout_threads=happo_rollout_threads,
+                require_canonical_plan=False,
+            ):
+                return path
+    return None
+
+
 def build_jobs_resume_report(
     output_root: Path,
     *,
@@ -4224,6 +4325,7 @@ def ensure_colab_output_run_ready(
     episode_time_steps: int = 8760,
     happo_rollout_threads: Optional[int] = None,
     allow_drive_api_shortcut: bool = True,
+    skip_fuse_mirror: bool = False,
     verbose: bool = True,
 ) -> Dict[str, object]:
     """Cell 2.1 prep: mirror FUSE / Drive API so canonical run is writable on MyDrive."""
@@ -4275,68 +4377,128 @@ def ensure_colab_output_run_ready(
         return None
 
     workspace_run = colab_workspace_run_path(gdrive_root, preferred_run_name)
-    fuse_src = resolve_fuse_canonical_run_path(
-        mount_point,
-        preferred_run_name,
-        project_name=project_name,
-    )
-    restricted_visible = fuse_src is not None
+    is_canonical_run = preferred_run_name == preferred_canonical_run_name(repo)
     mirror_report: Optional[Dict[str, object]] = None
     skip_plan_validation: Optional[Dict[str, object]] = None
-
-    _log("[..] Escaneando runs MADRL en MyDrive...")
-    mount_runs = list_madrl_runs_on_colab_mount(
-        mount_point,
-        project_name=project_name,
-    )
-    _log(f"[..] Carpetas run en MyDrive: {len(mount_runs)}")
-    if restricted_visible and fuse_src is not None:
-        _log(f"[..] Run canonico visible en FUSE: {fuse_src}")
-
-    _log("[..] Auditando artefactos en MyDrive (12 jobs/run; 1-3 min)...")
-    ranked = _rank_runs(mount_runs)
     api_report: Optional[Dict[str, object]] = None
-    workspace_summary = _workspace_run_restorable(workspace_run)
-    mirror_incomplete = (
-        fuse_src is not None
-        and fuse_mirror_plan_incomplete(
-            fuse_src,
+
+    fast_root = resolve_colab_mydrive_resume_root(
+        gdrive_root,
+        repo=repo,
+        preferred_run_name=preferred_run_name,
+        target_episodes=target_episodes,
+        episode_time_steps=episode_time_steps,
+        happo_rollout_threads=happo_rollout_threads,
+        require_canonical_plan=is_canonical_run,
+    )
+    if fast_root is not None:
+        workspace_run = fast_root
+        workspace_summary = summarize_madrl_output_run(
             workspace_run,
             target_episodes=target_episodes,
             episode_time_steps=episode_time_steps,
             happo_rollout_threads=happo_rollout_threads,
         )
-    )
+        if not workspace_summary.get("has_artifacts"):
+            workspace_summary = None
+        mount_runs = [workspace_run]
+        ranked = (
+            [{"summary": workspace_summary, "score": float(workspace_summary.get("score") or 0.0), "run_path": workspace_run}]
+            if workspace_summary is not None
+            else []
+        )
+        fuse_src = None
+        restricted_visible = False
+        _log(
+            f"[OK] Reconexion MyDrive: {workspace_run.name} — "
+            "sin escaneo FUSE, sin mirror, sin copia (mismo Drive)."
+        )
+    else:
+        fuse_src = resolve_fuse_canonical_run_path(
+            mount_point,
+            preferred_run_name,
+            project_name=project_name,
+        )
+        restricted_visible = fuse_src is not None
 
-    if fuse_src is not None and (workspace_summary is None or mirror_incomplete):
-        for mirror_pass in range(2):
-            still_incomplete = workspace_summary is None or fuse_mirror_plan_incomplete(
+        _log("[..] Escaneando runs MADRL en MyDrive...")
+        mount_runs = list_madrl_runs_on_colab_mount(
+            mount_point,
+            project_name=project_name,
+        )
+        _log(f"[..] Carpetas run en MyDrive: {len(mount_runs)}")
+        if restricted_visible and fuse_src is not None:
+            _log(f"[..] Run canonico visible en FUSE: {fuse_src}")
+
+        _log("[..] Auditando artefactos en MyDrive (12 jobs/run; 1-3 min)...")
+        ranked = _rank_runs(mount_runs)
+        workspace_summary = _workspace_run_restorable(workspace_run)
+
+        if skip_fuse_mirror:
+            _log(
+                "[WARN] SKIP_FUSE_MIRROR=True: no se copia desde FUSE. "
+                "Si 2.1b falla, pon SKIP_FUSE_MIRROR=False y re-ejecuta 2.1."
+            )
+        elif fuse_src is not None and workspace_summary is not None:
+            mirror_incomplete = fuse_mirror_plan_incomplete(
                 fuse_src,
                 workspace_run,
                 target_episodes=target_episodes,
                 episode_time_steps=episode_time_steps,
                 happo_rollout_threads=happo_rollout_threads,
             )
-            if not still_incomplete:
-                break
-            if mirror_pass == 0:
-                if mirror_incomplete and workspace_summary is not None:
-                    _log(
-                        "[..] MyDrive incompleto vs FUSE (faltan results.json/checkpoints); "
-                        "re-sincronizando..."
+            if not mirror_incomplete:
+                _log("[OK] MyDrive al dia vs FUSE; mirror omitido.")
+            elif workspace_summary is None or mirror_incomplete:
+                for mirror_pass in range(2):
+                    still_incomplete = workspace_summary is None or fuse_mirror_plan_incomplete(
+                        fuse_src,
+                        workspace_run,
+                        target_episodes=target_episodes,
+                        episode_time_steps=episode_time_steps,
+                        happo_rollout_threads=happo_rollout_threads,
                     )
-                else:
+                    if not still_incomplete:
+                        break
+                    if mirror_pass == 0:
+                        if mirror_incomplete and workspace_summary is not None:
+                            _log(
+                                "[..] MyDrive incompleto vs FUSE (faltan results.json/checkpoints); "
+                                "re-sincronizando..."
+                            )
+                        else:
+                            _log("[..] Copiando artefactos resume desde FUSE a MyDrive...")
+                    else:
+                        _log("[..] Segundo pase mirror FUSE (completar plan 9 SKIP + 3 REANUDA)...")
+                    mirror_report = mirror_fuse_run_to_workspace(
+                        fuse_src,
+                        workspace_run,
+                        verbose=verbose,
+                    )
+                    workspace_summary = _workspace_run_restorable(workspace_run)
+        elif fuse_src is not None and workspace_summary is None:
+            for mirror_pass in range(2):
+                still_incomplete = workspace_summary is None or fuse_mirror_plan_incomplete(
+                    fuse_src,
+                    workspace_run,
+                    target_episodes=target_episodes,
+                    episode_time_steps=episode_time_steps,
+                    happo_rollout_threads=happo_rollout_threads,
+                )
+                if not still_incomplete:
+                    break
+                if mirror_pass == 0:
                     _log("[..] Copiando artefactos resume desde FUSE a MyDrive...")
-            else:
-                _log("[..] Segundo pase mirror FUSE (completar plan 9 SKIP + 3 REANUDA)...")
-            mirror_report = mirror_fuse_run_to_workspace(
-                fuse_src,
-                workspace_run,
-                verbose=verbose,
-            )
-            workspace_summary = _workspace_run_restorable(workspace_run)
+                else:
+                    _log("[..] Segundo pase mirror FUSE (completar plan 9 SKIP + 3 REANUDA)...")
+                mirror_report = mirror_fuse_run_to_workspace(
+                    fuse_src,
+                    workspace_run,
+                    verbose=verbose,
+                )
+                workspace_summary = _workspace_run_restorable(workspace_run)
 
-    if preferred_run_name == preferred_canonical_run_name(repo):
+    if is_canonical_run:
         try:
             ws_report = build_jobs_resume_report(
                 workspace_run,
@@ -4454,6 +4616,7 @@ def ensure_colab_output_run_ready(
         "mirror_report": mirror_report,
         "skip_plan_validation": skip_plan_validation,
         "shared_folder_url": CANONICAL_SHARED_DRIVE_URL,
+        "fast_reconnect": fast_root is not None,
     }
 
     if output_root is not None and is_ready:
@@ -4628,6 +4791,7 @@ def pick_colab_output_root(
     gdrive_root: Optional[Path] = None,
     mount_point: Optional[Path] = None,
     ensure_shared_run: bool = True,
+    skip_fuse_mirror: bool = False,
     print_audit: bool = True,
 ) -> Dict[str, object]:
     """Select ``OUTPUT_ROOT`` from Drive artifacts (never prefer empty timestamp stubs)."""
@@ -4635,11 +4799,48 @@ def pick_colab_output_root(
     repo_path = Path(repo) if repo else None
     gdrive_path = Path(gdrive_root) if gdrive_root else None
     run_ready: Optional[Dict[str, object]] = None
+    fast_reconnect = False
+    mydrive_plan_ready = False
+
+    fast_root: Optional[Path] = None
+    if (
+        in_colab
+        and not force_new_run
+        and gdrive_path is not None
+        and repo_path is not None
+    ):
+        fast_root = resolve_colab_mydrive_resume_root(
+            gdrive_path,
+            repo=repo_path,
+            resume_output_root=str(resume_output_root or "") or None,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+            require_canonical_plan=False,
+        )
+        if fast_root is not None:
+            fast_reconnect = True
+            mydrive_plan_ready = colab_mydrive_run_plan_ready(
+                fast_root,
+                target_episodes=target_episodes,
+                episode_time_steps=episode_time_steps,
+                happo_rollout_threads=happo_rollout_threads,
+                require_canonical_plan=(
+                    fast_root.name == preferred_canonical_run_name(repo_path)
+                ),
+            )
+            if print_audit:
+                print(
+                    f"[OK] Reconexion: {fast_root.name} en tu MyDrive — "
+                    "sin OAuth, sin FUSE, sin mirror, sin audit pesado.",
+                    flush=True,
+                )
 
     if (
         in_colab
         and ensure_shared_run
         and not force_new_run
+        and not fast_reconnect
         and mount_point is not None
         and gdrive_path is not None
         and repo_path is not None
@@ -4653,6 +4854,7 @@ def pick_colab_output_root(
             target_episodes=target_episodes,
             episode_time_steps=episode_time_steps,
             happo_rollout_threads=happo_rollout_threads,
+            skip_fuse_mirror=skip_fuse_mirror,
         )
         print_colab_drive_binding_report(run_ready)
         if run_ready.get("is_ready") and not str(resume_output_root or "").strip():
@@ -4681,6 +4883,39 @@ def pick_colab_output_root(
                 f"Drive outputs no accesible: {base_output_parent}. "
                 "Ejecuta celda 1.5 (montar Drive) antes de 2.1."
             )
+
+    if fast_reconnect and fast_root is not None:
+        output_root = fast_root
+        resume_reason = f"RECONEXION MyDrive ({output_root.name}; sin mirror)"
+        created_new_run = False
+        selected = summarize_madrl_output_run(
+            output_root,
+            target_episodes=target_episodes,
+            episode_time_steps=episode_time_steps,
+            happo_rollout_threads=happo_rollout_threads,
+        )
+        audit: Dict[str, object] = {
+            "summaries": [selected],
+            "best": selected,
+            "runs_with_artifacts": 1,
+            "fast_reconnect": True,
+        }
+        if print_audit:
+            print_madrl_drive_runs_audit(audit, selected=selected)
+        output_root.mkdir(parents=True, exist_ok=True)
+        if repo_path is not None:
+            sync_output_root_pointer_files(repo_path, output_root, gdrive_root=gdrive_path)
+        return {
+            "output_root": str(output_root),
+            "resume_output_root": str(output_root),
+            "resume_reason": resume_reason,
+            "created_new_run": created_new_run,
+            "audit": audit,
+            "selected_summary": selected,
+            "run_ready": run_ready,
+            "fast_reconnect": True,
+            "mydrive_plan_ready": mydrive_plan_ready,
+        }
 
     audit = audit_madrl_drive_output_runs(
         base_output_parent,
@@ -4788,6 +5023,8 @@ def pick_colab_output_root(
         "audit": audit,
         "selected_summary": selected,
         "run_ready": run_ready,
+        "fast_reconnect": fast_reconnect,
+        "mydrive_plan_ready": mydrive_plan_ready,
     }
 
 
