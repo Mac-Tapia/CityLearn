@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import traceback
 
@@ -169,15 +170,18 @@ def main() -> int:
                         f"(global_step will start at {_rank_offset * args.episode_time_steps})",
                         flush=True,
                     )
+                lp_override = os.environ.get("CITYLEARN_LIVE_PROGRESS_PATH", "").strip()
+                if rank == 0:
+                    live_lp = lp_override or str(output_dir / "live_progress.json")
+                else:
+                    live_lp = None
                 env = CityLearnHARLEnv(
                     schema_path=args.schema_path,
                     scenario=args.scenario,
                     seed=args.seed + rank * 1000,
                     episode_time_steps=args.episode_time_steps,
                     algorithm="HAPPO",
-                    live_progress_path=(
-                        str(output_dir / "live_progress.json") if rank == 0 else None
-                    ),
+                    live_progress_path=live_lp,
                     live_progress_interval=args.live_progress_interval,
                     trace_record_interval=args.trace_record_interval,
                     trace_detail=args.trace_detail,

@@ -1162,20 +1162,32 @@ def run_one_job(
             rollout_threads=int(args.happo_n_rollout_threads),
             output_root=output_root,
         ):
+            scenario_key = scenario.lower()
+            local_lp = f"/content/tmp/madrl_salvage_{scenario_key}_live_progress.json"
+            drive_lp = str(Path(job_path) / "live_progress.json")
+            salvage_env = {
+                **dict(job.get("env_overrides") or {}),
+                "CITYLEARN_LIVE_PROGRESS_PATH": local_lp,
+                "CITYLEARN_LIVE_PROGRESS_MIRROR": drive_lp,
+                "CITYLEARN_DRIVE_OS_SYNC": "0",
+                "CITYLEARN_DRIVE_FSYNC": "0",
+            }
             job = _patch_job_args(
                 job,
                 {
                     "--n-rollout-threads": "1",
                     "--torch-threads": "1",
                     "--live-progress-interval": "300",
-                    "--live-heartbeat-seconds": "600",
+                    "--live-heartbeat-seconds": "0",
                     "--trace-record-interval": "0",
                     "--lightweight-resume-preload": None,
                 },
             )
+            job = {**job, "env_overrides": salvage_env}
             print(
                 f"[launcher] HAPPO salvage KPI tail {scenario}: "
-                "n_rollout=1, live-progress=300 (ep_step), heartbeat=600, trace=off (Drive-safe)",
+                "serial-safe | n_rollout=1 | live_progress=/content/tmp + mirror Drive | "
+                "heartbeat=off",
                 flush=True,
             )
 
@@ -1814,11 +1826,15 @@ def _happo_salvage_tail_concurrency_cap(
     vram_gib: float,
     cuda_fraction: float,
 ) -> Optional[int]:
-    """Parallel cap for salvage KPI tails only; None = no salvage-specific override.
+    """VRAM-oriented parallel cap for salvage KPI tails only; None = no override.
 
-    Default (auto): run all salvage tails in parallel when VRAM fits (n_rollout=1
-    per job). Serial only on low VRAM or CITYLEARN_HAPPO_SALVAGE_SERIAL=1.
-    Drive stall (os.sync + CSV preload) is already mitigated elsewhere.
+    When only HAPPO salvage tails remain, ``run_dynamic_backfill_jobs`` still
+    defaults to ``max_workers=1`` (Drive FUSE) unless
+    ``CITYLEARN_HAPPO_SALVAGE_SERIAL=0`` opts into parallel.
+
+    Here, ``auto`` may return >1 when VRAM fits (n_rollout=1 per job). Low VRAM
+    or ``CITYLEARN_HAPPO_SALVAGE_SERIAL=1`` yields 1. Mixed pending (non-salvage
+    HAPPO) returns None.
     """
     if pending_tail <= 0 or pending_other > 0:
         return None
@@ -1888,6 +1904,24 @@ def _is_happo_salvage_only_plan(
         ):
             return False
     return True
+
+
+
+
+def _resolve_happo_salvage_only_max_workers(
+    *,
+    max_workers: int,
+    salvage_only: bool,
+    pending_salvage: int,
+    salvage_cap: Optional[int],
+) -> int:
+    """Launcher concurrency for 9 SKIP + N HAPPO salvage tails (Drive-safe default)."""
+    if not (salvage_only and pending_salvage > 0):
+        return max_workers
+    parallel_mode = str(os.environ.get("CITYLEARN_HAPPO_SALVAGE_SERIAL", "auto")).strip().lower()
+    if parallel_mode in {"0", "false", "no", "never", "parallel"} and salvage_cap and salvage_cap > 1:
+        return min(max_workers, salvage_cap, pending_salvage)
+    return 1
 
 
 def run_dynamic_backfill_jobs(
@@ -1996,9 +2030,34 @@ def run_dynamic_backfill_jobs(
         pending_salvage=pending_salvage,
         pending_other_happo=pending_other_happo,
     )
-    if (
-        salvage_only
-        and salvage_cap is not None
+    if salvage_only and pending_salvage > 0:
+        parallel_mode = str(os.environ.get("CITYLEARN_HAPPO_SALVAGE_SERIAL", "auto")).strip().lower()
+        resolved = _resolve_happo_salvage_only_max_workers(
+            max_workers=max_workers,
+            salvage_only=salvage_only,
+            pending_salvage=pending_salvage,
+            salvage_cap=salvage_cap,
+        )
+        if resolved != max_workers:
+            if (
+                parallel_mode in {"0", "false", "no", "never", "parallel"}
+                and salvage_cap
+                and salvage_cap > 1
+            ):
+                print(
+                    f"[launcher] HAPPO salvage-only (9 SKIP + {pending_salvage} tails): "
+                    f"concurrency -> {resolved} en paralelo (CITYLEARN_HAPPO_SALVAGE_SERIAL=0; riesgo Drive)",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[launcher] HAPPO salvage-only (9 SKIP + {pending_salvage} tails): "
+                    "concurrency -> 1 serial (Drive FUSE: 3× restore+env bloquea en ep_step 0)",
+                    flush=True,
+                )
+            max_workers = resolved
+    elif (
+        salvage_cap is not None
         and max_workers > salvage_cap
     ):
         if salvage_cap >= pending_salvage:

@@ -7696,6 +7696,9 @@ class CityLearnV3BackendAdapter:
         self._trace_flushed_count = 0
         self._ts_fieldnames: Optional[List[str]] = None
         self._trace_fieldnames: Optional[List[str]] = None
+        self._live_progress_mirror_path: Optional[str] = (
+            str(os.environ.get("CITYLEARN_LIVE_PROGRESS_MIRROR", "") or "").strip() or None
+        )
         self._incremental_enabled = self.live_progress_path is not None
         self.completed_episode_count = 0
         self.last_completed_episode: Optional[int] = None
@@ -8564,6 +8567,17 @@ class CityLearnV3BackendAdapter:
                 tmp_path.unlink(missing_ok=True)
                 return
         fsync_file(self.live_progress_path, allow_mydrive=do_fsync)
+        mirror = self._live_progress_mirror_path
+        if mirror and str(Path(mirror).resolve()) != str(self.live_progress_path.resolve()):
+            try:
+                mp = Path(mirror)
+                mp.parent.mkdir(parents=True, exist_ok=True)
+                mp.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True, default=str),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
 
     def kpi_summary(self) -> Dict[str, object]:
         return {
