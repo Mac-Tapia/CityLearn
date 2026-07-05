@@ -3250,6 +3250,14 @@ DEFAULT_REPORT_SCENARIOS = ("E1", "E2", "E3")
 CANONICAL_COLAB_SKIP_COMPLETED = 9
 CANONICAL_COLAB_SKIP_RESUMABLE = 3
 
+RESUMABLE_LAUNCHER_ACTIONS = frozenset({"resume", "happo_salvage_kpi"})
+
+
+def job_action_is_resumable(action: object) -> bool:
+    """True for launcher actions that re-run or salvage-tail a partial job (not fresh)."""
+    return str(action or "").strip().lower() in RESUMABLE_LAUNCHER_ACTIONS
+
+
 CANONICAL_COLAB_JOB_ACTIONS: Dict[tuple, str] = {
     ("happo", "E1"): "resume",
     ("happo", "E2"): "resume",
