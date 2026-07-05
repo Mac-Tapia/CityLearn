@@ -3330,6 +3330,20 @@ def preferred_canonical_run_name(repo: Optional[Path] = None) -> str:
     return DEFAULT_CANONICAL_RUN_NAME
 
 
+def _in_google_colab() -> bool:
+    try:
+        import google.colab  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+_DRIVE_API_SCOPES = (
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.file",
+)
+
+
 def list_madrl_runs_on_colab_mount(
     mount_point: Path,
     *,
@@ -3357,6 +3371,26 @@ def list_madrl_runs_on_colab_mount(
         except OSError:
             pass
 
+    shortcut_root = mount_point / ".shortcut-targets-by-id" / CANONICAL_SHARED_DRIVE_FOLDER_ID
+    if shortcut_root.is_dir():
+        seeds.append(shortcut_root / "outputs")
+        try:
+            for outputs in shortcut_root.rglob("outputs"):
+                if outputs.is_dir():
+                    seeds.append(outputs)
+        except OSError:
+            pass
+
+    shareddrives = mount_point / "Shareddrives"
+    if shareddrives.is_dir():
+        try:
+            for outputs in shareddrives.rglob("outputs"):
+                if not outputs.is_dir():
+                    continue
+                seeds.append(outputs)
+        except OSError:
+            pass
+
     for outputs in seeds:
         if not outputs.is_dir():
             continue
@@ -3369,19 +3403,60 @@ def list_madrl_runs_on_colab_mount(
     return sorted(found, key=lambda p: p.name)
 
 
+def _colab_drive_api_credentials():
+    """User OAuth credentials for Drive API (post ``drive.mount``, Colab-safe)."""
+    creds = None
+    if _in_google_colab():
+        try:
+            from google.colab import auth as colab_auth
+
+            # Safe AFTER drive.mount(): reuses the OAuth session from the mount popup.
+            colab_auth.authenticate_user()
+        except Exception:
+            pass
+        try:
+            from google.colab import _google_auth
+
+            creds = _google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
+        except Exception:
+            creds = None
+        if creds is None:
+            try:
+                from google.auth import default
+                from google.auth.transport.requests import Request
+
+                creds, _ = default(scopes=list(_DRIVE_API_SCOPES))
+                if creds is not None and creds.expired and getattr(creds, "refresh_token", None):
+                    creds.refresh(Request())
+            except Exception:
+                creds = None
+    if creds is None:
+        try:
+            from google.auth import default
+
+            creds, _ = default(scopes=list(_DRIVE_API_SCOPES))
+        except Exception:
+            return None
+    return creds
+
+
 def _colab_drive_api_service():
     """Return an authenticated Drive v3 client in Colab after ``drive.mount``."""
     try:
-        from google.auth import default
         from googleapiclient.discovery import build
     except ImportError:
         return None
-    creds, _ = default(
-        scopes=[
-            "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/drive.file",
-        ]
-    )
+    creds = _colab_drive_api_credentials()
+    if creds is None:
+        if _in_google_colab():
+            try:
+                from google.colab import auth as colab_auth
+
+                colab_auth.authenticate_user()
+                return build("drive", "v3", cache_discovery=False)
+            except Exception:
+                return None
+        return None
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
@@ -3638,11 +3713,16 @@ def bind_colab_drive_workspace(
             workspace_outputs=default_outputs,
             run_name=preferred_run_name,
         )
-        mount_runs = list_madrl_runs_on_colab_mount(
-            mount_point,
-            project_name=project_name,
-        )
-        ranked = _rank_runs(mount_runs)
+        for _retry in range(4):
+            mount_runs = list_madrl_runs_on_colab_mount(
+                mount_point,
+                project_name=project_name,
+            )
+            ranked = _rank_runs(mount_runs)
+            if ranked:
+                break
+            if _retry < 3:
+                time.sleep(5)
 
     summaries = [
         summarize_madrl_output_run(
@@ -3699,6 +3779,12 @@ def bind_colab_drive_workspace(
         api_err = ""
         if isinstance(api_report, Mapping):
             api_err = str(api_report.get("error") or "")
+        auth_hint = ""
+        if "metadata.google.internal" in api_err or "googleapiclient" in api_err.lower():
+            auth_hint = (
+                "  Drive API: abre el notebook en colab.research.google.com, acepta OAuth "
+                "Drive en celda 1.5 y usa la cuenta con acceso al folder compartido.\n"
+            )
         raise RuntimeError(
             "Drive montado pero sin run MADRL restaurable.\n"
             f"  Workspace: {gdrive_root}\n"
@@ -3706,8 +3792,8 @@ def bind_colab_drive_workspace(
             f"  Run canonico esperado: {preferred_run_name}\n"
             f"  Carpeta compartida: {CANONICAL_SHARED_DRIVE_URL}\n"
             + (f"  Drive API: {api_err}\n" if api_err else "")
-            + "  Usa la misma cuenta Google en Colab que tiene acceso al folder compartido "
-            "y re-ejecuta 1.2 -> 1.5."
+            + auth_hint
+            + "  Re-ejecuta 1.2 -> 1.5 con la misma cuenta Google que tiene acceso al folder."
         )
 
     return binding
