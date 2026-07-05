@@ -199,14 +199,15 @@ def _iter_selective_mirror_sources(fuse_src: Path) -> List[Path]:
 
     def _priority(path: Path) -> tuple:
         rel = str(path.relative_to(fuse_src)).replace("\\", "/").lower()
-        bucket = 2
+        if rel.endswith("/results.json"):
+            return (0, 0, rel)
+        if rel.endswith(f"/{JOB_LAUNCHER_COMPLETE_MARKER.lower()}") or rel.endswith("/live_progress.json"):
+            return (0, 1, rel)
         if path.parent == fuse_src:
-            bucket = 0
-        elif "/happo/" in rel or rel.startswith("happo/"):
-            bucket = 1
-        elif path.suffix.lower() in {".pt", ".pth"}:
-            bucket = 1
-        return (bucket, len(path.parts), rel)
+            return (0, 2, rel)
+        if path.suffix.lower() in {".pt", ".pth"}:
+            return (1, len(path.parts), rel)
+        return (2, len(path.parts), rel)
 
     return sorted(sources, key=_priority)
 
@@ -3205,6 +3206,107 @@ def preview_job_launcher_decision(
 DEFAULT_REPORT_ALGORITHMS = ("happo", "masac", "matd3", "maac")
 DEFAULT_REPORT_SCENARIOS = ("E1", "E2", "E3")
 
+CANONICAL_COLAB_SKIP_COMPLETED = 9
+CANONICAL_COLAB_SKIP_RESUMABLE = 3
+
+CANONICAL_COLAB_JOB_ACTIONS: Dict[tuple, str] = {
+    ("happo", "E1"): "resume",
+    ("happo", "E2"): "resume",
+    ("happo", "E3"): "resume",
+    ("masac", "E1"): "skip",
+    ("masac", "E2"): "skip",
+    ("masac", "E3"): "skip",
+    ("matd3", "E1"): "skip",
+    ("matd3", "E2"): "skip",
+    ("matd3", "E3"): "skip",
+    ("maac", "E1"): "skip",
+    ("maac", "E2"): "skip",
+    ("maac", "E3"): "skip",
+}
+
+
+def validate_canonical_colab_skip_plan(
+    report: Mapping[str, object],
+    *,
+    expected_actions: Optional[Mapping[tuple, str]] = None,
+    expected_completed: int = CANONICAL_COLAB_SKIP_COMPLETED,
+    expected_resumable: int = CANONICAL_COLAB_SKIP_RESUMABLE,
+) -> Dict[str, object]:
+    """Validate 9x SKIP (MASAC/MATD3/MAAC) + 3x HAPPO resume for canonical Colab relaunch."""
+    expected_actions = dict(expected_actions or CANONICAL_COLAB_JOB_ACTIONS)
+    completed = int(report.get("completed") or 0)
+    resumable = int(report.get("resumable") or 0)
+    mismatches: List[Dict[str, str]] = []
+    for row in report.get("jobs") or []:
+        if not isinstance(row, Mapping):
+            continue
+        algo = str(row.get("algorithm") or "").lower()
+        scen = str(row.get("scenario") or "").upper()
+        action = str(row.get("action") or "")
+        exp = expected_actions.get((algo, scen))
+        if exp is None:
+            continue
+        if action != exp:
+            mismatches.append(
+                {
+                    "job": f"{algo.upper()}/{scen}",
+                    "expected": exp,
+                    "actual": action,
+                    "status_line": str(row.get("status_line") or ""),
+                }
+            )
+    ok = (
+        completed == expected_completed
+        and resumable == expected_resumable
+        and not mismatches
+    )
+    return {
+        "ok": ok,
+        "completed": completed,
+        "resumable": resumable,
+        "expected_completed": expected_completed,
+        "expected_resumable": expected_resumable,
+        "mismatches": mismatches,
+    }
+
+
+def assert_canonical_colab_skip_plan(
+    report: Mapping[str, object],
+    *,
+    output_root: Optional[Path] = None,
+) -> None:
+    """Raise when MyDrive plan is not ready for canonical 9 SKIP + 3 HAPPO resume."""
+    validation = validate_canonical_colab_skip_plan(report)
+    if validation.get("ok"):
+        print(
+            "[OK] Plan canonico listo: "
+            f"{validation['completed']} SKIP + {validation['resumable']} REANUDA "
+            "(MASAC/MATD3/MAAC omitidos; HAPPO 49/50)."
+        )
+        return
+    lines = [
+        "Plan skip/resume NO listo para entrenamiento canonico.",
+        f"  Esperado: {validation['expected_completed']} SKIP + "
+        f"{validation['expected_resumable']} REANUDA (HAPPO E1-E3 ep 49/50).",
+        f"  Actual:   {validation['completed']} SKIP + {validation['resumable']} REANUDA.",
+    ]
+    if output_root is not None:
+        lines.append(f"  OUTPUT_ROOT: {output_root}")
+    for item in validation.get("mismatches") or []:
+        lines.append(
+            f"  - {item.get('job')}: esperado {item.get('expected')}, "
+            f"obtenido {item.get('actual')} — {item.get('status_line')}"
+        )
+    lines.extend(
+        [
+            "  Accion:",
+            "  1) Re-ejecuta 1.2 -> 1.5 -> 2.1 (mirror FUSE completo; puede tardar 10-20 min).",
+            "  2) Vuelve a 2.1b. Si HAPPO sigue sin checkpoints: celda 2.3 (salvage 49->50).",
+            "  3) NO ejecutes 7.2 hasta ver PASS aqui.",
+        ]
+    )
+    raise RuntimeError("\n".join(lines))
+
 
 def build_jobs_resume_report(
     output_root: Path,
@@ -4180,6 +4282,7 @@ def ensure_colab_output_run_ready(
     )
     restricted_visible = fuse_src is not None
     mirror_report: Optional[Dict[str, object]] = None
+    skip_plan_validation: Optional[Dict[str, object]] = None
 
     _log("[..] Escaneando runs MADRL en MyDrive...")
     mount_runs = list_madrl_runs_on_colab_mount(
@@ -4206,30 +4309,52 @@ def ensure_colab_output_run_ready(
     )
 
     if fuse_src is not None and (workspace_summary is None or mirror_incomplete):
-        if mirror_incomplete and workspace_summary is not None:
-            _log(
-                "[..] MyDrive incompleto vs FUSE (faltan results.json/checkpoints skip/resume); "
-                "re-sincronizando..."
+        for mirror_pass in range(2):
+            still_incomplete = workspace_summary is None or fuse_mirror_plan_incomplete(
+                fuse_src,
+                workspace_run,
+                target_episodes=target_episodes,
+                episode_time_steps=episode_time_steps,
+                happo_rollout_threads=happo_rollout_threads,
             )
-        else:
-            _log("[..] Copiando artefactos resume desde FUSE a MyDrive...")
-        mirror_report = mirror_fuse_run_to_workspace(
-            fuse_src,
-            workspace_run,
-            verbose=verbose,
-        )
-        workspace_summary = _workspace_run_restorable(workspace_run)
-        if mirror_incomplete and fuse_mirror_plan_incomplete(
-            fuse_src,
-            workspace_run,
-            target_episodes=target_episodes,
-            episode_time_steps=episode_time_steps,
-            happo_rollout_threads=happo_rollout_threads,
-        ):
-            _log(
-                "[WARN] Tras mirror, MyDrive sigue por debajo del plan FUSE; "
-                "revisa permisos FUSE o ejecuta 2.3 (HAPPO salvage)."
+            if not still_incomplete:
+                break
+            if mirror_pass == 0:
+                if mirror_incomplete and workspace_summary is not None:
+                    _log(
+                        "[..] MyDrive incompleto vs FUSE (faltan results.json/checkpoints); "
+                        "re-sincronizando..."
+                    )
+                else:
+                    _log("[..] Copiando artefactos resume desde FUSE a MyDrive...")
+            else:
+                _log("[..] Segundo pase mirror FUSE (completar plan 9 SKIP + 3 REANUDA)...")
+            mirror_report = mirror_fuse_run_to_workspace(
+                fuse_src,
+                workspace_run,
+                verbose=verbose,
             )
+            workspace_summary = _workspace_run_restorable(workspace_run)
+
+    if preferred_run_name == preferred_canonical_run_name(repo):
+        try:
+            ws_report = build_jobs_resume_report(
+                workspace_run,
+                target_episodes=target_episodes,
+                episode_time_steps=episode_time_steps,
+                happo_rollout_threads=happo_rollout_threads,
+            )
+            plan_check = validate_canonical_colab_skip_plan(ws_report)
+            skip_plan_validation = plan_check
+            if not plan_check.get("ok"):
+                _log(
+                    "[WARN] Tras mirror, plan MyDrive="
+                    f"{plan_check.get('completed')} SKIP + {plan_check.get('resumable')} REANUDA "
+                    f"(objetivo {CANONICAL_COLAB_SKIP_COMPLETED}+{CANONICAL_COLAB_SKIP_RESUMABLE}). "
+                    "Re-ejecuta 2.1 o usa 2.3 para HAPPO."
+                )
+        except _DRIVE_FUSE_IO_ERRORS:
+            skip_plan_validation = None
 
     need_workspace_link = (
         allow_drive_api_shortcut
@@ -4327,6 +4452,7 @@ def ensure_colab_output_run_ready(
         "selected_summary": selected_summary,
         "api_report": api_report,
         "mirror_report": mirror_report,
+        "skip_plan_validation": skip_plan_validation,
         "shared_folder_url": CANONICAL_SHARED_DRIVE_URL,
     }
 
@@ -4673,6 +4799,7 @@ def notebook_jobs_resume_preview(
     happo_rollout_threads: Optional[int] = None,
     label: str = "",
     show_footer_hint: bool = True,
+    require_canonical_plan: bool = False,
 ) -> Dict[str, object]:
     """Single notebook entry point for cells 2.1b and 7.1 (no duplicated loop)."""
     if label:
@@ -4684,6 +4811,8 @@ def notebook_jobs_resume_preview(
         happo_rollout_threads=happo_rollout_threads,
     )
     print_jobs_resume_report(report, show_footer_hint=show_footer_hint)
+    if require_canonical_plan:
+        assert_canonical_colab_skip_plan(report, output_root=Path(output_root))
     return report
 
 
