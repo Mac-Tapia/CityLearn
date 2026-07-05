@@ -2994,7 +2994,7 @@ def summarize_madrl_output_run(
 ) -> Dict[str, object]:
     """Summarize one output root from existing artifacts only (no invented progress)."""
     output_root = Path(output_root)
-    has_artifacts = madrl_output_run_has_artifacts(output_root)
+    raw_artifacts = madrl_output_run_has_artifacts(output_root)
     report = build_jobs_resume_report(
         output_root,
         target_episodes=target_episodes,
@@ -3006,6 +3006,9 @@ def summarize_madrl_output_run(
     pending = int(report.get("pending") or 0)
     progress_pct = float(report.get("progress_pct") or 0.0)
     episodes_done = int(report.get("episodes_done") or 0)
+    restorable = completed > 0 or resumable > 0 or episodes_done > 0
+    stub_only = raw_artifacts and not restorable
+    has_artifacts = raw_artifacts and restorable
     score = 0.0
     if has_artifacts:
         score = (
@@ -3018,6 +3021,8 @@ def summarize_madrl_output_run(
         "output_root": str(output_root),
         "run_name": output_root.name,
         "has_artifacts": has_artifacts,
+        "stub_only": stub_only,
+        "restorable": restorable,
         "completed_jobs": completed,
         "resumable_jobs": resumable,
         "pending_jobs": pending,
@@ -3104,7 +3109,7 @@ def print_madrl_drive_runs_audit(
     print(f"  AUDITORIA runs MADRL en: {parent}")
     print(
         f"  Carpetas madrl_v3_*: {audit.get('runs_found', 0)}  "
-        f"(con artefactos: {audit.get('runs_with_artifacts', 0)})"
+        f"(restaurables: {audit.get('runs_with_artifacts', 0)})"
     )
     print("=" * 72)
     if not summaries:
@@ -3113,7 +3118,12 @@ def print_madrl_drive_runs_audit(
         return
     for summary in summaries:
         mark = " << SELECTED" if selected_root and str(summary.get("output_root")) == selected_root else ""
-        empty = " [VACIO — sin checkpoints/results]" if not summary.get("has_artifacts") else ""
+        if summary.get("stub_only"):
+            empty = " [STUB — solo results.json, sin checkpoints restaurables]"
+        elif not summary.get("has_artifacts"):
+            empty = " [VACIO — sin checkpoints/results]"
+        else:
+            empty = ""
         print(
             f"  {summary.get('run_name')}: "
             f"completos={summary.get('completed_jobs')}/12  "
@@ -3292,6 +3302,21 @@ def pick_colab_output_root(
                 "seleccionar un run. Define RESUME_OUTPUT_ROOT manualmente en celda 2.1."
             )
         elif list_madrl_v3_output_runs(base_output_parent):
+            stub_names = [
+                str(s.get("run_name") or "")
+                for s in (audit.get("summaries") or [])
+                if s.get("stub_only")
+            ]
+            if stub_names:
+                raise RuntimeError(
+                    "Drive solo tiene runs STUB (p. ej. results.json salvage copiado sin "
+                    f"checkpoints .pt): {', '.join(stub_names)}. "
+                    "NO entrenes sobre ellos. Copia el run canónico "
+                    "madrl_v3_20260627_164047 bajo "
+                    f"{base_output_parent} (desde tu carpeta Drive compartida), "
+                    "luego re-ejecuta 2.1; o define RESUME_OUTPUT_ROOT con la ruta exacta "
+                    "del run que tenga HAPPO/*/checkpoints/."
+                )
             output_root = base_output_parent / run_label
             resume_reason = "NUEVO run (runs previos vacios, sin artefactos MADRL)"
             created_new_run = True
