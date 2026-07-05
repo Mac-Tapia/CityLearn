@@ -258,6 +258,8 @@ def mirror_fuse_run_to_workspace(
         if verbose:
             print(msg, flush=True)
 
+    if verbose:
+        print("[..] Planificando mirror selectivo en FUSE (escaneo .pt; 2-8 min)...", flush=True)
     sources = _iter_selective_mirror_sources(fuse_src)
     report["planned"] = len(sources)
     _log(
@@ -315,22 +317,17 @@ def ensure_colab_drive_api_auth(*, verbose: bool = True) -> Optional[str]:
         return None
     try:
         from google.colab import auth as colab_auth
-        from google.colab import _google_auth
 
-        colab_auth.authenticate_user(scopes=list(_DRIVE_API_SCOPES))
-        creds = _google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
-        if creds is None:
-            if verbose:
-                print("[WARN] OAuth Drive API: credenciales no disponibles tras authenticate_user", flush=True)
-            return None
-        info = _google_auth.get_user_info() or {}
-        email = str(info.get("email") or "").strip() or None
-        if verbose and email:
-            print(f"[OK] Cuenta Colab/Drive: {email}", flush=True)
-        return email
+        colab_auth.authenticate_user()
+        if verbose:
+            print("[OK] OAuth Colab activo (Drive API opcional; mirror FUSE no lo requiere)", flush=True)
+        return "colab-oauth"
     except Exception as exc:
         if verbose:
-            print(f"[WARN] OAuth Drive API: {exc}", flush=True)
+            print(
+                f"[WARN] Drive API no disponible ({exc}); mirror FUSE sigue siendo la via principal.",
+                flush=True,
+            )
         return None
 
 
@@ -4142,6 +4139,7 @@ def ensure_colab_output_run_ready(
     if restricted_visible and fuse_src is not None:
         _log(f"[..] Run canonico visible en FUSE: {fuse_src}")
 
+    _log("[..] Auditando artefactos en MyDrive (12 jobs/run; 1-3 min)...")
     ranked = _rank_runs(mount_runs)
     api_report: Optional[Dict[str, object]] = None
     workspace_summary = _workspace_run_restorable(workspace_run)
