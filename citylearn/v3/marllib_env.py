@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import numpy as np
 from gymnasium import spaces
@@ -15,8 +15,8 @@ from citylearn.v3.environment import make_citylearn_v3_env
 
 
 try:  # pragma: no cover - depends on optional MARLlib/RLlib stack.
-    from ray.rllib.env.multi_agent_env import MultiAgentEnv
-except Exception:  # pragma: no cover
+    from ray.rllib.env.multi_agent_env import MultiAgentEnv  # pylint: disable=import-error
+except Exception:  # pragma: no cover  # pylint: disable=broad-except
     class MultiAgentEnv:  # type: ignore[no-redef]
         """Fallback base so the adapter remains importable without RLlib."""
 
@@ -155,9 +155,10 @@ class CityLearnV3MARLlibEnv(MultiAgentEnv):
         self.citylearn_v3.close()
 
     def render(self, mode=None):
+        del mode  # CityLearn v2 render does not take a mode argument.
         return self.citylearn_v3.render()
 
-    def get_env_info(self) -> Dict[str, object]:
+    def get_env_info(self) -> Dict[str, Any]:
         return {
             "space_obs": self.observation_space,
             "space_act": self.action_space,
@@ -195,8 +196,8 @@ def register_citylearn_v3_marllib_env(name: str = "citylearn_v3") -> str:
         sys.path.insert(0, str(MARLLIB_ROOT))
 
     try:
-        from marllib.envs.base_env import ENV_REGISTRY
-    except Exception as exc:
+        from marllib.envs.base_env import ENV_REGISTRY  # pylint: disable=import-error
+    except Exception as exc:  # pylint: disable=broad-except
         raise ImportError(
             "MARLlib could not be imported. Install MARLlib dependencies in a "
             "compatible environment before launching training."

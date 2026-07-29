@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Union
-try:
+from typing import TYPE_CHECKING, List, Union
+
+if TYPE_CHECKING:  # pragma: no cover - static typing only
     import torch
     import torch.nn
-except ImportError:  # pragma: no cover - optional dependency for LSTM dynamics only
-    torch = None
+else:
+    try:
+        import torch
+        import torch.nn
+    except ImportError:  # pragma: no cover - optional dependency for LSTM dynamics only
+        torch = None
 
 
 class _TorchNNPlaceholder:
@@ -133,7 +138,7 @@ class LSTMDynamics(Dynamics, (torch.nn if torch is not None else _TorchNNPlaceho
         except RuntimeError:
             self.load_state_dict(torch.load(self.filepath, map_location=torch.device('cpu'))['model_state_dict'])
         
-        except:
+        except Exception:  # pylint: disable=broad-except
             self.load_state_dict(torch.load(self.filepath))
 
         self._hidden_state = self.init_hidden(1)

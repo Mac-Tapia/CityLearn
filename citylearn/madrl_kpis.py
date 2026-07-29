@@ -8,13 +8,38 @@ keeps legacy names only as compatibility fallbacks for older outputs.
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Mapping, Optional
+from typing import Dict, Iterable, List, Mapping, Optional, cast, Any
 
 import numpy as np
 import pandas as pd
 
 
 DISTRICT = "District"
+
+
+def _district_names_to_building(names: Iterable[str]) -> tuple[str, ...]:
+    """Map district evaluate_v2 cost_function names to building-level twins."""
+
+    output: List[str] = []
+    for name in names:
+        text = str(name)
+        if text.startswith("district_"):
+            output.append("building_" + text[len("district_") :])
+        else:
+            output.append(text)
+    return tuple(output)
+
+
+def _build_building_kpi_groups(
+    district_groups: Mapping[str, Mapping[str, tuple[str, ...]]],
+) -> Dict[str, Dict[str, tuple[str, ...]]]:
+    return {
+        group_name: {
+            logical_name: _district_names_to_building(v2_names)
+            for logical_name, v2_names in group.items()
+        }
+        for group_name, group in district_groups.items()
+    }
 
 
 def unwrap_citylearn_core_env(env):
@@ -227,6 +252,11 @@ CITYLEARN_V2_METRIC_GROUPS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
     # axes, so there are no non-axis CityLearn v2 metrics in the v3 report.
 }
 
+# Building-level twins of the district OE mappings (district_* → building_*).
+CITYLEARN_V2_BUILDING_KPI_GROUPS: Mapping[str, Mapping[str, tuple[str, ...]]] = (
+    _build_building_kpi_groups(CITYLEARN_V2_KPI_GROUPS)
+)
+
 
 LEGACY_VALUE_FALLBACKS: Mapping[str, tuple[str, ...]] = {
     "grid_import": ("electricity_consumption_total",),
@@ -316,10 +346,13 @@ def _extract_value(df: pd.DataFrame, names: Iterable[str], *, prefer_district: b
     if df.empty or "cost_function" not in df.columns or "value" not in df.columns:
         return None
 
-    rows = df[df["cost_function"].isin(tuple(names))]
+    rows = cast(pd.DataFrame, df[df["cost_function"].isin(tuple(names))])
 
     if prefer_district and {"level", "name"}.issubset(rows.columns):
-        district_rows = rows[(rows["level"] == "district") | (rows["name"] == DISTRICT)]
+        district_rows = cast(
+            pd.DataFrame,
+            rows[(rows["level"] == "district") | (rows["name"] == DISTRICT)],
+        )
         rows = district_rows if not district_rows.empty else rows
 
     if rows.empty:
@@ -350,6 +383,8 @@ def extract_citylearn_v2_kpis(df: pd.DataFrame) -> Dict[str, float]:
     Missing KPIs are omitted rather than synthesized. This is intentional:
     thesis reporting should only use KPIs that CityLearn actually exports or
     explicitly documented project-derived KPIs.
+
+    Values prefer the district level when both district and building rows exist.
     """
 
     return _extract_group_values(df, CITYLEARN_V2_KPI_GROUPS)
@@ -364,6 +399,97 @@ def extract_citylearn_v2_metrics(df: pd.DataFrame) -> Dict[str, float]:
     """
 
     return _extract_group_values(df, CITYLEARN_V2_METRIC_GROUPS)
+
+
+def _building_entity_names(df: pd.DataFrame) -> List[str]:
+    if df.empty or "name" not in df.columns:
+        return []
+
+    if "level" in df.columns:
+        building_mask = df["level"].astype(str).str.lower() == "building"
+        names = df.loc[building_mask, "name"].astype(str)
+    else:
+        names = df["name"].astype(str)
+        names = names[names.str.lower() != DISTRICT.lower()]
+
+    return sorted({name for name in names.tolist() if name and name.lower() != DISTRICT.lower()})
+
+
+def extract_citylearn_v2_building_kpis(
+    df: pd.DataFrame,
+    *,
+    building: Optional[str] = None,
+) -> Dict[str, Dict[str, float]]:
+    """Return OE logical KPIs per building from an evaluate_v2 frame.
+
+    Uses building_* cost_function twins of the official OE district mappings.
+    Buildings or KPIs without a native evaluate_v2 twin are omitted.
+    """
+
+    if df is None or getattr(df, "empty", True):
+        return {}
+
+    frame = cast(pd.DataFrame, df)
+    if "level" in frame.columns:
+        frame = cast(pd.DataFrame, frame[frame["level"].astype(str).str.lower() == "building"])
+
+    entities = [building] if building else _building_entity_names(frame)
+    output: Dict[str, Dict[str, float]] = {}
+
+    for entity in entities:
+        if not entity:
+            continue
+        subset = (
+            cast(pd.DataFrame, frame[frame["name"].astype(str) == str(entity)])
+            if "name" in frame.columns
+            else frame
+        )
+        values: Dict[str, float] = {}
+        for group in CITYLEARN_V2_BUILDING_KPI_GROUPS.values():
+            for logical_name, v2_names in group.items():
+                value = _extract_value(subset, v2_names, prefer_district=False)
+                if value is None:
+                    value = _extract_value(
+                        subset,
+                        _district_names_to_building(LEGACY_VALUE_FALLBACKS.get(logical_name, ())),
+                        prefer_district=False,
+                    )
+                if value is not None:
+                    values[logical_name] = value
+        if values:
+            output[str(entity)] = values
+
+    return output
+
+
+def district_kpi_frame_rows(df: pd.DataFrame) -> List[Dict[str, object]]:
+    """Return evaluate_v2 rows at district level as plain dict records."""
+
+    if df is None or getattr(df, "empty", True):
+        return []
+
+    frame = df
+    if "level" in frame.columns:
+        frame = frame[
+            (frame["level"].astype(str).str.lower() == "district")
+            | (frame["name"].astype(str) == DISTRICT)
+        ]
+    elif "name" in frame.columns:
+        frame = frame[frame["name"].astype(str) == DISTRICT]
+
+    if frame.empty:
+        return []
+
+    return [dict(row) for row in cast(Any, frame).to_dict("records")]
+
+
+def kpi_frame_to_rows(df: pd.DataFrame) -> List[Dict[str, object]]:
+    """Serialize a full evaluate_v2 frame to dict rows."""
+
+    if df is None or getattr(df, "empty", True):
+        return []
+
+    return [dict(row) for row in df.to_dict(orient="records")]
 
 
 def evaluate_citylearn_v2_kpis(env) -> Dict[str, float]:

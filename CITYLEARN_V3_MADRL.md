@@ -131,7 +131,7 @@ Precision AC=2.0, Ultra-Freezers=0.8, splits=2.8).
 - `B_02.csv` through `B_17.csv` provide monthly measured meter inputs.
   `Building_1.csv` is preserved because there is no matching `buildingcsv`
   source for B_01. All building CSVs keep the 12-column, 26,304-row structure.
-- `tools/distill_building_loads.py` converts monthly measurements into hourly
+- `tools/dataset/distill_building_loads.py` converts monthly measurements into hourly
   CityLearn loads by calendar-aware transformations, not arbitrary synthesis.
   `EnergiaActivaHoraPunta` and `EnergiaActivaFueraPunta` are the physical kWh
   source; `totalEnergiaActiva` is used as fallback only when the peak/off-peak
@@ -145,7 +145,7 @@ Precision AC=2.0, Ultra-Freezers=0.8, splits=2.8).
   CityLearn-compatible hourly `electricity_pricing` plus 1/2/3-hour forecasts.
 - Missing months are forecasted with `calendar_month_mean_overlap_scaled` and
   documented in `tools/dataset_docs/distillation_report.csv`.
-- `tools/generate_iquitos_dataset.py` synchronizes names, areas, PV sizing
+- `tools/dataset/generate_iquitos_dataset.py` synchronizes names, areas, PV sizing
   (pvlib SAPM, SunPower SPR-315E), BESS sizing (Hesse 2017 method), EV charger
   profiles (50 files) and carbon intensity (0.671-0.790 kgCO2/kWh, RAGEI 2019).
 - `dhw_demand` is non-zero only for B05 (Hotel, 614 kWh/day), B11 (Hospital,

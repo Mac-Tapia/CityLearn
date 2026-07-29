@@ -1,4 +1,7 @@
 """Train MATD3 on CityLearn v3 using the PyTorch marlbenchmark/off-policy backend."""
+# The off-policy backend is added to sys.path at runtime, and cleanup/reporting
+# catches backend-specific failures so training artifacts can still be finalized.
+# pylint: disable=import-error,broad-exception-caught
 
 from __future__ import annotations
 
@@ -193,11 +196,18 @@ def main() -> int:
         }
         for agent_id in range(env.num_agents)
     }
+    obs_shape = env.observation_space[0].shape
+    share_obs_shape = env.share_observation_space[0].shape
+    if not obs_shape or not share_obs_shape:
+        raise ValueError(
+            f"MATD3 requires non-scalar observation spaces, got "
+            f"obs={obs_shape!r}, shared={share_obs_shape!r}"
+        )
     replay_ram_gib = estimate_matd3_replay_ram_gib(
         per_policy_buffer=per_policy_buffer,
         num_agents=env.num_agents,
-        obs_dim=int(env.observation_space[0].shape[0]),
-        share_obs_dim=int(env.share_observation_space[0].shape[0]),
+        obs_dim=int(obs_shape[0]),
+        share_obs_dim=int(share_obs_shape[0]),
         act_dim=int(np.sum(get_dim_from_space(env.action_space[0]))),
         share_policy=bool(all_args.share_policy),
         use_same_share_obs=bool(all_args.use_same_share_obs),

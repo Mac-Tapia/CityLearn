@@ -112,9 +112,9 @@ class ScenarioManager:
     
     def __init__(self):
         """Initialize scenario manager"""
-        self.current_scenario = None
-        self.current_config = None
-        self.outage_schedule = []
+        self.current_scenario: Optional[str] = None
+        self.current_config: Optional[ScenarioConfig] = None
+        self.outage_schedule: List[Tuple[int, int]] = []
     
     def select_scenario(self, scenario_name: str) -> ScenarioConfig:
         """Select and initialize a scenario
@@ -135,11 +135,15 @@ class ScenarioManager:
         if self.current_config.enable_outages:
             self.outage_schedule = self._generate_outage_schedule()
         
-        logger.info(f"Selected scenario {scenario_name}: {self.current_config.description}")
+        logger.info(
+            "Selected scenario %s: %s",
+            scenario_name,
+            self.current_config.description,
+        )
         
         return self.current_config
     
-    def _generate_outage_schedule(self, year_hours: int = 8760, seed: int = None) -> List[Tuple[int, int]]:
+    def _generate_outage_schedule(self, year_hours: int = 8760, seed: Optional[int] = None) -> List[Tuple[int, int]]:
         """Generate random outage schedule for the year
         
         Args:
@@ -153,14 +157,16 @@ class ScenarioManager:
             np.random.seed(seed)
         
         config = self.current_config
-        n_outages = np.random.poisson(config.outage_frequency)  # Random number of outages
+        if config is None:
+            raise RuntimeError("No scenario selected; call select_scenario() first")
+        n_outages = int(np.random.poisson(config.outage_frequency))  # Random number of outages
         
         outages = []
         for _ in range(n_outages):
             # Random start hour
-            start_hour = np.random.randint(0, year_hours)
+            start_hour = int(np.random.randint(0, year_hours))
             # Random duration
-            duration = np.random.randint(config.outage_duration_min, config.outage_duration_max + 1)
+            duration = int(np.random.randint(config.outage_duration_min, config.outage_duration_max + 1))
             end_hour = min(start_hour + duration, year_hours)
             
             outages.append((start_hour, end_hour))
@@ -168,7 +174,11 @@ class ScenarioManager:
         # Sort by start hour
         outages.sort(key=lambda x: x[0])
         
-        logger.info(f"Generated {len(outages)} outages for scenario {self.current_scenario}")
+        logger.info(
+            "Generated %d outages for scenario %s",
+            len(outages),
+            self.current_scenario,
+        )
         
         return outages
     
@@ -181,7 +191,7 @@ class ScenarioManager:
         Returns:
             True if hour is during an outage, False otherwise
         """
-        if not self.current_config.enable_outages:
+        if self.current_config is None or not self.current_config.enable_outages:
             return False
         
         for start, end in self.outage_schedule:
@@ -199,24 +209,27 @@ class ScenarioManager:
         Returns:
             Tariff multiplier (1.0 = base rate)
         """
-        if self.current_config.use_time_of_use:
+        config = self.current_config
+        if config is None:
+            return 1.0
+        if config.use_time_of_use:
             # TOU: Peak (8-22h) = 1.5x, Off-peak = 0.5x
             hour_of_day = hour % 24
             if 8 <= hour_of_day < 22:
-                return 1.5 * self.current_config.tariff_multiplier
+                return 1.5 * config.tariff_multiplier
             else:
-                return 0.5 * self.current_config.tariff_multiplier
+                return 0.5 * config.tariff_multiplier
         
-        elif self.current_config.use_real_time_pricing:
+        elif config.use_real_time_pricing:
             # RTP: Simulate variable pricing with sinusoidal pattern + noise
             hour_of_year = hour % 8760
             base_price = 1.0 + 0.5 * np.sin(2 * np.pi * hour_of_year / 8760)
             noise = np.random.normal(0, 0.1)
-            rtp = np.clip(base_price + noise, 0.5, 1.5)
-            return rtp * self.current_config.tariff_multiplier
+            rtp = float(np.clip(base_price + noise, 0.5, 1.5))
+            return rtp * config.tariff_multiplier
         
         else:
-            return self.current_config.tariff_multiplier
+            return config.tariff_multiplier
     
     def get_dr_signal(self, hour: int, grid_load: float, threshold: float = 0.8) -> Optional[Dict]:
         """Get demand response signal if scenario enables it
@@ -229,17 +242,19 @@ class ScenarioManager:
         Returns:
             DR signal dict or None if not applicable
         """
-        if not self.current_config.enable_dr_signals:
+        del hour  # Retained in the public API for compatibility with callers.
+        config = self.current_config
+        if config is None or not config.enable_dr_signals:
             return None
         
         # Trigger DR signal if grid load is high
-        if grid_load > self.current_config.dr_signal_threshold:
+        if grid_load > config.dr_signal_threshold:
             return {
                 "type": "load_reduction",
                 "target_reduction": 0.2 + 0.3 * (grid_load - threshold),  # 20-50% reduction
                 "duration_hours": 2,
-                "reward_bonus": 0.5 if self.current_config.dr_response_required else 0.0,
-                "penalty": -0.3 if self.current_config.dr_response_required else 0.0
+                "reward_bonus": 0.5 if config.dr_response_required else 0.0,
+                "penalty": -0.3 if config.dr_response_required else 0.0
             }
         
         return None
@@ -321,12 +336,17 @@ class ScenarioManager:
             else f"rtp_daily_amplified_x{config.tariff_multiplier}"
         )
         logger.info(
-            f"Scenario {self.current_scenario}: applied {scenario_type} tariff "
-            f"to {modified_count} buildings."
+            "Scenario %s: applied %s tariff to %d buildings.",
+            self.current_scenario,
+            scenario_type,
+            modified_count,
         )
 
         if config.enable_outages:
-            logger.info(f"Outages enabled: {len(self.outage_schedule)} scheduled outages")
+            logger.info(
+                "Outages enabled: %d scheduled outages",
+                len(self.outage_schedule),
+            )
     
     def get_scenario_description(self) -> Dict:
         """Get human-readable scenario description"""
@@ -360,18 +380,18 @@ class ExperimentalDesign:
     Design:
     - 4 algorithms: HAPPO, MASAC, MATD3, MAAC
     - 3 scenarios: E1 (flexibility), E2 (carbon), E3 (cost)
-    - 10 random seeds
-    - Total: 4 × 3 × 10 = 120 experiments
+    - 12 random seeds
+    - Total: 4 × 3 × 12 = 144 experiments
     """
     
     N_ALGORITHMS = 4
     N_SCENARIOS = 3
-    N_SEEDS = 10
+    N_SEEDS = 12
     N_EXPERIMENTS = N_ALGORITHMS * N_SCENARIOS * N_SEEDS
     
     ALGORITHMS = ["HAPPO", "MASAC", "MATD3", "MAAC"]
     SCENARIOS = ["E1", "E2", "E3"]
-    SEEDS = list(range(42, 42 + N_SEEDS))
+    SEEDS = list(range(N_SEEDS))  # 0..11 (canonical, matches citylearn.v3.config)
     
     def __init__(self):
         """Initialize experiment design"""

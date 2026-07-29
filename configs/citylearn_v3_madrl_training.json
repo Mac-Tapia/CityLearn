@@ -126,7 +126,7 @@
     },
     "profiles": {
       "HAPPO": {
-        "profile_name": "happo_unified_comparable_v3",
+        "profile_name": "happo_unified_comparable_v4",
         "axis_weight_multipliers": {
           "flex": 1.0,
           "carbon": 1.0,
@@ -137,15 +137,17 @@
         "reward_scale": 1.0,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "bess_cycle_weight": 0.1,
+        "bess_cycle_scale": 0.05,
         "ev_soc_tolerance": 0.05,
         "ev_soc_critical_deficit": 0.25,
-        "ev_urgency_hours": 4.0,
-        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.7,
         "ev_urgency_deficit_weight": 0.3,
-        "ev_idle_deficit_weight": 0.15
+        "ev_idle_deficit_weight": 0.25
       },
       "MASAC": {
-        "profile_name": "masac_unified_comparable_v3",
+        "profile_name": "masac_unified_comparable_v4",
         "axis_weight_multipliers": {
           "flex": 1.0,
           "carbon": 1.0,
@@ -156,15 +158,17 @@
         "reward_scale": 1.0,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "bess_cycle_weight": 0.1,
+        "bess_cycle_scale": 0.05,
         "ev_soc_tolerance": 0.05,
         "ev_soc_critical_deficit": 0.25,
-        "ev_urgency_hours": 4.0,
-        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.7,
         "ev_urgency_deficit_weight": 0.3,
-        "ev_idle_deficit_weight": 0.15
+        "ev_idle_deficit_weight": 0.25
       },
       "MATD3": {
-        "profile_name": "matd3_unified_comparable_v3",
+        "profile_name": "matd3_unified_comparable_v4",
         "axis_weight_multipliers": {
           "flex": 1.0,
           "carbon": 1.0,
@@ -175,15 +179,17 @@
         "reward_scale": 1.0,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "bess_cycle_weight": 0.1,
+        "bess_cycle_scale": 0.05,
         "ev_soc_tolerance": 0.05,
         "ev_soc_critical_deficit": 0.25,
-        "ev_urgency_hours": 4.0,
-        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.7,
         "ev_urgency_deficit_weight": 0.3,
-        "ev_idle_deficit_weight": 0.15
+        "ev_idle_deficit_weight": 0.25
       },
       "MAAC": {
-        "profile_name": "maac_unified_comparable_v3",
+        "profile_name": "maac_unified_comparable_v4",
         "axis_weight_multipliers": {
           "flex": 1.0,
           "carbon": 1.0,
@@ -194,12 +200,14 @@
         "reward_scale": 1.0,
         "ramp_weight": 0.35,
         "peak_weight": 0.45,
+        "bess_cycle_weight": 0.1,
+        "bess_cycle_scale": 0.05,
         "ev_soc_tolerance": 0.05,
         "ev_soc_critical_deficit": 0.25,
-        "ev_urgency_hours": 4.0,
-        "ev_departure_deficit_weight": 0.55,
+        "ev_urgency_hours": 8.0,
+        "ev_departure_deficit_weight": 0.7,
         "ev_urgency_deficit_weight": 0.3,
-        "ev_idle_deficit_weight": 0.15
+        "ev_idle_deficit_weight": 0.25
       }
     }
   },

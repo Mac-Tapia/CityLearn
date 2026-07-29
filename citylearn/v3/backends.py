@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from citylearn.official_madrl import OFFICIAL_MADRL_SOURCES, official_backend_status
 from citylearn.v3.config import CityLearnV3ExperimentConfig
@@ -17,7 +17,7 @@ TRAINING_CONFIG_YAML = PROJECT_ROOT / "CityLearn" / "configs" / "citylearn_v3_ma
 TRAINING_CONFIG_JSON = PROJECT_ROOT / "CityLearn" / "configs" / "citylearn_v3_madrl_training.json"
 
 
-def _load_backend_lock() -> Dict[str, object]:
+def _load_backend_lock() -> Dict[str, Any]:
     if not BACKENDS_LOCK.exists():
         return {}
 
@@ -31,7 +31,7 @@ def citylearn_v3_backend_manifest(
     config: Optional[CityLearnV3ExperimentConfig] = None,
     *,
     algorithms: Optional[Iterable[str]] = None,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Return the source-backed training manifest for CityLearn v3."""
 
     config = CityLearnV3ExperimentConfig() if config is None else config

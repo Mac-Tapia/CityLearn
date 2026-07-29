@@ -55,7 +55,7 @@ param(
     [int]$MaacStepsPerUpdate = 100,
     [int]$MaacNumUpdates = 8,
     [int]$MaacLiveHeartbeatSeconds = 30,
-    [switch]$Cuda = $true,
+    [bool]$Cuda = $true,
     [switch]$LiveOutput,
     [switch]$DryRun,
     [switch]$SkipCompleted
@@ -293,7 +293,7 @@ if (-not (Test-Path -LiteralPath $ReadinessScript)) {
     throw "Dataset readiness gate not found: $ReadinessScript"
 }
 
-$ReadinessManifest = Join-Path $ProjectRoot "outputs\dataset_audit\training_dataset_ready_manifest.json"
+$ReadinessManifest = Join-Path $ProjectRoot "data\dataset_audit\training_dataset_ready_manifest.json"
 $DatasetDirResolved = Split-Path -Parent $SchemaPathResolved
 
 # Check if a fresh manifest already exists (written in the last 6 hours with status=ready).
@@ -319,11 +319,13 @@ if (-not $skipGate) {
     Write-Host "Validating raw CityLearn dataset before MADRL normalization..." -ForegroundColor Cyan
     # --skip-citylearn-load evita instanciar CityLearnEnv 3 veces desde CSV.
     # El env se valida cuando arranque el primer run de entrenamiento.
+    # Canonical audit root after outputs simplification: data/dataset_audit
+    New-Item -ItemType Directory -Force -Path (Join-Path $ProjectRoot "data\dataset_audit") | Out-Null
     & $Python -B "tools\check_training_dataset_ready.py" `
         --dataset-dir $DatasetDirResolved `
         --buildingcsv-dir "CityLearn\data\buildingcsv" `
-        --audit-dir "outputs\dataset_audit" `
-        --manifest-out "outputs\dataset_audit\training_dataset_ready_manifest.json" `
+        --audit-dir "data\dataset_audit" `
+        --manifest-out "data\dataset_audit\training_dataset_ready_manifest.json" `
         --skip-citylearn-load
     $readinessExit = $LASTEXITCODE
     if ($readinessExit -ne 0) {

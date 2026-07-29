@@ -8,7 +8,7 @@ while training algorithms may use the concatenated global state for CTDE.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, cast
 
 import numpy as np
 from gymnasium import spaces
@@ -30,7 +30,7 @@ DEFAULT_17_BUILDING_EV_SCHEMA = (
     Path(__file__).resolve().parents[1]
     / "data"
     / "datasets"
-    / "citylearn_challenge_2022_phase_all_plus_evs"
+    / "citylearn_iquitos_2023_2025"
     / "schema.json"
 )
 CITYLEARN_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -65,7 +65,7 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
 
     def __init__(
         self,
-        env: CityLearnEnv,
+        env: Any,
         *,
         reward_aggregation: str = "team_mean",
         scenario: Optional[str] = None,
@@ -104,7 +104,14 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
         seed: Optional[int] = None,
         options: Optional[Mapping] = None,
     ) -> Tuple[Dict[str, np.ndarray], Dict[str, dict]]:
-        observations, info = self.env.reset(seed=seed, options=options)
+        if seed is None and options is None:
+            observations, info = self.env.reset()
+        elif seed is None:
+            observations, info = self.env.reset(options=options)
+        elif options is None:
+            observations, info = self.env.reset(seed=seed)
+        else:
+            observations, info = self.env.reset(seed=seed, options=options)
         self.agents = self.possible_agents[:]
         self._last_observations = self._observations_to_dict(observations)
         infos = {agent: dict(info) for agent in self.agents}
@@ -123,11 +130,11 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
             raise KeyError(f"Missing actions for active CityLearn agents: {missing}")
 
         ordered_actions = [
-            self._clip_action(agent, actions[agent])
+            self._clip_action(agent, actions[agent]).tolist()
             for agent in self.agents
         ]
 
-        result = self.env.step(ordered_actions)
+        result = cast(Tuple, self.env.step(ordered_actions))
         if len(result) == 5:
             observations, rewards, terminated, truncated, info = result
         elif len(result) == 4:
@@ -186,7 +193,8 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
     def close(self):
         self.env.close()
 
-    def render(self):
+    def render(self, mode: str = "human"):
+        del mode  # CityLearn v2 render does not take a mode argument.
         return self.env.render()
 
     def _agent_names(self) -> List[str]:
@@ -303,13 +311,16 @@ def make_citylearn_dec_pomdp(
     """Create a Dec-POMDP wrapper for any CityLearn v2 schema/dataset."""
 
     schema = resolve_citylearn_schema_path(schema_path)
+    init_kwargs = dict(citylearn_kwargs)
+    if episode_time_steps is not None:
+        init_kwargs["episode_time_steps"] = episode_time_steps
+    if random_seed is not None:
+        init_kwargs["random_seed"] = random_seed
     env = CityLearnEnv(
         str(schema),
         central_agent=False,
-        episode_time_steps=episode_time_steps,
-        random_seed=random_seed,
         offline=offline,
-        **citylearn_kwargs,
+        **init_kwargs,
     )
 
     if scenario is not None:

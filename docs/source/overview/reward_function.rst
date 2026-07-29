@@ -33,7 +33,7 @@ How to Define a Custom Reward Function
 
 CityLearn also allows for custom reward functions by inheriting the base :py:class:`citylearn.reward_function.RewardFunction`:
 
-.. include:: ../../../examples/custom_reward_function.py
+.. include:: ../../../../examples_madrl_v3/custom_reward_function.py
     :code: python
     :start-line: 11
 

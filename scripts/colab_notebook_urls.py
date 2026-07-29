@@ -1,20 +1,20 @@
 """Canonical Open-in-Colab URLs for madrl_citylearn_v3_tutorial.ipynb.
 
-Keep these constants aligned with REPO_BRANCH / CITYLEARN_BRANCH in the notebook.
-The notebook file is committed on Mac-Tapia/CityLearn; Colab opens that copy directly.
+Keep these constants aligned with REPO_BRANCH in the notebook.
+The notebook lives at repo-root examples_madrl_v3/ on Mac-Tapia/MADRLCitytleranflexresdr.
 """
 
 from __future__ import annotations
 
 COLAB_NOTEBOOK_OWNER = "Mac-Tapia"
-COLAB_NOTEBOOK_REPO = "CityLearn"
-COLAB_NOTEBOOK_BRANCH = "codex/iquitos-distillation-madrl-docs"
-COLAB_NOTEBOOK_PATH = "examples/madrl_citylearn_v3_tutorial.ipynb"
+COLAB_NOTEBOOK_REPO = "MADRLCitytleranflexresdr"
+COLAB_NOTEBOOK_BRANCH = "codex/fix-madrl-traceability-docs"
+COLAB_NOTEBOOK_PATH = "examples_madrl_v3/madrl_citylearn_v3_tutorial.ipynb"
 
-PARENT_REPO_OWNER = "Mac-Tapia"
-PARENT_REPO_NAME = "MADRLCitytleranflexresdr"
-PARENT_REPO_BRANCH = "codex/fix-madrl-traceability-docs"
-PARENT_NOTEBOOK_PATH = "CityLearn/examples/madrl_citylearn_v3_tutorial.ipynb"
+PARENT_REPO_OWNER = COLAB_NOTEBOOK_OWNER
+PARENT_REPO_NAME = COLAB_NOTEBOOK_REPO
+PARENT_REPO_BRANCH = COLAB_NOTEBOOK_BRANCH
+PARENT_NOTEBOOK_PATH = COLAB_NOTEBOOK_PATH
 
 COLAB_BADGE_SVG = "https://colab.research.google.com/assets/colab-badge.svg"
 
@@ -24,7 +24,7 @@ def github_colab_url(*, owner: str, repo: str, branch: str, path: str) -> str:
 
 
 def open_in_colab_url() -> str:
-    """Primary badge URL — notebook on CityLearn live branch."""
+    """Primary badge URL — notebook on parent repo branch."""
     return github_colab_url(
         owner=COLAB_NOTEBOOK_OWNER,
         repo=COLAB_NOTEBOOK_REPO,
@@ -34,13 +34,8 @@ def open_in_colab_url() -> str:
 
 
 def open_in_colab_parent_url() -> str:
-    """Alternate URL via parent repo (submodule pointer; may lag CityLearn HEAD)."""
-    return github_colab_url(
-        owner=PARENT_REPO_OWNER,
-        repo=PARENT_REPO_NAME,
-        branch=PARENT_REPO_BRANCH,
-        path=PARENT_NOTEBOOK_PATH,
-    )
+    """Same as primary URL (notebook lives on the parent repo)."""
+    return open_in_colab_url()
 
 
 def markdown_badge_line() -> str:

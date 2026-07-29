@@ -1810,7 +1810,9 @@ def _happo_salvage_tail_pending_count(
             job_output_dir,
             target_episodes=int(args.episodes),
             episode_time_steps=int(args.episode_time_steps),
-            rollout_threads=int(args.happo_n_rollout_threads),
+            rollout_threads=max(
+                1, int(getattr(args, "happo_n_rollout_threads", None) or 2)
+            ),
             output_root=output_root,
         ):
             pending_tail += 1
@@ -1940,6 +1942,9 @@ def run_dynamic_backfill_jobs(
     is eligible when HAPPO/S OR MAAC/S completes (OR dependency). Eligible phase-2 jobs
     are admitted lightest-first as concurrency slots free.
     """
+    # Callers that skip main() (e.g. validate_launch_config dry-run) leave
+    # --happo-n-rollout-threads as None; resolve before any int() use.
+    _resolve_auto_happo_rollout_threads(args)
     cuda_fraction = _phase_cuda_fraction(args)
     masac_cuda_fraction = _masac_cuda_fraction(args)
     vram_gib = float(getattr(args, "_detected_vram_gib", 0.0) or 80.0)

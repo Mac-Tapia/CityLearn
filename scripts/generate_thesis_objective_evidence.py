@@ -1731,7 +1731,7 @@ def marllib_rows() -> List[Dict[str, Any]]:
         {
             "section": "Rol en la tesis",
             "content": "MARLlib se conserva como marco de referencia para comparar terminologia, patrones CTDE y organizacion de algoritmos multiagente.",
-            "evidence": "tools/skills/madrl-citylearn-thesis-plan/references/module-a-plan-literature.md",
+            "evidence": "agent-skills/madrl-citylearn-thesis-plan/references/module-a-plan-literature.md",
             "status": "referencia_metodologica",
         },
         {

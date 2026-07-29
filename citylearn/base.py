@@ -24,7 +24,7 @@ class EpisodeTracker:
     """
     
     def __init__(self, simulation_start_time_step: int, simulation_end_time_step: int):
-        self.__episode = None
+        self.__episode: int = -1
         self.__episode_start_time_step = None
         self.__episode_end_time_step = None
         self.__simulation_start_time_step = simulation_start_time_step
@@ -32,7 +32,7 @@ class EpisodeTracker:
         self.reset_episode_index()
 
     @property
-    def episode(self):
+    def episode(self) -> int:
         """Current episode index"""
 
         return self.__episode
@@ -133,7 +133,7 @@ class EpisodeTracker:
 
         if random_episode_split:
             seed = int(random_seed*(self.episode + 1))
-            nprs = np.random.RandomState(seed)
+            nprs = np.random.RandomState(seed)  # pylint: disable=no-member
             ix = 0 if len(splits) == 1 else int(nprs.choice(len(splits)))
 
         else:
@@ -213,10 +213,10 @@ class Environment:
         return self.__seconds_per_time_step
     
     @property
-    def numpy_random_state(self) -> np.random.RandomState:
+    def numpy_random_state(self) -> "np.random.RandomState":  # pylint: disable=no-member
         """Nupy random state object."""
 
-        return np.random.RandomState(self.random_seed)
+        return np.random.RandomState(self.random_seed)  # pylint: disable=no-member
     
     @random_seed.setter
     def random_seed(self, random_seed: int):

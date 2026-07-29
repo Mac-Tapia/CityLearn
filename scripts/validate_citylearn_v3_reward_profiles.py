@@ -1,4 +1,7 @@
 """Validate CityLearn v3 MADRL reward profiles by algorithm and axis."""
+# This white-box validator intentionally verifies the reward's internal EV
+# component terms in addition to its public aggregate.
+# pylint: disable=protected-access
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -32,12 +36,14 @@ EXPECTED_PROFILE = {
     "reward_scale": 1.00,
     "ramp_weight": 0.35,
     "peak_weight": 0.45,
+    "bess_cycle_weight": 0.10,
+    "bess_cycle_scale": 0.05,
     "ev_soc_tolerance": 0.05,
     "ev_soc_critical_deficit": 0.25,
-    "ev_urgency_hours": 4.0,
-    "ev_departure_deficit_weight": 0.55,
+    "ev_urgency_hours": 8.0,
+    "ev_departure_deficit_weight": 0.70,
     "ev_urgency_deficit_weight": 0.30,
-    "ev_idle_deficit_weight": 0.15,
+    "ev_idle_deficit_weight": 0.25,
 }
 
 
@@ -91,6 +97,13 @@ def validate_reinforced_ev_soc_penalty(errors: list[str]) -> dict:
     }
 
 
+def _zero_action(env: Any, agent: str) -> np.ndarray:
+    space = env.action_space(agent)
+    if space.shape is None:
+        raise ValueError(f"Expected a shaped action space for {agent!r}")
+    return np.zeros(space.shape, dtype=np.float32)
+
+
 def main() -> int:
     args = parse_args()
     algorithms = ("HAPPO", "MASAC", "MATD3", "MAAC")
@@ -109,16 +122,21 @@ def main() -> int:
             )
 
             try:
-                metadata = describe_environment(env)["reward_metadata"]
+                raw_metadata = describe_environment(env)["reward_metadata"]
+                if not isinstance(raw_metadata, Mapping):
+                    raise TypeError("describe_environment returned non-mapping reward_metadata")
+                metadata: Mapping[str, Any] = raw_metadata
                 _observations, _infos = env.reset(seed=args.seed)
                 zero_actions = {
-                    agent: np.zeros(env.action_space(agent).shape, dtype=np.float32)
+                    agent: _zero_action(env, agent)
                     for agent in env.possible_agents
                 }
                 _next_observations, rewards, _terminations, _truncations, _infos = env.step(zero_actions)
-                axis_weights = metadata.get("axis_weights") or {}
-                profile = metadata.get("profile") or {}
-                expected_profile_name = f"{algorithm.lower()}_unified_comparable_v3"
+                raw_axis_weights = metadata.get("axis_weights")
+                axis_weights = raw_axis_weights if isinstance(raw_axis_weights, Mapping) else {}
+                raw_profile = metadata.get("profile")
+                profile = raw_profile if isinstance(raw_profile, Mapping) else {}
+                expected_profile_name = f"{algorithm.lower()}_unified_comparable_v4"
 
                 if metadata.get("function") != "CityLearnV3MADRLRewardFunction":
                     errors.append(f"{algorithm}/{scenario}: reward function is {metadata.get('function')}")
@@ -145,9 +163,9 @@ def main() -> int:
                     "algorithm": algorithm,
                     "scenario": scenario,
                     "reward_function": metadata.get("function"),
-                    "profile": metadata.get("profile", {}).get("profile_name"),
+                    "profile": profile.get("profile_name"),
                     "profile_parameters": {
-                        key: metadata.get("profile", {}).get(key)
+                        key: profile.get(key)
                         for key in EXPECTED_PROFILE
                     },
                     "axis_weights": axis_weights,
@@ -167,7 +185,7 @@ def main() -> int:
             "expected_reward_function": "CityLearnV3MADRLRewardFunction",
             "expected_axis_weights": EXPECTED_AXIS_WEIGHTS,
             "expected_profile": EXPECTED_PROFILE,
-            "expected_profile_policy": "unified_comparable_v3 for statistical comparability across MADRL backends with reinforced EV SOC service",
+            "expected_profile_policy": "unified_comparable_v4 for statistical comparability across MADRL backends with reinforced EV SOC service and BESS cycle penalty",
             "reinforced_ev_soc_penalty_check": ev_soc_penalty_check,
         },
         "rows": rows,

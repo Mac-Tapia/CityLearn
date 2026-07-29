@@ -33,6 +33,18 @@ class _KPIFrame:
         assert orient == "records"
         return [
             {
+                "level": "district",
+                "name": "District",
+                "cost_function": "district_energy_grid_total_import_control_kwh",
+                "value": 100.0,
+            },
+            {
+                "level": "district",
+                "name": "District",
+                "cost_function": "district_emissions_total_control_kgco2",
+                "value": 50.0,
+            },
+            {
                 "level": "building",
                 "name": "Building_1",
                 "cost_function": "building_energy_grid_total_import_control_kwh",
@@ -43,6 +55,12 @@ class _KPIFrame:
                 "name": "Building_1",
                 "cost_function": "building_energy_grid_total_export_control_kwh",
                 "value": 2.0,
+            },
+            {
+                "level": "building",
+                "name": "Building_1",
+                "cost_function": "building_emissions_total_control_kgco2",
+                "value": 5.0,
             },
             {
                 "level": "building",
@@ -71,10 +89,10 @@ class _ObjectiveEnv:
     possible_agents = ["Building_1", "Building_2"]
     env = _CoreEnv()
 
-    def action_space(self, agent):
+    def action_space(self, _agent):
         return _Space(1)
 
-    def observation_space(self, agent):
+    def observation_space(self, _agent):
         return _Space(2)
 
     def get_kpi_frame(self):
@@ -216,6 +234,9 @@ def _report():
             "carbon_emissions": 1.1,
             "electricity_cost": 0.8,
         },
+        "building_axis_kpis": {},
+        "building_objective_kpis": [],
+        "building_count": 0,
     }
 
 
@@ -289,10 +310,17 @@ def test_training_artifacts_use_data_checkpoints_and_figures_layout(tmp_path):
     assert (tables_dir / "agent_reward_summary.csv").is_file()
     assert (tables_dir / "building_behavior_summary.csv").is_file()
     assert (tables_dir / "building_kpis.csv").is_file()
+    assert (tables_dir / "building_objective_kpis.csv").is_file()
+    assert (tables_dir / "district_kpis.csv").is_file()
+    assert (tables_dir / "citylearn_kpi_frame.csv").is_file()
     assert (tables_dir / "building_observation_action_schema.csv").is_file()
     assert (tables_dir / "building_trace_sample.csv").is_file()
     assert (tables_dir / "checkpoint_inventory.csv").is_file()
     assert (data_dir / "building_behavior_summary.csv").is_file()
+    assert (data_dir / "building_kpis.csv").is_file()
+    assert (data_dir / "building_objective_kpis.csv").is_file()
+    assert (data_dir / "district_kpis.csv").is_file()
+    assert (data_dir / "citylearn_kpi_frame.csv").is_file()
     assert (output_dir / "building_behavior_summary.csv").is_file()
 
     results = json.loads((data_dir / "results.json").read_text(encoding="utf-8"))
@@ -301,6 +329,10 @@ def test_training_artifacts_use_data_checkpoints_and_figures_layout(tmp_path):
     assert results["figures"]["figure_count"] >= 12
     assert results["building_count"] == 2
     assert results["building_detail"]["building_behavior_summary"]["rows"] == 2
+    assert results["building_detail"]["building_kpis"]["rows"] >= 4
+    assert results["building_detail"]["building_objective_kpis"]["rows"] >= 1
+    assert results["building_detail"]["district_kpis"]["rows"] >= 1
+    assert results["kpi_levels"]["building_evaluate_v2_rows"] >= 4
     assert results["normalization"]["normalize_observations"] is True
 
     checkpoint_manifest = json.loads((data_dir / "checkpoint_manifest.json").read_text(encoding="utf-8"))

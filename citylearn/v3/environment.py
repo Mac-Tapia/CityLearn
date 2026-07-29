@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from citylearn.dec_pomdp import (
     DEFAULT_17_BUILDING_EV_SCHEMA,
@@ -83,7 +83,7 @@ def make_citylearn_v3_project_env(
     )
 
 
-def describe_environment(env: CityLearnDecPOMDPEnv) -> Dict[str, object]:
+def describe_environment(env: CityLearnDecPOMDPEnv) -> Dict[str, Any]:
     """Return a compact, testable description of a CityLearn v3 environment."""
 
     exposed_env = getattr(env, "env", env)

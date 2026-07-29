@@ -1,5 +1,8 @@
+from typing import Tuple, cast
+
 import numpy as np
 import pytest
+from gymnasium.spaces import Box
 
 from citylearn.v3 import (
     CityLearnV3ExperimentConfig,
@@ -18,7 +21,8 @@ def test_citylearn_v3_config_keeps_thesis_experiment_design():
 
     assert config.algorithms == ("HAPPO", "MASAC", "MATD3", "MAAC")
     assert config.scenarios == ("E1", "E2", "E3")
-    assert config.experiment_count == 120
+    assert config.seeds == tuple(range(12))
+    assert config.experiment_count == 144  # 4 algorithms × 3 scenarios × 12 seeds
     assert config.central_agent is False
     assert config.use_citylearn_v2_kpis is True
     assert config.expose_all_citylearn_v2_kpis is True
@@ -85,7 +89,10 @@ def test_citylearn_v3_objective_report_uses_citylearn_v2_kpis_and_derived_dr_met
         env.reset()
         for _ in range(3):
             actions = {
-                agent: np.zeros(env.action_space(agent).shape, dtype=np.float32)
+                agent: np.zeros(
+                    cast(Tuple[int, ...], env.action_space(agent).shape),
+                    dtype=np.float32,
+                )
                 for agent in env.agents
             }
             env.step(actions)
@@ -117,7 +124,10 @@ def test_citylearn_v3_env_is_generic_for_citylearn_v2_datasets():
         observations, _ = env.reset()
         description = describe_environment(env)
         actions = {
-            agent: np.zeros(env.action_space(agent).shape, dtype=np.float32)
+            agent: np.zeros(
+                cast(Tuple[int, ...], env.action_space(agent).shape),
+                dtype=np.float32,
+            )
             for agent in env.agents
         }
         env.step(actions)
@@ -150,8 +160,14 @@ def test_citylearn_v3_env_can_normalize_observations_before_training():
         assert description["normalize_observations"] is True
         assert np.nanmin(values) >= 0.0
         assert np.nanmax(values) <= 1.0
-        assert all(float(env.observation_space(agent).low.min()) == 0.0 for agent in env.agents)
-        assert all(float(env.observation_space(agent).high.max()) == 1.0 for agent in env.agents)
+        assert all(
+            float(cast(Box, env.observation_space(agent)).low.min()) == 0.0
+            for agent in env.agents
+        )
+        assert all(
+            float(cast(Box, env.observation_space(agent)).high.max()) == 1.0
+            for agent in env.agents
+        )
     finally:
         env.close()
 

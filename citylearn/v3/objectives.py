@@ -14,7 +14,7 @@ exported natively by ``evaluate_v2`` in this codebase.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Dict, Iterable, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, cast
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,7 @@ import pandas as pd
 from citylearn.madrl_kpis import (
     CITYLEARN_V2_KPI_GROUPS,
     evaluate_citylearn_v2_kpi_frame,
+    extract_citylearn_v2_building_kpis,
     extract_citylearn_v2_kpis,
 )
 
@@ -245,7 +246,7 @@ def _make_kpi_traces() -> Dict[str, KPITrace]:
 KPI_TRACES: Mapping[str, KPITrace] = _make_kpi_traces()
 
 
-def objective_manifest() -> Dict[str, object]:
+def objective_manifest() -> Dict[str, Any]:
     """Return a serializable manifest of objectives and KPI provenance."""
 
     axes = {}
@@ -269,6 +270,15 @@ def objective_manifest() -> Dict[str, object]:
             "lower_is_better": {
                 name: trace.lower_is_better
                 for name, trace in KPI_TRACES.items()
+            },
+            "algorithm_selection": {
+                "package": "uc3m.multicriteria",
+                "methods": ("TOPSIS", "AHP"),
+                "criteria": ("C1", "C2", "C3", "C4", "C5", "C6"),
+                "note": (
+                    "District OE1/OE2/OE3 KPIs feed technical criteria; "
+                    "full six-dimension selection lives in uc3m.multicriteria."
+                ),
             },
         },
     }
@@ -297,15 +307,18 @@ def _value_from_frame(frame: pd.DataFrame, names: Iterable[str]) -> Optional[flo
     if frame.empty or not {"cost_function", "value"}.issubset(frame.columns):
         return None
 
-    rows = frame[frame["cost_function"].isin(tuple(names))]
+    rows = cast(pd.DataFrame, frame[frame["cost_function"].isin(tuple(names))])
     if rows.empty:
         return None
 
     if {"level", "name"}.issubset(rows.columns):
-        district_rows = rows[(rows["level"] == "district") | (rows["name"] == "District")]
+        district_rows = cast(
+            pd.DataFrame,
+            rows[(rows["level"] == "district") | (rows["name"] == "District")],
+        )
         rows = district_rows if not district_rows.empty else rows
 
-    values = [_safe_float(value) for value in rows["value"]]
+    values = [_safe_float(value) for value in rows["value"].tolist()]
     values = [value for value in values if value is not None]
     return None if not values else float(np.mean(values))
 
@@ -317,7 +330,7 @@ def _safe_div(numerator: Optional[float], denominator: Optional[float]) -> Optio
     return float(numerator / denominator)
 
 
-def _series(values: Sequence[float]) -> np.ndarray:
+def _series(values: Sequence[float] | np.ndarray) -> np.ndarray:
     array = np.asarray(values, dtype=float).reshape(-1)
     return array[np.isfinite(array)]
 
@@ -344,7 +357,7 @@ def _district_price_signal(env, length: int) -> Optional[np.ndarray]:
     return np.nanmean([series[:min_len] for series in price_series], axis=0)
 
 
-def price_signal_deviation(load: Sequence[float], price: Sequence[float]) -> Optional[float]:
+def price_signal_deviation(load: Sequence[float] | np.ndarray, price: Sequence[float] | np.ndarray) -> Optional[float]:
     """Return deviation from an inverse-price demand-response shape.
 
     Load is clipped to grid import, normalized to [0, 1], and compared with
@@ -410,7 +423,7 @@ def derived_price_signal_metrics(env) -> Dict[str, Optional[float]]:
     return derived_price_signal_kpis(env)
 
 
-def _comparison(value: Optional[float], trace: KPITrace, *, baseline: Optional[float]) -> Dict[str, object]:
+def _comparison(value: Optional[float], trace: KPITrace, *, baseline: Optional[float]) -> Dict[str, Any]:
     if value is None:
         return {
             "available": False,
@@ -451,7 +464,7 @@ def _paired_baseline_name(name: str) -> Optional[str]:
     return None
 
 
-def _baseline_for(name: str, values: Mapping[str, float], trace: KPITrace) -> Optional[float]:
+def _baseline_for(name: str, values: Mapping[str, float]) -> Optional[float]:
     if name == "price_signal_deviation":
         return values.get("price_signal_deviation_baseline")
 
@@ -468,13 +481,16 @@ def _baseline_for(name: str, values: Mapping[str, float], trace: KPITrace) -> Op
     return None
 
 
-def _axis_baseline_summary(axis: ObjectiveAxis, value_report: Mapping[str, Mapping[str, object]]) -> Dict[str, int]:
-    comparisons = [
-        value_report[kpi]["comparison"]
-        for kpi in axis.kpis
-        if value_report[kpi]["comparison"]["improved_vs_baseline"] is not None
-    ]
-    improved = sum(1 for comparison in comparisons if comparison["improved_vs_baseline"] is True)
+def _axis_baseline_summary(axis: ObjectiveAxis, value_report: Mapping[str, Mapping[str, Any]]) -> Dict[str, int]:
+    comparisons = []
+    for kpi in axis.kpis:
+        comparison = value_report[kpi].get("comparison")
+        if not isinstance(comparison, Mapping):
+            continue
+        if comparison.get("improved_vs_baseline") is None:
+            continue
+        comparisons.append(comparison)
+    improved = sum(1 for comparison in comparisons if comparison.get("improved_vs_baseline") is True)
 
     return {
         "comparable_kpis": len(comparisons),
@@ -483,8 +499,38 @@ def _axis_baseline_summary(axis: ObjectiveAxis, value_report: Mapping[str, Mappi
     }
 
 
-def evaluate_objectives(env) -> Dict[str, object]:
-    """Evaluate thesis objectives for a completed or partial CityLearn episode."""
+def building_objective_kpi_rows(frame: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Flatten per-building OE KPIs using the official OE1/OE2/OE3 name sets."""
+
+    rows: List[Dict[str, Any]] = []
+    per_building = extract_citylearn_v2_building_kpis(frame)
+
+    for building, values in sorted(per_building.items()):
+        for axis_code, axis in OBJECTIVE_AXES.items():
+            for kpi_name in axis.kpis:
+                if kpi_name not in values:
+                    continue
+                rows.append({
+                    "level": "building",
+                    "name": building,
+                    "building": building,
+                    "axis": axis_code,
+                    "axis_name": axis.name,
+                    "kpi": kpi_name,
+                    "value": values[kpi_name],
+                    "source": "citylearn_v2.evaluate_v2.building",
+                })
+
+    return rows
+
+
+def evaluate_objectives(env) -> Dict[str, Any]:
+    """Evaluate thesis objectives for a completed or partial CityLearn episode.
+
+    District-level OE KPIs are the primary project metrics. Building-level OE
+    KPIs (same logical names, per building) are included so training artifacts
+    persist both district and building tables for every MADRL × scenario run.
+    """
 
     citylearn_env = _unwrap_env(env)
     frame = evaluate_citylearn_v2_kpi_frame(citylearn_env)
@@ -504,11 +550,11 @@ def evaluate_objectives(env) -> Dict[str, object]:
         if key != "price_signal_deviation"
     }
     all_values = {**axis_kpis, **supporting_values}
-    value_report: Dict[str, Dict[str, object]] = {}
+    value_report: Dict[str, Dict[str, Any]] = {}
 
     for name, trace in KPI_TRACES.items():
         value = all_values.get(name)
-        baseline = _baseline_for(name, all_values, trace)
+        baseline = _baseline_for(name, all_values)
         value_report[name] = {
             "value": value,
             "trace": asdict(trace),
@@ -534,6 +580,8 @@ def evaluate_objectives(env) -> Dict[str, object]:
         name: all_values.get(name)
         for name in KPI_TRACES
     }
+    building_kpis = extract_citylearn_v2_building_kpis(frame)
+    building_rows = building_objective_kpi_rows(frame)
 
     return {
         "manifest": objective_manifest(),
@@ -543,4 +591,7 @@ def evaluate_objectives(env) -> Dict[str, object]:
         "supporting_values": supporting_values,
         "all_values": all_values,
         "kpi_frame_rows": int(len(frame)),
+        "building_axis_kpis": building_kpis,
+        "building_objective_kpis": building_rows,
+        "building_count": len(building_kpis),
     }

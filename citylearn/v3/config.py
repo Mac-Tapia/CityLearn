@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 from citylearn.dec_pomdp import DEFAULT_17_BUILDING_EV_SCHEMA
+
+# Canonical MADRL campaign seed budget for this project (smoke/demos may use seed 0 only).
+N_SEEDS = 12
+SEEDS: Tuple[int, ...] = tuple(range(N_SEEDS))  # 0..11
 
 
 @dataclass(frozen=True)
@@ -22,7 +26,7 @@ class CityLearnV3ExperimentConfig:
     schema_path: Path = DEFAULT_17_BUILDING_EV_SCHEMA
     algorithms: Tuple[str, ...] = ("HAPPO", "MASAC", "MATD3", "MAAC")
     scenarios: Tuple[str, ...] = ("E1", "E2", "E3")
-    seeds: Tuple[int, ...] = tuple(range(10))
+    seeds: Tuple[int, ...] = SEEDS
     episode_time_steps: int = 8760
     reward_aggregation: str = "team_mean"
     reward_function: str = "citylearn.reward_function.CityLearnV3MADRLRewardFunction"
@@ -33,15 +37,15 @@ class CityLearnV3ExperimentConfig:
     multiobjective_method: str = "TOPSIS"
     marl_framework: str = "MARLlib"
     expose_all_citylearn_v2_kpis: bool = True
-    citylearn_kwargs: Dict[str, object] = field(default_factory=dict)
-    model: Dict[str, object] = field(
+    citylearn_kwargs: Dict[str, Any] = field(default_factory=dict)
+    model: Dict[str, Any] = field(
         default_factory=lambda: {
             "hidden_sizes": [256, 256],
             "core_arch": "mlp",
             "recurrent_option": ["gru", "lstm"],
         }
     )
-    hyperparameters: Dict[str, object] = field(
+    hyperparameters: Dict[str, Any] = field(
         default_factory=lambda: {
             "actor_lr": 3e-4,
             "critic_lr": 1e-3,

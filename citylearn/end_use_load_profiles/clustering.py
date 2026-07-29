@@ -44,7 +44,7 @@ class Clustering:
     @maximum_clusters.setter
     def maximum_clusters(self, value: int):
         value = math.ceil(len(self.bldg_ids)/2) if value is None else value
-        assert 2 <= value < len(self.bldg_ids), f'maximum_clusters must be > 2 and less than number of bldg_ids'
+        assert 2 <= value < len(self.bldg_ids), 'maximum_clusters must be > 2 and less than number of bldg_ids'
         self.__maximum_clusters = value
 
     @sum_of_squares_error_minimum_percent_change.setter
@@ -99,7 +99,7 @@ class Clustering:
             np.array(sum_of_squares_error, dtype=float)[:-1] 
             - np.array(sum_of_squares_error, dtype=float)[1:]
         )*100/np.array(sum_of_squares_error, dtype=float)[:-1]
-        sse_candidates = np.array(clusters[:-1], dtype=int)[
+        sse_candidates = np.array(clusters[:-1], dtype=int)[  # pylint: disable=unused-variable  # noqa: F841
             sum_of_squares_error_change < self.sum_of_squares_error_minimum_percent_change
         ]
         optimal_clusters = np.nanmean([
@@ -155,11 +155,11 @@ class MetadataClustering(Clustering):
         data['in.window_to_wall_ratio'] = data['in.window_area_ft_2']/data['in.wall_area_above_grade_exterior_ft_2']
 
         # vintage
-        data['in.vintage'] = data['in.vintage'].replace('\D', '', regex=True).astype(int)
+        data['in.vintage'] = data['in.vintage'].replace(r'\D', '', regex=True).astype(int)
 
         # orientation: cosine transformation
         order = ['North', 'Northeast', 'East', 'Southeast', 'South', 'Southwest', 'West', 'Northwest']
-        data['in.orientation'] = data['in.orientation'].map(lambda x: order.index(x))
+        data['in.orientation'] = data['in.orientation'].map(order.index)
         data['in.orientation_hour_sin'] = np.sin(2 * np.pi * data['in.orientation']/(len(order)-1))
         data['in.orientation_hour_cos'] = np.cos(2 * np.pi * data['in.orientation']/(len(order)-1))
         data = data.drop(columns=['in.orientation'])

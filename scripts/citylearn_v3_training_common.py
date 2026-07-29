@@ -1,4 +1,9 @@
 """Shared CityLearn v3 training launch utilities for external MADRL backends."""
+# Optional backends and Colab integrations are imported only on their execution
+# paths; broad catches deliberately isolate those non-critical integrations.
+# pylint: disable=broad-exception-caught,import-error,no-name-in-module
+# pylint: disable=protected-access,redefined-outer-name,reimported,unused-argument
+# pylint: disable=keyword-arg-before-vararg,dangerous-default-value
 
 from __future__ import annotations
 
@@ -6,6 +11,7 @@ import argparse
 import contextlib
 import csv
 import hashlib
+import importlib
 import itertools
 import json
 import os
@@ -17,7 +23,7 @@ import time
 import types
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 # Force a headless matplotlib backend for every MADRL training script. Some external
 # backends (e.g. external/MARL MASAC runner_msac.py) import matplotlib.pyplot at module
@@ -212,7 +218,7 @@ def _iter_selective_mirror_sources(fuse_src: Path) -> List[Path]:
     return sorted(sources, key=_priority)
 
 
-def _mirror_plan_score(report: Mapping[str, object]) -> tuple:
+def _mirror_plan_score(report: Mapping[str, Any]) -> tuple:
     return (
         int(report.get("completed") or 0),
         int(report.get("resumable") or 0),
@@ -294,11 +300,11 @@ def mirror_fuse_run_to_workspace(
     verbose: bool = True,
     progress_every: int = 25,
     progress_seconds: float = 15.0,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Copy resume/skip artifacts from FUSE into writable MyDrive (selective, fast)."""
     fuse_src = Path(fuse_src)
     workspace_dst = Path(workspace_dst)
-    report: Dict[str, object] = {
+    report: Dict[str, Any] = {
         "fuse_src": str(fuse_src),
         "workspace_dst": str(workspace_dst),
         "copied": 0,
@@ -419,7 +425,7 @@ def prepare_colab_drive_mount_context(
     }
 
 
-def print_colab_drive_mount_report(ctx: Mapping[str, object]) -> None:
+def print_colab_drive_mount_report(ctx: Mapping[str, Any]) -> None:
     """Human-readable output for notebook cell 1.5 (mount only)."""
     print(f"[OK] Workspace Drive: {ctx.get('gdrive_root')}")
     print(f"[OK] Outputs entrenamiento: {ctx.get('outputs_parent')}")
@@ -457,12 +463,16 @@ def install_noop_wandb() -> None:
         return
 
     module = types.ModuleType("wandb")
-    module.run = types.SimpleNamespace(dir=str(DEFAULT_OUTPUT_ROOT / "wandb_stub"))
-    module.init = lambda *args, **kwargs: types.SimpleNamespace(
-        dir=str(DEFAULT_OUTPUT_ROOT / "wandb_stub"),
-        finish=lambda: None,
+    setattr(module, "run", types.SimpleNamespace(dir=str(DEFAULT_OUTPUT_ROOT / "wandb_stub")))
+    setattr(
+        module,
+        "init",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            dir=str(DEFAULT_OUTPUT_ROOT / "wandb_stub"),
+            finish=lambda: None,
+        ),
     )
-    module.log = lambda *args, **kwargs: None
+    setattr(module, "log", lambda *args, **kwargs: None)
     sys.modules["wandb"] = module
 
 
@@ -548,7 +558,7 @@ def configure_torch_runtime(
     torch_threads: Optional[int] = None,
     gpu_profile: str = "auto",
     cuda_memory_fraction: Optional[float] = None,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Configure Torch for MADRL training and return runtime metadata."""
 
     if torch_module is None:
@@ -943,11 +953,11 @@ def flush_filesystem_buffers() -> None:
     if mode == "auto" and _colab_mydrive_mount_active():
         return
 
-    sync = getattr(os, "sync", None)
-    if not callable(sync):
+    sync_fn = getattr(os, "sync", None)
+    if sync_fn is None:
         return
     try:
-        sync()
+        sync_fn()  # pylint: disable=not-callable
     except Exception:
         pass
 
@@ -980,7 +990,7 @@ def fsync_file(path: Path, *, allow_mydrive: bool = False) -> None:
             pass
 
 
-def _live_progress_should_fsync(payload: Mapping[str, object]) -> bool:
+def _live_progress_should_fsync(payload: Mapping[str, Any]) -> bool:
     """Throttled fsync for cross-process monitor on Drive; skip heartbeats."""
     if payload.get("backend_training_active"):
         return False
@@ -1000,12 +1010,12 @@ def _artifact_layout_payload(dirs: Mapping[str, Path]) -> Dict[str, str]:
     return {name: str(path) for name, path in dirs.items()}
 
 
-def write_json(path: Path, data: Mapping[str, object]) -> None:
+def write_json(path: Path, data: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True, default=str), encoding="utf-8")
 
 
-def _write_json_mirrors(paths: Sequence[Path], data: Mapping[str, object]) -> None:
+def _write_json_mirrors(paths: Sequence[Path], data: Mapping[str, Any]) -> None:
     for path in paths:
         write_json(path, data)
 
@@ -1089,7 +1099,7 @@ def _mean_current_building_signal(citylearn_env, source_name: str, series_name: 
     return float(np.mean(values))
 
 
-def _compact_array_stats(values: Sequence[float]) -> Dict[str, Optional[float]]:
+def _compact_array_stats(values: Sequence[float] | np.ndarray) -> Dict[str, Optional[float]]:
     try:
         array = np.asarray(values, dtype=float).reshape(-1)
     except (TypeError, ValueError):
@@ -1126,7 +1136,7 @@ def _csv_safe(value):
     return json.dumps(value, sort_keys=True, default=str)
 
 
-def write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
+def write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     """Atomically write rows to a CSV (tmp file + replace) so a crash mid-write never
     leaves a half-written/torn file on Drive."""
     path = Path(path)
@@ -1149,12 +1159,12 @@ def write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
                 pass
 
 
-def _write_csv_mirrors(paths: Sequence[Path], rows: Sequence[Mapping[str, object]]) -> None:
+def _write_csv_mirrors(paths: Sequence[Path], rows: Sequence[Mapping[str, Any]]) -> None:
     for path in paths:
         write_csv(path, rows)
 
 
-def read_csv_rows(path: Path) -> List[Dict[str, object]]:
+def read_csv_rows(path: Path) -> List[Dict[str, Any]]:
     """Read a CSV written by write_csv back into a list of dict rows (values as str)."""
     path = Path(path)
     if not path.is_file():
@@ -1220,16 +1230,16 @@ def _stream_rewrite_csv_rows_lt_episode(
 
 
 def _dedup_rows_keep_first(
-    rows: Sequence[Mapping[str, object]],
+    rows: Sequence[Mapping[str, Any]],
     keys: Sequence[str],
-) -> List[Dict[str, object]]:
+) -> List[Dict[str, Any]]:
     """Drop duplicate rows sharing the same `keys`, keeping the FIRST occurrence.
 
     Used on resume to clean an incremental CSV that a buggy/old run polluted with
     duplicate (episode, step[, agent]) rows, guaranteeing one row per key in file order.
     """
     seen: set = set()
-    out: List[Dict[str, object]] = []
+    out: List[Dict[str, Any]] = []
     for row in rows:
         signature = tuple(str(row.get(k)) for k in keys)
         if signature in seen:
@@ -1241,7 +1251,7 @@ def _dedup_rows_keep_first(
 
 def _append_csv_rows_stable_schema(
     path: Path,
-    rows: Sequence[Mapping[str, object]],
+    rows: Sequence[Mapping[str, Any]],
     fieldnames: Sequence[str],
 ) -> None:
     """Append rows to a CSV using a KNOWN-STABLE header (no new keys).
@@ -1262,7 +1272,7 @@ def _append_csv_rows_stable_schema(
             writer.writerow({key: _csv_safe(row.get(key)) for key in fieldnames})
 
 
-def _write_markdown_table(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
+def _write_markdown_table(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if not rows:
@@ -1289,7 +1299,7 @@ def _resolve_objective_env(candidate):
     if hasattr(candidate, "adapter"):
         adapter = getattr(candidate, "adapter", None)
 
-        if hasattr(adapter, "env"):
+        if adapter is not None and hasattr(adapter, "env"):
             return adapter.env
 
     if hasattr(candidate, "envs"):
@@ -1327,7 +1337,7 @@ def _resolve_adapter(candidate):
     return None
 
 
-def _empty_objectives() -> Dict[str, object]:
+def _empty_objectives() -> Dict[str, Any]:
     from citylearn.v3.objectives import objective_manifest
 
     return {
@@ -1338,10 +1348,13 @@ def _empty_objectives() -> Dict[str, object]:
         "supporting_values": {},
         "all_values": {},
         "kpi_frame_rows": 0,
+        "building_axis_kpis": {},
+        "building_objective_kpis": [],
+        "building_count": 0,
     }
 
 
-def _adapter_completed_objectives(adapter) -> Optional[Mapping[str, object]]:
+def _adapter_completed_objectives(adapter) -> Optional[Mapping[str, Any]]:
     if adapter is None:
         return None
 
@@ -1353,7 +1366,7 @@ def _adapter_completed_objectives(adapter) -> Optional[Mapping[str, object]]:
     return None
 
 
-def _last_timeseries_row(adapter) -> Dict[str, object]:
+def _last_timeseries_row(adapter) -> Dict[str, Any]:
     rows = getattr(adapter, "timeseries_records", None) if adapter is not None else None
 
     if not rows:
@@ -1362,7 +1375,7 @@ def _last_timeseries_row(adapter) -> Dict[str, object]:
     return dict(rows[-1])
 
 
-def _report_source_metadata(candidate, adapter, objective_env, source_type: str) -> Dict[str, object]:
+def _report_source_metadata(candidate, adapter, objective_env, source_type: str) -> Dict[str, Any]:
     last_row = _last_timeseries_row(adapter)
     return {
         "type": source_type,
@@ -1386,8 +1399,8 @@ def _report_source_metadata(candidate, adapter, objective_env, source_type: str)
     }
 
 
-def _report_warnings(report_source: Mapping[str, object], objectives: Mapping[str, object]) -> List[Dict[str, object]]:
-    warnings: List[Dict[str, object]] = []
+def _report_warnings(report_source: Mapping[str, Any], objectives: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    warnings: List[Dict[str, Any]] = []
     source_type = report_source.get("type")
     last_all_done = report_source.get("last_recorded_all_done")
 
@@ -1422,7 +1435,7 @@ def _report_warnings(report_source: Mapping[str, object], objectives: Mapping[st
     return warnings
 
 
-def citylearn_v3_training_report(candidate) -> Dict[str, object]:
+def citylearn_v3_training_report(candidate) -> Dict[str, Any]:
     """Return standardized CityLearn v2 KPI reporting for a launcher.
 
     The report is intentionally shared by HAPPO, MASAC, MATD3 and MAAC so each
@@ -1436,6 +1449,7 @@ def citylearn_v3_training_report(candidate) -> Dict[str, object]:
     objective_env = _resolve_objective_env(candidate)
     completed_objectives = _adapter_completed_objectives(adapter)
 
+    objectives: Mapping[str, Any]
     if completed_objectives is not None:
         objectives = completed_objectives
         source_type = "last_completed_episode_snapshot"
@@ -1443,7 +1457,7 @@ def citylearn_v3_training_report(candidate) -> Dict[str, object]:
         objectives = _empty_objectives()
         source_type = "none"
     else:
-        objectives = evaluate_objectives(objective_env)
+        objectives = cast(Mapping[str, Any], evaluate_objectives(objective_env))
         source_type = "current_environment"
 
     report_source = _report_source_metadata(candidate, adapter, objective_env, source_type)
@@ -1455,13 +1469,18 @@ def citylearn_v3_training_report(candidate) -> Dict[str, object]:
         "supporting_values": objectives["supporting_values"],
         "all_values": objectives["all_values"],
         "kpi_frame_rows": objectives["kpi_frame_rows"],
+        "building_axis_kpis": objectives.get("building_axis_kpis", {}),
+        "building_objective_kpis": list(
+            cast(Sequence[Mapping[str, Any]], objectives.get("building_objective_kpis") or [])
+        ),
+        "building_count": int(cast(Any, objectives.get("building_count") or 0)),
         "objective_manifest": objectives["manifest"],
         "report_source": report_source,
         "report_warnings": _report_warnings(report_source, objectives),
     }
 
 
-def _checkpoint_files(output_dir: Path, checkpoint_dir: Optional[Path] = None) -> List[Dict[str, object]]:
+def _checkpoint_files(output_dir: Path, checkpoint_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
     checkpoint_extensions = {".pt", ".pkl", ".pth", ".ckpt", ".zip"}
     output = []
     checkpoint_dir = checkpoint_dir if checkpoint_dir is not None else output_dir
@@ -1488,7 +1507,7 @@ def job_has_final_results(output_dir: Path) -> bool:
     return (output_dir / "data" / "results.json").is_file() or (output_dir / "results.json").is_file()
 
 
-def read_job_results_json(output_dir: Path) -> Optional[Dict[str, object]]:
+def read_job_results_json(output_dir: Path) -> Optional[Dict[str, Any]]:
     output_dir = Path(output_dir)
     for rel in ("data/results.json", "results.json"):
         path = output_dir / rel
@@ -1502,7 +1521,7 @@ def read_job_results_json(output_dir: Path) -> Optional[Dict[str, object]]:
 
 
 def _resolve_job_target_episodes(
-    payload: Mapping[str, object],
+    payload: Mapping[str, Any],
     *,
     target_episodes: Optional[int] = None,
 ) -> Optional[int]:
@@ -1518,7 +1537,7 @@ def _resolve_job_target_episodes(
     return _as_int(target)
 
 
-def _recorded_episodes_from_results(payload: Mapping[str, object]) -> Optional[int]:
+def _recorded_episodes_from_results(payload: Mapping[str, Any]) -> Optional[int]:
     recorded = _as_int(payload.get("episodes_recorded"))
     if recorded is not None:
         return recorded
@@ -1528,7 +1547,7 @@ def _recorded_episodes_from_results(payload: Mapping[str, object]) -> Optional[i
     return None
 
 
-def _kpi_evaluated_episodes_from_results(payload: Mapping[str, object]) -> Optional[int]:
+def _kpi_evaluated_episodes_from_results(payload: Mapping[str, Any]) -> Optional[int]:
     """Last resume-slice episode count in results.json (not total training progress).
 
     On ``--resume``, train scripts often pass the *remaining* slice as ``extra.episodes``
@@ -1546,7 +1565,7 @@ def _kpi_evaluated_episodes_from_results(payload: Mapping[str, object]) -> Optio
     return None
 
 
-def _results_have_audited_kpis(payload: Optional[Mapping[str, object]]) -> bool:
+def _results_have_audited_kpis(payload: Optional[Mapping[str, Any]]) -> bool:
     if not payload:
         return False
     report = payload.get("citylearn_v3_report")
@@ -1557,7 +1576,7 @@ def _results_have_audited_kpis(payload: Optional[Mapping[str, object]]) -> bool:
 
 
 def training_episodes_from_artifacts(
-    payload: Mapping[str, object],
+    payload: Mapping[str, Any],
     output_dir: Path,
     *,
     algorithm: str,
@@ -1575,7 +1594,7 @@ def training_episodes_from_artifacts(
 
 
 def _grounded_completed_episodes_for_skip(
-    payload: Mapping[str, object],
+    payload: Mapping[str, Any],
     output_dir: Path,
     *,
     algorithm: str,
@@ -1602,7 +1621,7 @@ def _grounded_completed_episodes_for_skip(
 
 
 def _kpi_audited_results_prove_job_complete(
-    payload: Mapping[str, object],
+    payload: Mapping[str, Any],
     *,
     target_episodes: int,
     grounded_episodes: int,
@@ -1739,12 +1758,12 @@ def reconcile_stale_job_launcher_marker(
     return removed
 
 
-def _payload_algorithm(payload: Mapping[str, object]) -> str:
+def _payload_algorithm(payload: Mapping[str, Any]) -> str:
     hyperparameters = dict(payload.get("hyperparameters") or {})
     return str(payload.get("algorithm") or hyperparameters.get("algorithm_family") or "").lower()
 
 
-def _infer_rollout_threads(payload: Optional[Mapping[str, object]]) -> int:
+def _infer_rollout_threads(payload: Optional[Mapping[str, Any]]) -> int:
     if not payload:
         return 1
     hyperparameters = dict(payload.get("hyperparameters") or {})
@@ -1790,7 +1809,7 @@ def clamp_happo_n_rollout_threads(
     return max(1, stored)
 
 
-def read_job_launcher_complete_marker(output_dir: Path) -> Optional[Dict[str, object]]:
+def read_job_launcher_complete_marker(output_dir: Path) -> Optional[Dict[str, Any]]:
     output_dir = Path(output_dir)
     for rel in (f"{DATA_DIR_NAME}/{JOB_LAUNCHER_COMPLETE_MARKER}", JOB_LAUNCHER_COMPLETE_MARKER):
         path = output_dir / rel
@@ -1897,7 +1916,7 @@ def infer_completed_episodes_from_timeseries_global_step(
 def _adapter_completed_episode_count_from_artifacts(
     output_dir: Path,
     *,
-    live_progress: Optional[Mapping[str, object]] = None,
+    live_progress: Optional[Mapping[str, Any]] = None,
 ) -> int:
     """``completed_episode_count`` from live_progress or persisted results audit."""
     if live_progress is None:
@@ -1948,7 +1967,7 @@ def infer_trustable_completed_episodes(
     algorithm: str,
     episode_time_steps: int,
     rollout_threads: int = 1,
-    live_progress: Optional[Mapping[str, object]] = None,
+    live_progress: Optional[Mapping[str, Any]] = None,
 ) -> int:
     """Episode count safe for skip/resume decisions (never inflated by CSV row heuristics)."""
     output_dir = Path(output_dir)
@@ -2236,7 +2255,7 @@ def _max_inferred_completed_episodes(
 
 
 def _payload_recorded_episodes_met_target(
-    payload: Mapping[str, object],
+    payload: Mapping[str, Any],
     output_dir: Path,
     algorithm: str,
     target_episodes: int,
@@ -2548,7 +2567,7 @@ def repair_happo_results_json_kpi_audit(output_dir: Path) -> bool:
     if isinstance(all_values, Mapping) and all_values:
         return False
 
-    repaired: Optional[Dict[str, object]] = None
+    repaired: Optional[Dict[str, Any]] = None
     for key in ("axis_kpis", "supporting_values", "objective_axis_kpis", "project_axis_metrics"):
         candidate = report.get(key)
         if isinstance(candidate, Mapping) and candidate:
@@ -2658,7 +2677,7 @@ def _latest_launcher_job_record(
     *,
     algorithm: str,
     scenario: str,
-) -> Optional[Dict[str, object]]:
+) -> Optional[Dict[str, Any]]:
     """Most recent launcher job row for algo/scenario from ``official_full_status.json``."""
     path = Path(output_root) / "official_full_status.json"
     if not path.is_file():
@@ -2786,7 +2805,7 @@ def job_counts_as_launcher_complete(
     return False
 
 
-def read_live_progress_json(output_dir: Path) -> Optional[Dict[str, object]]:
+def read_live_progress_json(output_dir: Path) -> Optional[Dict[str, Any]]:
     path = Path(output_dir) / "live_progress.json"
     if not path.is_file():
         return None
@@ -2797,7 +2816,7 @@ def read_live_progress_json(output_dir: Path) -> Optional[Dict[str, object]]:
 
 
 def infer_completed_episodes_from_live_progress(
-    live_progress: Mapping[str, object],
+    live_progress: Mapping[str, Any],
     *,
     episode_time_steps: int,
     algorithm: str = "",
@@ -2960,7 +2979,7 @@ def discover_job_resume_plan(
     rollout_threads: int = 1,
     allow_resume: bool = True,
     output_root: Optional[Path] = None,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Plan intra-job resume from Drive/local artifacts when results.json is missing."""
 
     output_dir = Path(output_dir)
@@ -2971,7 +2990,7 @@ def discover_job_resume_plan(
         rollout_threads = clamp_happo_n_rollout_threads(rollout_threads)
     checkpoints_dir = output_dir / CHECKPOINT_DIR_NAME
 
-    plan: Dict[str, object] = {
+    plan: Dict[str, Any] = {
         "active": False,
         "algorithm": algorithm.upper(),
         "target_episodes": target_episodes,
@@ -3129,7 +3148,7 @@ def preview_job_launcher_decision(
     rollout_threads: Optional[int] = None,
     allow_resume: bool = True,
     output_root: Optional[Path] = None,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Mirror ``--skip-completed`` + intra-job resume for notebook cell 2.1b / launcher 7.2."""
     output_dir = Path(output_dir)
     algo = algorithm.lower()
@@ -3177,7 +3196,7 @@ def preview_job_launcher_decision(
         output_root=output_root,
     )
 
-    result: Dict[str, object] = {
+    result: Dict[str, Any] = {
         "algorithm": algorithm.upper(),
         "output_dir": str(output_dir),
         "target_episodes": target_episodes,
@@ -3301,12 +3320,12 @@ CANONICAL_COLAB_JOB_ACTIONS: Dict[tuple, str] = {
 
 
 def validate_canonical_colab_skip_plan(
-    report: Mapping[str, object],
+    report: Mapping[str, Any],
     *,
     expected_actions: Optional[Mapping[tuple, str]] = None,
     expected_completed: int = CANONICAL_COLAB_SKIP_COMPLETED,
     expected_resumable: int = CANONICAL_COLAB_SKIP_RESUMABLE,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Validate 9x SKIP (MASAC/MATD3/MAAC) + 3x HAPPO resume for canonical Colab relaunch."""
     expected_actions = dict(expected_actions or CANONICAL_COLAB_JOB_ACTIONS)
     completed = int(report.get("completed") or 0)
@@ -3348,7 +3367,7 @@ def validate_canonical_colab_skip_plan(
 
 
 def assert_canonical_colab_skip_plan(
-    report: Mapping[str, object],
+    report: Mapping[str, Any],
     *,
     output_root: Optional[Path] = None,
 ) -> None:
@@ -3495,7 +3514,7 @@ def build_jobs_resume_report(
     episode_time_steps: int = 8760,
     happo_rollout_threads: Optional[int] = None,
     seed: int = 0,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Per-job skip/resume preview for every algo x scenario under ``output_root``.
 
     Single source of truth for the notebook preview tables (cells 2.1b and 7.1 §4)
@@ -3507,7 +3526,7 @@ def build_jobs_resume_report(
     scenarios = [str(s) for s in scenarios]
     target_episodes = max(1, int(target_episodes))
 
-    rows: List[Dict[str, object]] = []
+    rows: List[Dict[str, Any]] = []
     done = resume = pending = restart = 0
     episodes_done = 0
 
@@ -3579,7 +3598,7 @@ def build_jobs_resume_report(
 
 
 def print_jobs_resume_report(
-    report: Mapping[str, object],
+    report: Mapping[str, Any],
     *,
     show_launcher_line: bool = True,
     show_footer_hint: bool = True,
@@ -3611,7 +3630,7 @@ def print_jobs_resume_report(
     if show_footer_hint:
         print("\n  Siguiente: ejecuta 6.1 -> 7.0 -> 7.1 -> 7.2 (no modifiques nada mas).")
         print("  Tras 7.1, vuelve a ejecutar esta celda 2.1b para confirmar HAPPO rollout_threads.")
-        print(f"  7.2 usa --skip-completed (omite COMPLETOS) y resume intra-job (continua los")
+        print("  7.2 usa --skip-completed (omite COMPLETOS) y resume intra-job (continua los")
         print(f"  REANUDABLES desde su ultimo checkpoint) hasta completar los {target} episodios.")
 
 
@@ -3654,7 +3673,7 @@ def summarize_madrl_output_run(
     target_episodes: int = 50,
     episode_time_steps: int = 8760,
     happo_rollout_threads: Optional[int] = None,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Summarize one output root from existing artifacts only (no invented progress)."""
     output_root = Path(output_root)
     fuse_readonly = is_colab_fuse_restricted_path(output_root)
@@ -3724,11 +3743,11 @@ def audit_madrl_drive_output_runs(
     episode_time_steps: int = 8760,
     happo_rollout_threads: Optional[int] = None,
     preferred_output_root: Optional[Path] = None,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Audit every ``madrl_v3_*`` folder; rank by artifact-grounded completeness."""
     parent = Path(parent)
     runs = list_madrl_v3_output_runs(parent)
-    summaries: List[Dict[str, object]] = [
+    summaries: List[Dict[str, Any]] = [
         summarize_madrl_output_run(
             run_path,
             target_episodes=target_episodes,
@@ -3739,11 +3758,11 @@ def audit_madrl_drive_output_runs(
     ]
 
     artifact_runs = [s for s in summaries if s.get("has_artifacts")]
-    best: Optional[Dict[str, object]] = None
+    best: Optional[Dict[str, Any]] = None
     if artifact_runs:
         pref = str(preferred_output_root) if preferred_output_root else None
 
-        def _rank(s: Mapping[str, object]) -> tuple:
+        def _rank(s: Mapping[str, Any]) -> tuple:
             is_pref = 1 if pref and str(s.get("output_root")) == pref else 0
             return (float(s.get("score") or 0.0), is_pref, str(s.get("run_name") or ""))
 
@@ -3782,7 +3801,7 @@ def audit_colab_drive_output_sources(
     happo_rollout_threads: Optional[int] = None,
     preferred_output_root: Optional[Path] = None,
     project_name: str = "MADRLCitytleranflexresdr",
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Audit MyDrive + canonical shared folder ``outputs/`` (read-only OK, no mirror)."""
     parents: List[Path] = [Path(base_output_parent)]
     if mount_point is not None:
@@ -3793,7 +3812,7 @@ def audit_colab_drive_output_sources(
             if candidate not in parents:
                 parents.append(candidate)
 
-    by_name: Dict[str, Dict[str, object]] = {}
+    by_name: Dict[str, Dict[str, Any]] = {}
     for parent in parents:
         for run_path in list_madrl_v3_output_runs(parent):
             summary = summarize_madrl_output_run(
@@ -3811,11 +3830,11 @@ def audit_colab_drive_output_sources(
 
     summaries = list(by_name.values())
     artifact_runs = [s for s in summaries if s.get("has_artifacts")]
-    best: Optional[Dict[str, object]] = None
+    best: Optional[Dict[str, Any]] = None
     if artifact_runs:
         pref = str(preferred_output_root) if preferred_output_root else None
 
-        def _rank(s: Mapping[str, object]) -> tuple:
+        def _rank(s: Mapping[str, Any]) -> tuple:
             writable_bonus = 0 if s.get("fuse_readonly") else 1
             is_pref = 1 if pref and str(s.get("output_root")) == pref else 0
             return (
@@ -3845,7 +3864,7 @@ def select_best_resume_output_root(
     episode_time_steps: int = 8760,
     happo_rollout_threads: Optional[int] = None,
     preferred_output_root: Optional[Path] = None,
-) -> Optional[Dict[str, object]]:
+) -> Optional[Dict[str, Any]]:
     """Pick the most complete existing run; never prefer empty timestamp stubs."""
     audit = audit_madrl_drive_output_runs(
         parent,
@@ -3859,9 +3878,9 @@ def select_best_resume_output_root(
 
 
 def print_madrl_drive_runs_audit(
-    audit: Mapping[str, object],
+    audit: Mapping[str, Any],
     *,
-    selected: Optional[Mapping[str, object]] = None,
+    selected: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Human-readable audit of all ``madrl_v3_*`` runs (notebook cell 2.1)."""
     parent = str(audit.get("parent") or "")
@@ -4138,7 +4157,7 @@ def preferred_canonical_run_name(repo: Optional[Path] = None) -> str:
 
 def _in_google_colab() -> bool:
     try:
-        import google.colab  # noqa: F401
+        importlib.import_module("google.colab")
     except ImportError:
         return False
     return True
@@ -4249,18 +4268,16 @@ def _colab_drive_api_credentials():
         except Exception:
             return None
     try:
-        from google.colab import _google_auth
-
-        creds = _google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
+        google_auth = importlib.import_module("google.colab._google_auth")
+        creds = google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
         if creds is not None:
             return creds
     except Exception:
         pass
     ensure_colab_drive_api_auth(verbose=False)
     try:
-        from google.colab import _google_auth
-
-        return _google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
+        google_auth = importlib.import_module("google.colab._google_auth")
+        return google_auth.get_user_credentials(scopes=list(_DRIVE_API_SCOPES))
     except Exception:
         return None
 
@@ -4367,7 +4384,8 @@ def _drive_api_ensure_shortcut(
         mime_type="application/vnd.google-apps.shortcut",
     )
     for item in existing:
-        shortcut = item.get("shortcutDetails") or {}
+        shortcut_details = item.get("shortcutDetails") if isinstance(item, Mapping) else None
+        shortcut = shortcut_details if isinstance(shortcut_details, Mapping) else {}
         if str(shortcut.get("targetId") or "") == str(target_id):
             return False
     body = {
@@ -4387,12 +4405,12 @@ def ensure_shared_canonical_run_on_mount(
     run_name: str,
     shared_folder_id: str = CANONICAL_SHARED_DRIVE_FOLDER_ID,
     wait_seconds: float = 3.0,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Create a Drive shortcut to the shared canonical run when it is missing locally."""
     workspace_outputs = Path(workspace_outputs)
     workspace_outputs.mkdir(parents=True, exist_ok=True)
     local_run = workspace_outputs / run_name
-    report: Dict[str, object] = {
+    report: Dict[str, Any] = {
         "run_name": run_name,
         "shared_folder_id": shared_folder_id,
         "local_run": str(local_run),
@@ -4500,7 +4518,7 @@ def ensure_colab_output_run_ready(
     allow_drive_api_shortcut: bool = True,
     skip_fuse_mirror: bool = False,
     verbose: bool = True,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Cell 2.1 prep: mirror FUSE / Drive API so canonical run is writable on MyDrive."""
     mount_point = Path(mount_point)
     repo = Path(repo)
@@ -4514,8 +4532,8 @@ def ensure_colab_output_run_ready(
     default_outputs = gdrive_root / "outputs"
     default_outputs.mkdir(parents=True, exist_ok=True)
 
-    def _rank_runs(run_paths: Sequence[Path]) -> List[Dict[str, object]]:
-        ranked: List[Dict[str, object]] = []
+    def _rank_runs(run_paths: Sequence[Path]) -> List[Dict[str, Any]]:
+        ranked: List[Dict[str, Any]] = []
         for run_path in run_paths:
             if is_colab_fuse_restricted_path(run_path):
                 continue
@@ -4536,7 +4554,7 @@ def ensure_colab_output_run_ready(
         ranked.sort(key=lambda item: (item["score"], item["run_path"].name), reverse=True)
         return ranked
 
-    def _workspace_run_restorable(workspace_run: Path) -> Optional[Dict[str, object]]:
+    def _workspace_run_restorable(workspace_run: Path) -> Optional[Dict[str, Any]]:
         if not drive_path_is_dir(workspace_run):
             return None
         summary = summarize_madrl_output_run(
@@ -4551,9 +4569,9 @@ def ensure_colab_output_run_ready(
 
     workspace_run = colab_workspace_run_path(gdrive_root, preferred_run_name)
     is_canonical_run = preferred_run_name == preferred_canonical_run_name(repo)
-    mirror_report: Optional[Dict[str, object]] = None
-    skip_plan_validation: Optional[Dict[str, object]] = None
-    api_report: Optional[Dict[str, object]] = None
+    mirror_report: Optional[Dict[str, Any]] = None
+    skip_plan_validation: Optional[Dict[str, Any]] = None
+    api_report: Optional[Dict[str, Any]] = None
 
     fast_root = resolve_colab_mydrive_resume_root(
         gdrive_root,
@@ -4575,7 +4593,7 @@ def ensure_colab_output_run_ready(
         if not workspace_summary.get("has_artifacts"):
             workspace_summary = None
         mount_runs = [workspace_run]
-        ranked = (
+        ranked: List[Dict[str, Any]] = (
             [{"summary": workspace_summary, "score": float(workspace_summary.get("score") or 0.0), "run_path": workspace_run}]
             if workspace_summary is not None
             else []
@@ -4742,7 +4760,7 @@ def ensure_colab_output_run_ready(
     best = ranked[0] if ranked else None
 
     output_root: Optional[Path] = None
-    selected_summary: Optional[Dict[str, object]] = None
+    selected_summary: Optional[Dict[str, Any]] = None
 
     if workspace_summary is not None:
         output_root = workspace_run
@@ -4771,7 +4789,7 @@ def ensure_colab_output_run_ready(
         and selected_summary is not None
         and bool(selected_summary.get("has_artifacts"))
     )
-    binding: Dict[str, object] = {
+    binding: Dict[str, Any] = {
         "mount_point": str(mount_point),
         "project_name": project_name,
         "gdrive_root": str(gdrive_root),
@@ -4810,7 +4828,7 @@ def bind_colab_drive_workspace(
     happo_rollout_threads: Optional[int] = None,
     allow_drive_api_shortcut: bool = True,
     verbose: bool = True,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Legacy wrapper: ensure run ready on Drive and raise if not restorable."""
     mount_point = Path(mount_point)
     repo = Path(repo)
@@ -4858,7 +4876,7 @@ def bind_colab_drive_workspace(
     return binding
 
 
-def print_colab_drive_binding_report(binding: Mapping[str, object]) -> None:
+def print_colab_drive_binding_report(binding: Mapping[str, Any]) -> None:
     """Human-readable verification for notebook cell 2.1 (run restore / mirror)."""
     print(f"[OK] Workspace Drive: {binding.get('gdrive_root')}")
     print(f"[OK] Outputs MADRL: {binding.get('outputs_parent')}")
@@ -4966,7 +4984,7 @@ def pick_colab_output_root(
     ensure_shared_run: bool = False,
     skip_fuse_mirror: bool = False,
     print_audit: bool = True,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Select ``OUTPUT_ROOT`` from MyDrive checkpoints/results (resume or fresh).
 
     Reconnect: only reads ``base_output_parent`` on Drive — no mirror/copy.
@@ -4976,7 +4994,7 @@ def pick_colab_output_root(
     base_output_parent = Path(base_output_parent)
     repo_path = Path(repo) if repo else None
     gdrive_path = Path(gdrive_root) if gdrive_root else None
-    run_ready: Optional[Dict[str, object]] = None
+    run_ready: Optional[Dict[str, Any]] = None
 
     preferred = (
         read_preferred_output_root_hint(repo_path or Path("."), gdrive_root=gdrive_path)
@@ -5140,7 +5158,7 @@ def notebook_jobs_resume_preview(
     label: str = "",
     show_footer_hint: bool = True,
     require_canonical_plan: bool = False,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Single notebook entry point for cells 2.1b and 7.1 (no duplicated loop)."""
     if label:
         print(f"\n[{label}] Preview skip/resume (artefactos en Drive, fuente unica):")
@@ -5207,7 +5225,7 @@ def colab_training_globals_defaults(
     n_episodes: int = 50,
     episode_steps: int = 8760,
     seed: int = 0,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Official two_phase_happo_masac notebook globals (cell 6.1) for cell 7.2 bootstrap."""
     repo = Path(repo)
     output_root = Path(output_root)
@@ -5295,7 +5313,7 @@ def colab_training_globals_defaults(
     }
 
 
-def colab_official_launcher_argv(cfg: Mapping[str, object]) -> List[str]:
+def colab_official_launcher_argv(cfg: Mapping[str, Any]) -> List[str]:
     """Build launcher argv from :func:`colab_training_globals_defaults` (notebook 7.0)."""
     python = str(cfg["PYTHON"])
     launcher = str(cfg["LAUNCHER"])
@@ -5414,7 +5432,7 @@ def bootstrap_colab_notebook_cell_72(
     python_executable: Optional[str] = None,
     require_canonical_plan: bool = True,
     verbose: bool = True,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Self-contained bootstrap for notebook cell 7.2 (git pull → run ONLY 7.2).
 
     Discovers Drive workspace + OUTPUT_ROOT, prints skip/resume plan, and returns
@@ -5519,7 +5537,7 @@ def plan_madrl_duplicate_run_cleanup(
     target_episodes: int = 50,
     episode_time_steps: int = 8760,
     happo_rollout_threads: Optional[int] = None,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Runs to keep/delete using the same artifact score as cell 2.1 (cell 2.1c)."""
     parent = Path(parent)
     active = Path(active_output_root).resolve() if active_output_root else None
@@ -5557,7 +5575,7 @@ def plan_madrl_duplicate_run_cleanup(
     }
 
 
-def write_job_resume_manifest(output_dir: Path, plan: Mapping[str, object]) -> Path:
+def write_job_resume_manifest(output_dir: Path, plan: Mapping[str, Any]) -> Path:
     output_dir = Path(output_dir)
     data_dir = output_dir / DATA_DIR_NAME
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -5584,8 +5602,8 @@ def load_masac_checkpoint_bundle(learner, bundle: Mapping[str, Path], *, use_cud
     learner.target_qmix_net_2.load_state_dict(learner.eval_qmix_net.state_dict())
 
 
-def _episode_summaries(timeseries_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
-    grouped: Dict[int, List[Mapping[str, object]]] = {}
+def _episode_summaries(timeseries_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[int, List[Mapping[str, Any]]] = {}
 
     for row in timeseries_rows:
         episode = row.get("episode")
@@ -5617,7 +5635,7 @@ def _episode_summaries(timeseries_rows: Sequence[Mapping[str, object]]) -> List[
     return summaries
 
 
-def _sum_trace_columns(trace_rows: Sequence[Mapping[str, object]], columns: Sequence[str]) -> Dict[str, float]:
+def _sum_trace_columns(trace_rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> Dict[str, float]:
     totals = {column: 0.0 for column in columns}
 
     for row in trace_rows:
@@ -5630,7 +5648,7 @@ def _sum_trace_columns(trace_rows: Sequence[Mapping[str, object]], columns: Sequ
     return {column: float(value) for column, value in totals.items()}
 
 
-def _trace_sampling_payload(adapter) -> Dict[str, object]:
+def _trace_sampling_payload(adapter) -> Dict[str, Any]:
     interval = getattr(adapter, "trace_record_interval", None) if adapter is not None else None
     detail = getattr(adapter, "trace_detail", None) if adapter is not None else None
     interval_int = _as_int(interval)
@@ -5650,13 +5668,13 @@ def _trace_sampling_payload(adapter) -> Dict[str, object]:
 
 def _artifact_consistency_audit(
     *,
-    report: Mapping[str, object],
-    timeseries_rows: Sequence[Mapping[str, object]],
-    trace_rows: Sequence[Mapping[str, object]],
-    episode_summaries: Sequence[Mapping[str, object]],
+    report: Mapping[str, Any],
+    timeseries_rows: Sequence[Mapping[str, Any]],
+    trace_rows: Sequence[Mapping[str, Any]],
+    episode_summaries: Sequence[Mapping[str, Any]],
     expected_episode_time_steps: Optional[int],
     expected_episodes: Optional[int],
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     report_source = dict(report.get("report_source", {}) or {})
     all_values = dict(report.get("all_values", {}) or {})
     completed_episode_rows = [
@@ -5684,7 +5702,7 @@ def _artifact_consistency_audit(
             "grid_export_kwh",
         ],
     )
-    warnings: List[Dict[str, object]] = list(report.get("report_warnings", []) or [])
+    warnings: List[Dict[str, Any]] = list(report.get("report_warnings", []) or [])
 
     if expected_row_options and len(timeseries_rows) not in expected_row_options:
         warnings.append({
@@ -5759,9 +5777,9 @@ def _artifact_consistency_audit(
     }
 
 
-def _objective_kpi_rows(report: Mapping[str, object]) -> List[Dict[str, object]]:
+def _objective_kpi_rows(report: Mapping[str, Any]) -> List[Dict[str, Any]]:
     axes = report.get("objective_axis_kpis", {})
-    rows: List[Dict[str, object]] = []
+    rows: List[Dict[str, Any]] = []
 
     if not isinstance(axes, Mapping):
         return rows
@@ -5797,9 +5815,9 @@ def _objective_kpi_rows(report: Mapping[str, object]) -> List[Dict[str, object]]
     return rows
 
 
-def _axis_comparison_rows(report: Mapping[str, object]) -> List[Dict[str, object]]:
+def _axis_comparison_rows(report: Mapping[str, Any]) -> List[Dict[str, Any]]:
     axes = report.get("objective_axis_kpis", {})
-    rows: List[Dict[str, object]] = []
+    rows: List[Dict[str, Any]] = []
 
     if not isinstance(axes, Mapping):
         return rows
@@ -5821,7 +5839,7 @@ def _axis_comparison_rows(report: Mapping[str, object]) -> List[Dict[str, object
     return rows
 
 
-def _core_kpi_rows(report: Mapping[str, object]) -> List[Dict[str, object]]:
+def _core_kpi_rows(report: Mapping[str, Any]) -> List[Dict[str, Any]]:
     axis_kpis = report.get("axis_kpis", {})
 
     if not isinstance(axis_kpis, Mapping):
@@ -5852,7 +5870,7 @@ def _core_kpi_rows(report: Mapping[str, object]) -> List[Dict[str, object]]:
     return rows
 
 
-def _numeric_column(rows: Sequence[Mapping[str, object]], key: str) -> List[float]:
+def _numeric_column(rows: Sequence[Mapping[str, Any]], key: str) -> List[float]:
     values: List[float] = []
 
     for row in rows:
@@ -5862,7 +5880,7 @@ def _numeric_column(rows: Sequence[Mapping[str, object]], key: str) -> List[floa
     return values
 
 
-def _valid_pairs(rows: Sequence[Mapping[str, object]], x_key: str, y_key: str) -> List[Tuple[float, float]]:
+def _valid_pairs(rows: Sequence[Mapping[str, Any]], x_key: str, y_key: str) -> List[Tuple[float, float]]:
     points: List[Tuple[float, float]] = []
 
     for row in rows:
@@ -5886,8 +5904,8 @@ def _rolling_mean(values: Sequence[float], window: int) -> List[float]:
     return output
 
 
-def _training_efficiency_rows(timeseries_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
-    grouped: Dict[int, List[Mapping[str, object]]] = {}
+def _training_efficiency_rows(timeseries_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[int, List[Mapping[str, Any]]] = {}
 
     for row in timeseries_rows:
         episode = row.get("episode")
@@ -5897,7 +5915,7 @@ def _training_efficiency_rows(timeseries_rows: Sequence[Mapping[str, object]]) -
 
         grouped.setdefault(int(episode), []).append(row)
 
-    output: List[Dict[str, object]] = []
+    output: List[Dict[str, Any]] = []
 
     for episode, rows in sorted(grouped.items()):
         reward = [_as_float(row.get("reward_sum")) for row in rows]
@@ -5929,8 +5947,8 @@ def _training_efficiency_rows(timeseries_rows: Sequence[Mapping[str, object]]) -
     return output
 
 
-def _exploration_rows(trace_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
-    grouped: Dict[int, List[Mapping[str, object]]] = {}
+def _exploration_rows(trace_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[int, List[Mapping[str, Any]]] = {}
 
     for row in trace_rows:
         episode = row.get("episode")
@@ -5940,7 +5958,7 @@ def _exploration_rows(trace_rows: Sequence[Mapping[str, object]]) -> List[Dict[s
 
         grouped.setdefault(int(episode), []).append(row)
 
-    output: List[Dict[str, object]] = []
+    output: List[Dict[str, Any]] = []
 
     for episode, rows in sorted(grouped.items()):
         action_l2 = [_as_float(row.get("action_l2")) for row in rows]
@@ -5963,8 +5981,8 @@ def _exploration_rows(trace_rows: Sequence[Mapping[str, object]]) -> List[Dict[s
     return output
 
 
-def _agent_reward_rows(trace_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
-    grouped: Dict[str, List[Mapping[str, object]]] = {}
+def _agent_reward_rows(trace_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Mapping[str, Any]]] = {}
 
     for row in trace_rows:
         agent = row.get("agent")
@@ -5974,7 +5992,7 @@ def _agent_reward_rows(trace_rows: Sequence[Mapping[str, object]]) -> List[Dict[
 
         grouped.setdefault(str(agent), []).append(row)
 
-    output: List[Dict[str, object]] = []
+    output: List[Dict[str, Any]] = []
 
     for agent, rows in sorted(grouped.items()):
         rewards = [_as_float(row.get("reward")) for row in rows]
@@ -6121,7 +6139,7 @@ def _space_bound(space, attribute: str, index: int) -> Optional[float]:
     return _as_float(values[index])
 
 
-def _dataframe_like_rows(frame) -> List[Dict[str, object]]:
+def _dataframe_like_rows(frame) -> List[Dict[str, Any]]:
     if frame is None:
         return []
 
@@ -6141,12 +6159,17 @@ def _dataframe_like_rows(frame) -> List[Dict[str, object]]:
     return []
 
 
-def _citylearn_kpi_frame_rows(candidate) -> List[Dict[str, object]]:
+def _citylearn_kpi_frame_rows(candidate) -> List[Dict[str, Any]]:
     adapter = _resolve_adapter(candidate)
     snapshot_rows = getattr(adapter, "last_completed_kpi_frame_rows", None) if adapter is not None else None
 
-    if snapshot_rows:
-        return [dict(row) for row in snapshot_rows]
+    if snapshot_rows is not None:
+        try:
+            materialized_rows = list(snapshot_rows)
+        except TypeError:
+            materialized_rows = None
+        if materialized_rows is not None:
+            return [dict(row) for row in materialized_rows if isinstance(row, Mapping)]
 
     objective_env = _resolve_objective_env(candidate)
 
@@ -6175,7 +6198,7 @@ def _core_citylearn_env(candidate):
     return getattr(core, "unwrapped", core)
 
 
-def _building_schema_rows(candidate, adapter=None) -> List[Dict[str, object]]:
+def _building_schema_rows(candidate, adapter=None) -> List[Dict[str, Any]]:
     objective_env = _resolve_objective_env(candidate)
     core_env = _core_citylearn_env(candidate)
 
@@ -6185,7 +6208,7 @@ def _building_schema_rows(candidate, adapter=None) -> List[Dict[str, object]]:
     agents = list(getattr(adapter, "agents", [])) or list(getattr(objective_env, "possible_agents", []))
     action_names = getattr(core_env, "action_names", []) or []
     observation_names = getattr(core_env, "observation_names", []) or []
-    rows: List[Dict[str, object]] = []
+    rows: List[Dict[str, Any]] = []
 
     for agent_index, agent in enumerate(agents):
         for variable_type, all_names, space_getter in [
@@ -6198,7 +6221,10 @@ def _building_schema_rows(candidate, adapter=None) -> List[Dict[str, object]]:
                 dim = int(getattr(adapter, f"{variable_type}_dims", {}).get(agent, 0)) if adapter is not None else 0
                 names = [f"{variable_type}_{idx}" for idx in range(dim)]
 
-            space = space_getter(agent) if callable(space_getter) else None
+            if callable(space_getter):
+                space = space_getter(agent)  # pylint: disable=not-callable
+            else:
+                space = None
 
             for variable_index, variable_name in enumerate(names):
                 rows.append({
@@ -6215,8 +6241,8 @@ def _building_schema_rows(candidate, adapter=None) -> List[Dict[str, object]]:
     return rows
 
 
-def _trace_agent_summary_rows(trace_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
-    grouped: Dict[str, List[Mapping[str, object]]] = {}
+def _trace_agent_summary_rows(trace_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Mapping[str, Any]]] = {}
 
     for row in trace_rows:
         agent = row.get("agent")
@@ -6226,10 +6252,10 @@ def _trace_agent_summary_rows(trace_rows: Sequence[Mapping[str, object]]) -> Lis
 
         grouped.setdefault(str(agent), []).append(row)
 
-    output: List[Dict[str, object]] = []
+    output: List[Dict[str, Any]] = []
 
     for agent, rows in sorted(grouped.items(), key=lambda item: _sort_agent_key(item[0])):
-        summary: Dict[str, object] = {
+        summary: Dict[str, Any] = {
             "agent": agent,
             "agent_steps": len(rows),
             "agent_index": rows[0].get("agent_index"),
@@ -6264,8 +6290,8 @@ def _trace_agent_summary_rows(trace_rows: Sequence[Mapping[str, object]]) -> Lis
     return output
 
 
-def _building_kpi_summary_rows(kpi_rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
-    output_by_building: Dict[str, Dict[str, object]] = {}
+def _building_kpi_summary_rows(kpi_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    output_by_building: Dict[str, Dict[str, Any]] = {}
 
     for row in kpi_rows:
         level = str(row.get("level", "")).lower()
@@ -6308,11 +6334,11 @@ def _building_kpi_summary_rows(kpi_rows: Sequence[Mapping[str, object]]) -> List
 
 def _building_behavior_summary_rows(
     *,
-    trace_rows: Sequence[Mapping[str, object]],
-    kpi_rows: Sequence[Mapping[str, object]],
-    schema_rows: Sequence[Mapping[str, object]],
-) -> List[Dict[str, object]]:
-    output: Dict[str, Dict[str, object]] = {}
+    trace_rows: Sequence[Mapping[str, Any]],
+    kpi_rows: Sequence[Mapping[str, Any]],
+    schema_rows: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    output: Dict[str, Dict[str, Any]] = {}
 
     for row in _building_kpi_summary_rows(kpi_rows):
         output[str(row["agent"])] = dict(row)
@@ -6340,7 +6366,7 @@ def _building_behavior_summary_rows(
     ]
 
 
-def _schema_action_names(schema_rows: Sequence[Mapping[str, object]]) -> Dict[str, Dict[int, str]]:
+def _schema_action_names(schema_rows: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[int, str]]:
     output: Dict[str, Dict[int, str]] = {}
 
     for row in schema_rows:
@@ -6359,11 +6385,11 @@ def _schema_action_names(schema_rows: Sequence[Mapping[str, object]]) -> Dict[st
 
 
 def _building_trace_sample_rows(
-    trace_rows: Sequence[Mapping[str, object]],
-    schema_rows: Sequence[Mapping[str, object]],
+    trace_rows: Sequence[Mapping[str, Any]],
+    schema_rows: Sequence[Mapping[str, Any]],
     *,
     max_rows: int = 120,
-) -> List[Dict[str, object]]:
+) -> List[Dict[str, Any]]:
     if not trace_rows:
         return []
 
@@ -6375,7 +6401,7 @@ def _building_trace_sample_rows(
         selected = list(trace_rows[:head_count]) + list(trace_rows[-tail_count:])
 
     action_names = _schema_action_names(schema_rows)
-    rows: List[Dict[str, object]] = []
+    rows: List[Dict[str, Any]] = []
 
     for row in selected:
         agent = str(row.get("agent"))
@@ -6404,7 +6430,7 @@ def _safe_ratio(numerator: Optional[float], denominator: Optional[float]) -> Opt
     return float(numerator / denominator)
 
 
-def _save_line_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Optional[Dict[str, object]]:
+def _save_line_plot(path: Path, rows: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     points = []
 
     for row in rows:
@@ -6441,7 +6467,7 @@ def _save_line_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Optiona
     return {"path": str(path), "kind": "line_plot", "name": path.name}
 
 
-def _save_convergence_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Optional[Dict[str, object]]:
+def _save_convergence_plot(path: Path, rows: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     points = _valid_pairs(rows, "global_step", "reward_sum")
 
     if not points:
@@ -6476,7 +6502,7 @@ def _save_convergence_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> 
     return {"path": str(path), "kind": "convergence_plot", "name": path.name}
 
 
-def _save_episode_plot(path: Path, episode_summaries: Sequence[Mapping[str, object]]) -> Optional[Dict[str, object]]:
+def _save_episode_plot(path: Path, episode_summaries: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     rows = [
         row for row in episode_summaries
         if _as_float(row.get("reward_sum_total")) is not None
@@ -6492,7 +6518,7 @@ def _save_episode_plot(path: Path, episode_summaries: Sequence[Mapping[str, obje
 
     path.parent.mkdir(parents=True, exist_ok=True)
     episodes = [int(row["episode"]) for row in rows]
-    reward_totals = [_as_float(row.get("reward_sum_total")) for row in rows]
+    reward_totals = [0.0 if (value := _as_float(row.get("reward_sum_total"))) is None else value for row in rows]
     reward_means = [_as_float(row.get("reward_mean_average")) for row in rows]
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.bar(episodes, reward_totals, color="#4d7c8a", label="reward_sum_total")
@@ -6518,8 +6544,8 @@ def _save_episode_plot(path: Path, episode_summaries: Sequence[Mapping[str, obje
 
 def _save_learning_efficiency_plot(
     path: Path,
-    efficiency_rows: Sequence[Mapping[str, object]],
-) -> Optional[Dict[str, object]]:
+    efficiency_rows: Sequence[Mapping[str, Any]],
+) -> Optional[Dict[str, Any]]:
     rows = [row for row in efficiency_rows if _as_float(row.get("return_total")) is not None]
 
     if not rows:
@@ -6570,7 +6596,7 @@ def _save_learning_efficiency_plot(
     return {"path": str(path), "kind": "efficiency_plot", "name": path.name}
 
 
-def _save_axis_comparison_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Optional[Dict[str, object]]:
+def _save_axis_comparison_plot(path: Path, rows: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     filtered = [
         row for row in rows
         if _as_float(row.get("improved_kpis")) is not None
@@ -6605,7 +6631,7 @@ def _save_axis_comparison_plot(path: Path, rows: Sequence[Mapping[str, object]])
     return {"path": str(path), "kind": "bar_plot", "name": path.name}
 
 
-def _save_baseline_gain_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Optional[Dict[str, object]]:
+def _save_baseline_gain_plot(path: Path, rows: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     filtered = [
         row for row in rows
         if bool(row.get("available")) and _as_float(row.get("delta_vs_baseline")) is not None
@@ -6642,9 +6668,9 @@ def _save_baseline_gain_plot(path: Path, rows: Sequence[Mapping[str, object]]) -
 
 def _save_axis_kpi_plot(
     path: Path,
-    rows: Sequence[Mapping[str, object]],
+    rows: Sequence[Mapping[str, Any]],
     axis_code: str,
-) -> Optional[Dict[str, object]]:
+) -> Optional[Dict[str, Any]]:
     filtered = [
         row for row in rows
         if str(row.get("axis")) == axis_code and _as_float(row.get("value")) is not None
@@ -6680,7 +6706,7 @@ def _save_axis_kpi_plot(
     return {"path": str(path), "kind": "axis_kpi_plot", "name": path.name}
 
 
-def _save_core_kpi_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Optional[Dict[str, object]]:
+def _save_core_kpi_plot(path: Path, rows: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     filtered = [
         row for row in rows
         if _as_float(row.get("value")) is not None
@@ -6714,8 +6740,8 @@ def _save_core_kpi_plot(path: Path, rows: Sequence[Mapping[str, object]]) -> Opt
 
 def _save_citylearn_v2_timeseries_plot(
     path: Path,
-    rows: Sequence[Mapping[str, object]],
-) -> Optional[Dict[str, object]]:
+    rows: Sequence[Mapping[str, Any]],
+) -> Optional[Dict[str, Any]]:
     if not rows:
         return None
 
@@ -6769,8 +6795,8 @@ def _save_citylearn_v2_timeseries_plot(
 
 def _save_exploration_plot(
     path: Path,
-    trace_rows: Sequence[Mapping[str, object]],
-) -> Optional[Dict[str, object]]:
+    trace_rows: Sequence[Mapping[str, Any]],
+) -> Optional[Dict[str, Any]]:
     grouped: Dict[int, List[float]] = {}
 
     for row in trace_rows:
@@ -6812,8 +6838,8 @@ def _save_exploration_plot(
 
 def _save_agent_reward_plot(
     path: Path,
-    agent_rows: Sequence[Mapping[str, object]],
-) -> Optional[Dict[str, object]]:
+    agent_rows: Sequence[Mapping[str, Any]],
+) -> Optional[Dict[str, Any]]:
     filtered = [row for row in agent_rows if _as_float(row.get("reward_total")) is not None]
 
     if not filtered:
@@ -6844,17 +6870,17 @@ def _save_agent_reward_plot(
 def _write_training_figures_and_tables(
     *,
     dirs: Mapping[str, Path],
-    report: Mapping[str, object],
-    timeseries_rows: Sequence[Mapping[str, object]],
-    trace_rows: Sequence[Mapping[str, object]],
-    episode_summaries: Sequence[Mapping[str, object]],
-    checkpoints: Sequence[Mapping[str, object]],
-    extra_tables: Optional[Mapping[str, Sequence[Mapping[str, object]]]] = None,
-) -> Dict[str, object]:
+    report: Mapping[str, Any],
+    timeseries_rows: Sequence[Mapping[str, Any]],
+    trace_rows: Sequence[Mapping[str, Any]],
+    episode_summaries: Sequence[Mapping[str, Any]],
+    checkpoints: Sequence[Mapping[str, Any]],
+    extra_tables: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
+) -> Dict[str, Any]:
     figures_dir = dirs["figures"]
     tables_dir = dirs["tables"]
-    figures: List[Dict[str, object]] = []
-    tables: List[Dict[str, object]] = []
+    figures: List[Dict[str, Any]] = []
+    tables: List[Dict[str, Any]] = []
 
     objective_rows = _objective_kpi_rows(report)
     axis_rows = _axis_comparison_rows(report)
@@ -6963,8 +6989,8 @@ def write_minimal_results_json(
     algorithm: str,
     backend: str,
     args,
-    hyperparameters: Optional[Mapping[str, object]] = None,
-    report: Optional[Mapping[str, object]] = None,
+    hyperparameters: Optional[Mapping[str, Any]] = None,
+    report: Optional[Mapping[str, Any]] = None,
     error: Optional[BaseException] = None,
 ) -> Path:
     """Guarantee a valid results.json so a salvaged job counts as complete/skippable.
@@ -7006,11 +7032,11 @@ def write_training_artifacts(
     algorithm: str,
     backend: str,
     args,
-    report: Mapping[str, object],
+    report: Mapping[str, Any],
     candidate=None,
-    hyperparameters: Optional[Mapping[str, object]] = None,
-    extra: Optional[Mapping[str, object]] = None,
-) -> Dict[str, object]:
+    hyperparameters: Optional[Mapping[str, Any]] = None,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
     """Write standardized technical outputs for a MADRL launcher."""
 
     dirs = ensure_artifact_layout(output_dir)
@@ -7049,12 +7075,32 @@ def write_training_artifacts(
         schema_rows=building_schema_rows,
     )
     building_trace_sample_rows = _building_trace_sample_rows(trace_rows, building_schema_rows)
+    district_kpi_rows = [
+        row for row in citylearn_kpi_frame_rows
+        if str(row.get("level", "")).lower() == "district"
+        or str(row.get("name", "")) == "District"
+    ]
+    building_raw_kpi_rows = [
+        row for row in citylearn_kpi_frame_rows
+        if str(row.get("level", "")).lower() == "building"
+    ]
+    building_objective_rows = list(report.get("building_objective_kpis") or [])
+    if not building_objective_rows and citylearn_kpi_frame_rows:
+        try:
+            from citylearn.v3.objectives import building_objective_kpi_rows
+            import pandas as pd
+
+            building_objective_rows = building_objective_kpi_rows(
+                pd.DataFrame(citylearn_kpi_frame_rows)
+            )
+        except Exception:
+            building_objective_rows = []
     building_detail_tables = {
+        "citylearn_kpi_frame": citylearn_kpi_frame_rows,
+        "district_kpis": district_kpi_rows,
         "building_behavior_summary": building_summary_rows,
-        "building_kpis": [
-            row for row in citylearn_kpi_frame_rows
-            if str(row.get("level", "")).lower() == "building"
-        ],
+        "building_kpis": building_raw_kpi_rows,
+        "building_objective_kpis": building_objective_rows,
         "building_observation_action_schema": building_schema_rows,
         "building_trace_sample": building_trace_sample_rows,
     }
@@ -7073,7 +7119,7 @@ def write_training_artifacts(
     _write_csv_mirrors(timeseries_outputs, timeseries_rows)
     _write_csv_mirrors(trace_outputs, trace_rows)
 
-    building_detail_paths: Dict[str, Dict[str, object]] = {}
+    building_detail_paths: Dict[str, Dict[str, Any]] = {}
     for table_name, rows in building_detail_tables.items():
         data_path = data_dir / f"{table_name}.csv"
         root_path = output_dir / f"{table_name}.csv"
@@ -7144,6 +7190,14 @@ def write_training_artifacts(
         "checkpoint_count": len(checkpoints),
         "building_detail": building_detail_paths,
         "building_count": len(building_summary_rows),
+        "kpi_levels": {
+            "district_objective_kpis": True,
+            "district_evaluate_v2_rows": len(district_kpi_rows),
+            "building_evaluate_v2_rows": len(building_raw_kpi_rows),
+            "building_objective_kpi_rows": len(building_objective_rows),
+            "citylearn_kpi_frame_rows": len(citylearn_kpi_frame_rows),
+            "oe_axes": ["OE1", "OE2", "OE3"],
+        },
         "episode_summaries": episode_summaries,
         "hyperparameters": dict(hyperparameters or {}),
         "normalization": normalization,
@@ -7253,7 +7307,7 @@ def write_training_artifacts(
     }
 
 
-def write_training_summary(output_dir: Path, summary: Mapping[str, object]) -> Dict[str, str]:
+def write_training_summary(output_dir: Path, summary: Mapping[str, Any]) -> Dict[str, str]:
     dirs = ensure_artifact_layout(output_dir)
     payload = dict(summary)
     payload.setdefault("artifact_layout", _artifact_layout_payload(dirs))
@@ -7266,10 +7320,10 @@ def write_training_summary(output_dir: Path, summary: Mapping[str, object]) -> D
     }
 
 
-def _pad(values: Sequence[float], target_dim: int) -> np.ndarray:
-    values = np.asarray(values, dtype=np.float32).reshape(-1)
+def _pad(values: Sequence[float] | np.ndarray, target_dim: int) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float32).reshape(-1)
     output = np.zeros(target_dim, dtype=np.float32)
-    output[: values.size] = values
+    output[: array.size] = array
     return output
 
 
@@ -7278,7 +7332,7 @@ def build_discrete_action_table(
     action_bins: int,
     action_dim: int,
     mode: str = "axis",
-) -> Tuple[np.ndarray, Dict[str, object]]:
+) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Build a backend-compatible discrete action table for CityLearn actions.
 
     ``cartesian`` enumerates every simultaneous actuator combination and grows as
@@ -7467,7 +7521,7 @@ def _install_ev_sim_fast_patch(core) -> bool:
         rs = getattr(env, "_ev_drift_random_state", None)
         if rs is None:
             episode_idx = int(getattr(getattr(env, "episode_tracker", None), "episode", 0))
-            rs = np.random.RandomState(int(env.random_seed) + episode_idx)
+            rs = np.random.default_rng(int(env.random_seed) + episode_idx)
             env._ev_drift_random_state = rs
         t = env.time_step
         if t + 1 >= env.episode_tracker.episode_time_steps:
@@ -7487,7 +7541,10 @@ def _install_ev_sim_fast_patch(core) -> bool:
                     if curr_state != 1:
                         found = True
                         is_incoming = curr is not None and curr[0] == 2
-                        soc = curr[1] if is_incoming else nxt[1]
+                        if is_incoming and curr is not None:
+                            soc = curr[1]
+                        else:
+                            soc = nxt[1]
                         if np.isfinite(soc) and 0.0 <= soc <= 1.0:
                             ev.battery.force_set_soc(soc)
             if not found and t > 0:
@@ -7497,6 +7554,14 @@ def _install_ev_sim_fast_patch(core) -> bool:
 
     runtime.simulate_unconnected_ev_soc = types.MethodType(_fast_simulate_unconnected_ev_soc, runtime)
     return True
+
+
+def _first_space_dimension(space: Any) -> int:
+    """Return the leading dimension for a non-scalar Gym space."""
+    shape = space.shape
+    if not shape:
+        raise ValueError(f"Expected a non-scalar space, got shape={shape!r}")
+    return int(shape[0])
 
 
 class CityLearnV3BackendAdapter:
@@ -7601,7 +7666,7 @@ class CityLearnV3BackendAdapter:
 
         # CityLearn's own dims (before appending type codes)
         self._citylearn_observation_dims = {
-            agent: int(space.shape[0])
+            agent: _first_space_dimension(space)
             for agent, space in self._obs_spaces.items()
         }
         self.observation_dims = {
@@ -7609,7 +7674,7 @@ class CityLearnV3BackendAdapter:
             for agent in self.agents
         }
         self.action_dims = {
-            agent: int(space.shape[0])
+            agent: _first_space_dimension(space)
             for agent, space in self._act_spaces.items()
         }
         self.observation_names_by_agent = self._variable_names_by_agent(
@@ -7679,8 +7744,8 @@ class CityLearnV3BackendAdapter:
         self._last_observations: Dict[str, np.ndarray] = {}
         self.global_step = 0
         self.reset_count = 0
-        self.trace_records: List[Dict[str, object]] = []
-        self.timeseries_records: List[Dict[str, object]] = []
+        self.trace_records: List[Dict[str, Any]] = []
+        self.timeseries_records: List[Dict[str, Any]] = []
         # Resume-safe incremental persistence: flush each finished episode to
         # data/{timeseries,trace}.csv so an interrupted Colab run keeps every
         # already-trained episode on Drive, and a resumed run CONTINUES the same
@@ -7704,8 +7769,8 @@ class CityLearnV3BackendAdapter:
         self.last_completed_episode: Optional[int] = None
         self.last_completed_global_step: Optional[int] = None
         self.last_completed_time_step: Optional[int] = None
-        self.last_completed_objectives: Optional[Dict[str, object]] = None
-        self.last_completed_kpi_frame_rows: List[Dict[str, object]] = []
+        self.last_completed_objectives: Optional[Dict[str, Any]] = None
+        self.last_completed_kpi_frame_rows: List[Dict[str, Any]] = []
         self.last_completed_snapshot_error: Optional[str] = None
         self._reset_reward_accumulators()
         self.reward_metadata = self._reward_metadata()
@@ -7750,7 +7815,7 @@ class CityLearnV3BackendAdapter:
         self._total_reward_count = 0
         self._total_reward_mean_count = 0
 
-    def _update_reward_accumulators(self, episode: int, timeseries_row: Mapping[str, object]) -> None:
+    def _update_reward_accumulators(self, episode: int, timeseries_row: Mapping[str, Any]) -> None:
         reward_sum = _as_float(timeseries_row.get("reward_sum"))
         reward_mean = _as_float(timeseries_row.get("reward_mean"))
 
@@ -7896,7 +7961,7 @@ class CityLearnV3BackendAdapter:
         self,
         *,
         path: Optional[Path],
-        all_records: List[Dict[str, object]],
+        all_records: List[Dict[str, Any]],
         flushed_count: int,
         fieldnames_ref: Optional[List[str]],
     ) -> Tuple[int, Optional[List[str]]]:
@@ -7938,7 +8003,7 @@ class CityLearnV3BackendAdapter:
             fieldnames_ref=self._trace_fieldnames,
         )
 
-    def _reward_metadata(self) -> Dict[str, object]:
+    def _reward_metadata(self) -> Dict[str, Any]:
         reward_function = getattr(self._core_env(), "reward_function", None)
         metadata = getattr(reward_function, "metadata", None)
 
@@ -7951,7 +8016,7 @@ class CityLearnV3BackendAdapter:
             "scenario": self.scenario,
         }
 
-    def _normalization_metadata(self) -> Dict[str, object]:
+    def _normalization_metadata(self) -> Dict[str, Any]:
         return {
             "normalize_observations": self.normalize_observations,
             "observation_method": (
@@ -8023,17 +8088,17 @@ class CityLearnV3BackendAdapter:
         return [state.copy() for _ in self.agents]
 
     def padded_joint_observation(self, observations: Mapping[str, np.ndarray]) -> np.ndarray:
-        return np.concatenate(self.padded_observations(observations), dtype=np.float32)
+        return np.concatenate(self.padded_observations(observations)).astype(np.float32, copy=False)
 
     def repeated_padded_joint_observation(self, observations: Mapping[str, np.ndarray]) -> List[np.ndarray]:
         state = self.padded_joint_observation(observations)
         return [state.copy() for _ in self.agents]
 
-    def _continuous_action_for_agent(self, agent: str, action: Sequence[float]) -> np.ndarray:
+    def _continuous_action_for_agent(self, agent: str, action: Sequence[float] | np.ndarray) -> np.ndarray:
         dim = self.action_dims[agent]
-        action = np.asarray(action, dtype=np.float32).reshape(-1)[:dim]
-        space = self._act_spaces[agent]
-        return np.clip(action, np.asarray(space.low).reshape(-1), np.asarray(space.high).reshape(-1)).astype(np.float32)
+        action_array = np.asarray(action, dtype=np.float32).reshape(-1)[:dim]
+        space = cast(spaces.Box, self._act_spaces[agent])
+        return np.clip(action_array, np.asarray(space.low).reshape(-1), np.asarray(space.high).reshape(-1)).astype(np.float32)
 
     def _discrete_index(self, action: object) -> int:
         array = np.asarray(action)
@@ -8117,7 +8182,7 @@ class CityLearnV3BackendAdapter:
         agent_index = self._agent_index_map.get(agent, 0)
         return buildings[agent_index] if agent_index < len(buildings) else None
 
-    def _building_step_metrics(self, building, time_step: int) -> Dict[str, object]:
+    def _building_step_metrics(self, building, time_step: int) -> Dict[str, Any]:
         if building is None:
             return {}
 
@@ -8156,8 +8221,8 @@ class CityLearnV3BackendAdapter:
         }
         return metrics
 
-    def _named_action_values(self, agent: str, action: np.ndarray) -> Dict[str, object]:
-        output: Dict[str, object] = {}
+    def _named_action_values(self, agent: str, action: np.ndarray) -> Dict[str, Any]:
+        output: Dict[str, Any] = {}
 
         for index, value in enumerate(action):
             if index >= len(self.action_names_by_agent.get(agent, [])):
@@ -8171,8 +8236,8 @@ class CityLearnV3BackendAdapter:
 
         return output
 
-    def _selected_observation_values(self, agent: str, observation: np.ndarray) -> Dict[str, object]:
-        output: Dict[str, object] = {}
+    def _selected_observation_values(self, agent: str, observation: np.ndarray) -> Dict[str, Any]:
+        output: Dict[str, Any] = {}
         names = self.observation_names_by_agent.get(agent, [])
 
         for index, value in enumerate(observation):
@@ -8313,7 +8378,7 @@ class CityLearnV3BackendAdapter:
 
         self.global_step += 1
 
-    def _capture_completed_episode_snapshot(self, timeseries_row: Mapping[str, object]) -> None:
+    def _capture_completed_episode_snapshot(self, timeseries_row: Mapping[str, Any]) -> None:
         """Snapshot official KPIs before backend wrappers reset the environment."""
 
         self.completed_episode_count += 1
@@ -8330,17 +8395,20 @@ class CityLearnV3BackendAdapter:
             frame = None
             if hasattr(objective_env, "get_kpi_frame"):
                 frame = objective_env.get_kpi_frame()
-            elif hasattr(objective_env, "evaluate_v2"):
-                frame = objective_env.evaluate_v2()
-            elif hasattr(objective_env, "env") and hasattr(objective_env.env, "evaluate_v2"):
-                frame = objective_env.env.evaluate_v2()
+            else:
+                evaluate_v2 = getattr(objective_env, "evaluate_v2", None)
+                nested_evaluate_v2 = getattr(getattr(objective_env, "env", None), "evaluate_v2", None)
+                if callable(evaluate_v2):
+                    frame = evaluate_v2()
+                elif callable(nested_evaluate_v2):
+                    frame = nested_evaluate_v2()
 
             self.last_completed_kpi_frame_rows = _dataframe_like_rows(frame)
             self.last_completed_snapshot_error = None
         except Exception as exc:  # pragma: no cover - defensive reporting fallback
             self.last_completed_snapshot_error = str(exc)
 
-    def _write_live_progress(self, timeseries_row: Mapping[str, object]) -> None:
+    def _write_live_progress(self, timeseries_row: Mapping[str, Any]) -> None:
         if self.live_progress_path is None:
             return
 
@@ -8377,7 +8445,7 @@ class CityLearnV3BackendAdapter:
         _reward_fn = getattr(self._core_env(), "reward_function", None)
         _breakdown = getattr(_reward_fn, "_last_component_breakdown", {})
         _comps = _breakdown.get("components") or []
-        _cstats: Dict[str, object] = {}
+        _cstats: Dict[str, Any] = {}
         if _comps:
             for _k in ("flex", "carbon", "cost", "ev"):
                 _vals = [c.get(_k, 0.0) for c in _comps if _k in c]
@@ -8459,9 +8527,9 @@ class CityLearnV3BackendAdapter:
             payload["episode_steps_recorded"] = episode_length
         self._atomic_write_live_payload(payload)
 
-    def finalize_training_session(self, *, target_episodes: Optional[int] = None) -> Dict[str, object]:
+    def finalize_training_session(self, *, target_episodes: Optional[int] = None) -> Dict[str, Any]:
         """Flush pending incremental rows and write a truthful completion snapshot."""
-        summary: Dict[str, object] = {
+        summary: Dict[str, Any] = {
             "completed_episodes": int(self.completed_episode_count),
             "target_episodes": target_episodes,
             "timeseries_rows_flushed": 0,
@@ -8506,7 +8574,7 @@ class CityLearnV3BackendAdapter:
 
         now = datetime.now(timezone.utc).isoformat()
         with self._live_progress_lock:
-            payload: Dict[str, object] = {}
+            payload: Dict[str, Any] = {}
 
             if self.live_progress_path.exists():
                 try:
@@ -8544,31 +8612,32 @@ class CityLearnV3BackendAdapter:
 
             self._write_live_payload_locked(payload)
 
-    def _atomic_write_live_payload(self, payload: Mapping[str, object]) -> None:
+    def _atomic_write_live_payload(self, payload: Mapping[str, Any]) -> None:
         with self._live_progress_lock:
             self._write_live_payload_locked(payload)
 
-    def _write_live_payload_locked(self, payload: Mapping[str, object]) -> None:
-        self.live_progress_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.live_progress_path.with_name(
-            f"{self.live_progress_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
-        )
+    def _write_live_payload_locked(self, payload: Mapping[str, Any]) -> None:
+        path = self.live_progress_path
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
         tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
         do_fsync = _live_progress_should_fsync(payload)
         fsync_file(tmp_path, allow_mydrive=do_fsync)
 
         try:
-            tmp_path.replace(self.live_progress_path)
+            tmp_path.replace(path)
         except PermissionError:
             try:
-                self.live_progress_path.unlink(missing_ok=True)
-                tmp_path.replace(self.live_progress_path)
+                path.unlink(missing_ok=True)
+                tmp_path.replace(path)
             except PermissionError:
                 tmp_path.unlink(missing_ok=True)
                 return
-        fsync_file(self.live_progress_path, allow_mydrive=do_fsync)
+        fsync_file(path, allow_mydrive=do_fsync)
         mirror = self._live_progress_mirror_path
-        if mirror and str(Path(mirror).resolve()) != str(self.live_progress_path.resolve()):
+        if mirror and str(Path(mirror).resolve()) != str(path.resolve()):
             try:
                 mp = Path(mirror)
                 mp.parent.mkdir(parents=True, exist_ok=True)
@@ -8579,7 +8648,7 @@ class CityLearnV3BackendAdapter:
             except Exception:
                 pass
 
-    def kpi_summary(self) -> Dict[str, object]:
+    def kpi_summary(self) -> Dict[str, Any]:
         return {
             "kpis": self.env.get_kpis(),
             "kpi_frame_shape": tuple(self.env.get_kpi_frame().shape),
@@ -8822,9 +8891,9 @@ class FiniteTensorBoardWriter:
 
 
 def install_finite_optimizer_step_guard(
-    optimizer_specs: Sequence[Mapping[str, object]],
+    optimizer_specs: Sequence[Mapping[str, Any]],
     audit_path: Optional[Path] = None,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     """Skip optimizer steps whose gradients contain NaN or Inf values."""
 
     import torch
@@ -8836,16 +8905,16 @@ def install_finite_optimizer_step_guard(
     installed = 0
     seen_optimizers = set()
 
-    def iter_named_parameters(spec: Mapping[str, object]):
+    def iter_named_parameters(spec: Mapping[str, Any]):
         module = spec.get("module")
         if module is not None and hasattr(module, "named_parameters"):
-            yield from module.named_parameters()
+            yield from cast(Any, module).named_parameters()
             return
 
         parameters = spec.get("parameters")
         if parameters is None:
             return
-        for index, parameter in enumerate(list(parameters)):
+        for index, parameter in enumerate(list(cast(Any, parameters))):
             yield f"parameter_{index}", parameter
 
     def audit_skip(owner: str, bad_gradients: Sequence[str]) -> None:
@@ -8861,9 +8930,10 @@ def install_finite_optimizer_step_guard(
             file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     for spec in optimizer_specs:
-        optimizer = spec.get("optimizer")
-        if optimizer is None:
+        optimizer_obj = spec.get("optimizer")
+        if optimizer_obj is None:
             continue
+        optimizer: Any = optimizer_obj
 
         optimizer_id = id(optimizer)
         if optimizer_id in seen_optimizers or getattr(optimizer, "_citylearn_finite_guard_installed", False):
@@ -8918,7 +8988,7 @@ def install_finite_optimizer_step_guard(
     }
 
 
-def install_harl_finite_optimizer_step_guard(runner, audit_path: Optional[Path] = None) -> Dict[str, object]:
+def install_harl_finite_optimizer_step_guard(runner, audit_path: Optional[Path] = None) -> Dict[str, Any]:
     """Skip HARL optimizer steps that contain non-finite gradients."""
 
     specs = []

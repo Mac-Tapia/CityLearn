@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence, Set
 
 import matplotlib
 
@@ -36,6 +36,12 @@ def parse_args() -> argparse.Namespace:
         default="OE1=0.34,OE2=0.33,OE3=0.33",
         help="Axis weights used for global ranking.",
     )
+    parser.add_argument(
+        "--v3-algorithms",
+        nargs="*",
+        default=None,
+        help="Optional MADRL algorithms to include from v3 root (e.g. MATD3 MAAC MASAC).",
+    )
     return parser.parse_args()
 
 
@@ -65,20 +71,39 @@ def resolve_v3_root(value: Optional[str]) -> Path:
 def _read_csv(path: Path) -> pd.DataFrame:
     try:
         return pd.read_csv(path)
-    except Exception:
+    except (OSError, UnicodeError, pd.errors.ParserError):
         return pd.DataFrame()
 
 
 def _candidate_run_dirs(root: Path, scenario: str, seed: int) -> List[Path]:
     suffix = f"{scenario}_seed_{seed}"
+    candidates: List[Path] = []
     if not root.exists():
-        return []
+        return candidates
 
-    return [
-        path
-        for path in root.rglob(suffix)
-        if path.is_dir()
-    ]
+    for path in root.rglob(suffix):
+        if path.is_dir():
+            candidates.append(path)
+
+    # Layout Colab/Drive: {ALGO}/{E1|E2|E3}/figures/tables/objective_kpis.csv
+    if int(seed) == 0:
+        for algo_dir in sorted(root.iterdir()):
+            if not algo_dir.is_dir():
+                continue
+            scen_dir = algo_dir / scenario
+            table_path = scen_dir / "figures" / "tables" / "objective_kpis.csv"
+            if table_path.is_file():
+                candidates.append(scen_dir)
+
+    # Preserve order, drop duplicates
+    seen: set[str] = set()
+    unique: List[Path] = []
+    for path in candidates:
+        key = str(path.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
 
 
 def _load_objective_table(run_dir: Path, *, family: str) -> pd.DataFrame:
@@ -96,7 +121,14 @@ def _load_objective_table(run_dir: Path, *, family: str) -> pd.DataFrame:
     return table
 
 
-def load_all(v2_root: Path, v3_root: Path, *, scenario: str, seed: int) -> pd.DataFrame:
+def load_all(
+    v2_root: Path,
+    v3_root: Path,
+    *,
+    scenario: str,
+    seed: int,
+    v3_algorithms: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
     tables: List[pd.DataFrame] = []
 
     for run_dir in _candidate_run_dirs(v2_root, scenario, seed):
@@ -104,7 +136,14 @@ def load_all(v2_root: Path, v3_root: Path, *, scenario: str, seed: int) -> pd.Da
         if not table.empty:
             tables.append(table)
 
+    allowed: Set[str] = (
+        {algorithm.upper() for algorithm in v3_algorithms}
+        if v3_algorithms
+        else set()
+    )
     for run_dir in _candidate_run_dirs(v3_root, scenario, seed):
+        if allowed and run_dir.parent.name.upper() not in allowed:
+            continue
         table = _load_objective_table(run_dir, family="citylearn_v3_madrl")
         if not table.empty:
             tables.append(table)
@@ -152,20 +191,20 @@ def parse_weights(spec: str) -> Dict[str, float]:
 def _normalized_scores(df: pd.DataFrame) -> pd.DataFrame:
     rows: List[pd.DataFrame] = []
 
-    for kpi, group in df.groupby("kpi", dropna=False):
-        values = pd.to_numeric(group["value"], errors="coerce")
+    for _kpi, group in df.groupby("kpi", dropna=False):
+        values = pd.Series(pd.to_numeric(group["value"], errors="coerce"), dtype="float64")
         valid = values.notna()
 
-        if valid.sum() == 0:
+        if int(valid.sum()) == 0:
             temp = group.copy()
             temp["normalized_score"] = np.nan
             rows.append(temp)
             continue
 
-        low = float(values[valid].min())
-        high = float(values[valid].max())
+        low = float(np.asarray(values[valid].min(), dtype=float).reshape(-1)[0])
+        high = float(np.asarray(values[valid].max(), dtype=float).reshape(-1)[0])
         span = high - low
-        lower_is_better = bool(group["lower_is_better"].dropna().iloc[0]) if group["lower_is_better"].notna().any() else True
+        lower_is_better = bool(group["lower_is_better"].dropna().iloc[0]) if bool(group["lower_is_better"].notna().any()) else True
         temp = group.copy()
 
         if span == 0.0:
@@ -190,7 +229,7 @@ def build_rankings(df: pd.DataFrame, weights: Mapping[str, float]) -> tuple[pd.D
         scored.groupby(["family", "method", "axis"], dropna=False)
         .agg(
             normalized_score=("normalized_score", "mean"),
-            available_kpis=("value", lambda s: int(pd.to_numeric(s, errors="coerce").notna().sum())),
+            available_kpis=("value", lambda s: int(pd.Series(pd.to_numeric(s, errors="coerce"), dtype="float64").notna().sum())),
             improved_kpis=("improved_vs_baseline", lambda s: int((s == True).sum())),
             total_kpis=("kpi", "count"),
         )
@@ -218,7 +257,7 @@ def build_rankings(df: pd.DataFrame, weights: Mapping[str, float]) -> tuple[pd.D
 
 def _write_markdown_table(path: Path, df: pd.DataFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(df.to_markdown(index=False), encoding="utf-8")
+    path.write_text(df.to_markdown(index=False) or "", encoding="utf-8")
 
 
 def _plot_axis(df: pd.DataFrame, output_dir: Path, axis: str) -> Optional[Path]:
@@ -234,10 +273,13 @@ def _plot_axis(df: pd.DataFrame, output_dir: Path, axis: str) -> Optional[Path]:
         .sort_values("score", ascending=True)
     )
 
-    labels = [f"{row.method}\n{row.family.replace('citylearn_', '')}" for row in summary.itertuples()]
+    labels = [
+        f"{row['method']}\n{str(row['family']).replace('citylearn_', '')}"
+        for _, row in summary.iterrows()
+    ]
     colors = ["#2f7d6d" if family == "citylearn_v3_madrl" else "#6f7fa8" for family in summary["family"]]
     fig, ax = plt.subplots(figsize=(11, max(4, 0.45 * len(summary))))
-    ax.barh(labels, summary["score"], color=colors)
+    ax.barh(labels, pd.Series(summary["score"], dtype="float64"), color=colors)
     ax.set_xlabel("normalized KPI score (higher is better)")
     ax.set_title(f"{axis} comparison: CityLearn v2 original vs CityLearn v3 MADRL")
     fig.tight_layout()
@@ -248,7 +290,8 @@ def _plot_axis(df: pd.DataFrame, output_dir: Path, axis: str) -> Optional[Path]:
 
 
 def _plot_heatmap(df: pd.DataFrame, output_dir: Path) -> Optional[Path]:
-    subset = df[np.isfinite(pd.to_numeric(df["delta_vs_baseline"], errors="coerce"))].copy()
+    delta = pd.Series(pd.to_numeric(df["delta_vs_baseline"], errors="coerce"), dtype="float64")
+    subset = df[np.isfinite(delta)].copy()
 
     if subset.empty:
         return None
@@ -262,9 +305,16 @@ def _plot_heatmap(df: pd.DataFrame, output_dir: Path) -> Optional[Path]:
     if pivot.empty:
         return None
 
-    clipped = pivot.clip(lower=pivot.quantile(0.05), upper=pivot.quantile(0.95), axis=1)
+    lower = pd.Series(pivot.quantile(0.05), dtype="float64")
+    upper = pd.Series(pivot.quantile(0.95), dtype="float64")
+    clipped = pivot.copy()
+    for column in pivot.columns:
+        clipped[column] = pd.Series(pivot[column], dtype="float64").clip(
+            lower=float(lower[column]),
+            upper=float(upper[column]),
+        )
     fig, ax = plt.subplots(figsize=(14, max(5, 0.5 * len(pivot))))
-    image = ax.imshow(clipped.fillna(0.0).values, aspect="auto", cmap="coolwarm")
+    image = ax.imshow(pd.DataFrame(clipped).fillna(0.0).to_numpy(dtype=float), aspect="auto", cmap="coolwarm")
     ax.set_yticks(range(len(pivot)))
     ax.set_yticklabels([f"{idx[1]} ({idx[0].replace('citylearn_', '')})" for idx in pivot.index])
     ax.set_xticks(range(len(pivot.columns)))
@@ -316,7 +366,13 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     weights = parse_weights(args.weights)
-    df = load_all(v2_root, v3_root, scenario=args.scenario, seed=args.seed)
+    df = load_all(
+        v2_root,
+        v3_root,
+        scenario=args.scenario,
+        seed=args.seed,
+        v3_algorithms=args.v3_algorithms,
+    )
 
     if df.empty:
         raise SystemExit(
