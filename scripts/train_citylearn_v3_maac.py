@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import time
 import traceback
+from pathlib import Path
 
 import numpy as np
 import torch
 from torch.autograd import Variable
 
+from checkpoint_state import restore_owner_training_state, save_owner_training_state
 from citylearn_v3_training_common import (
     CityLearnMAACVecEnv,
     NoOpLogger,
@@ -109,6 +111,24 @@ def _save_maac_checkpoint(model, path, *, use_gpu: bool) -> None:
         raise
     finally:
         model.prep_rollouts(device="gpu" if use_gpu else "cpu")
+    save_owner_training_state(dest.parent, _maac_optimizer_specs(model), backend="external/MAAC")
+
+
+def _maac_optimizer_specs(model):
+    return [
+        {
+            "owner": "maac_critic",
+            "module": getattr(model, "critic", None),
+            "optimizer": getattr(model, "critic_optimizer", None),
+        }
+    ] + [
+        {
+            "owner": f"maac_agent{agent_index}_policy",
+            "module": getattr(agent, "policy", None),
+            "optimizer": getattr(agent, "policy_optimizer", None),
+        }
+        for agent_index, agent in enumerate(getattr(model, "agents", []) or [])
+    ]
 
 
 def main() -> int:
@@ -218,22 +238,13 @@ def main() -> int:
         model = AttentionSAC.init_from_save(str(resume_plan["maac_checkpoint"]), load_critic=True)
         print(f"[maac] Loaded {resume_plan['maac_checkpoint']}", flush=True)
         model.prep_training(device="gpu" if use_gpu else "cpu")
+    training_state_resume = None
+    if resume_plan.get("active") and resume_plan.get("maac_checkpoint"):
+        training_state_resume = restore_owner_training_state(
+            Path(str(resume_plan["maac_checkpoint"])).parent, _maac_optimizer_specs(model)
+        )
     finite_optimizer_guard = install_finite_optimizer_step_guard(
-        [
-            {
-                "owner": "maac_critic",
-                "module": getattr(model, "critic", None),
-                "optimizer": getattr(model, "critic_optimizer", None),
-            }
-        ]
-        + [
-            {
-                "owner": f"maac_agent{agent_index}_policy",
-                "module": getattr(agent, "policy", None),
-                "optimizer": getattr(agent, "policy_optimizer", None),
-            }
-            for agent_index, agent in enumerate(getattr(model, "agents", []) or [])
-        ],
+        _maac_optimizer_specs(model),
         output_dir / "data" / "maac_finite_gradient_guard.jsonl",
     )
     maac_start_episode = int(resume_plan.get("maac_start_episode") or 0) if resume_plan.get("active") else 0
@@ -278,6 +289,7 @@ def main() -> int:
         "reward_metadata": env.adapter.reward_metadata,
         "finite_optimizer_step_guard": finite_optimizer_guard,
         "job_resume": resume_plan,
+        "training_state_resume": training_state_resume,
         "maac_start_episode": maac_start_episode,
         "target_episodes": target_episodes,
     }

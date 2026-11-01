@@ -8966,6 +8966,12 @@ def install_finite_optimizer_step_guard(
 def install_harl_finite_optimizer_step_guard(runner, audit_path: Optional[Path] = None) -> Dict[str, Any]:
     """Skip HARL optimizer steps that contain non-finite gradients."""
 
+    return install_finite_optimizer_step_guard(harl_optimizer_specs(runner), audit_path)
+
+
+def harl_optimizer_specs(runner) -> List[Dict[str, Any]]:
+    """Owner/module/optimizer triples for a HARL on-policy runner."""
+
     specs = []
     for agent_index, actor_policy in enumerate(getattr(runner, "actor", []) or []):
         specs.append(
@@ -8985,4 +8991,4 @@ def install_harl_finite_optimizer_step_guard(runner, audit_path: Optional[Path] 
         }
     )
 
-    return install_finite_optimizer_step_guard(specs, audit_path)
+    return specs

@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from checkpoint_state import restore_owner_training_state, wrap_save_with_training_state
 from citylearn_v3_training_common import (
     CityLearnOffPolicyVecEnv,
     FiniteTensorBoardWriter,
@@ -257,23 +258,35 @@ def main() -> int:
             output_dir / "data" / "tensorboard_finite_filter.jsonl",
         )
         runner.writter = finite_writer
+    matd3_optimizer_specs = [
+        {
+            "owner": f"{policy_id}/actor",
+            "module": getattr(policy, "actor", None),
+            "optimizer": getattr(policy, "actor_optimizer", None),
+        }
+        for policy_id, policy in getattr(runner, "policies", {}).items()
+    ] + [
+        {
+            "owner": f"{policy_id}/critic",
+            "module": getattr(policy, "critic", None),
+            "optimizer": getattr(policy, "critic_optimizer", None),
+        }
+        for policy_id, policy in getattr(runner, "policies", {}).items()
+    ]
+    training_state_resume = None
+    if matd3_resuming and resume_plan.get("model_dir"):
+        training_state_resume = restore_owner_training_state(
+            Path(str(resume_plan["model_dir"])), matd3_optimizer_specs
+        )
+    wrap_save_with_training_state(
+        runner,
+        "saver",
+        lambda: Path(str(runner.save_dir)),
+        lambda: matd3_optimizer_specs,
+        backend="external/off-policy",
+    )
     finite_optimizer_guard = install_finite_optimizer_step_guard(
-        [
-            {
-                "owner": f"{policy_id}/actor",
-                "module": getattr(policy, "actor", None),
-                "optimizer": getattr(policy, "actor_optimizer", None),
-            }
-            for policy_id, policy in getattr(runner, "policies", {}).items()
-        ]
-        + [
-            {
-                "owner": f"{policy_id}/critic",
-                "module": getattr(policy, "critic", None),
-                "optimizer": getattr(policy, "critic_optimizer", None),
-            }
-            for policy_id, policy in getattr(runner, "policies", {}).items()
-        ],
+        matd3_optimizer_specs,
         output_dir / "data" / "matd3_finite_gradient_guard.jsonl",
     )
     # MPERunner.__init__ runs the replay warmup (random-action episodes) which appends
@@ -323,6 +336,7 @@ def main() -> int:
         "reward_metadata": env.adapter.reward_metadata,
         "finite_optimizer_step_guard": finite_optimizer_guard,
         "job_resume": resume_plan,
+        "training_state_resume": training_state_resume,
     }
 
     heartbeat_stop = None

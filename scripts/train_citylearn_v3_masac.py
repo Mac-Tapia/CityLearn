@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import sys
 import traceback
+from pathlib import Path
 
 import numpy as np
 import torch
 
+from checkpoint_state import restore_owner_training_state, wrap_save_with_training_state
 from masac_runtime_optimizations import install_masac_runtime_optimizations
 
 from citylearn_v3_training_common import (
@@ -340,37 +342,49 @@ def main() -> int:
     try:
         runner = Runner(env, backend_args)
         learner = getattr(runner, "qmix_pg_learner", None)
+        masac_optimizer_specs = [
+            {
+                "owner": "masac_policy",
+                "module": getattr(getattr(learner, "agent", None), "policy", None),
+                "optimizer": getattr(learner, "policy_optimiser", None),
+            },
+            {
+                "owner": "masac_critic_q1",
+                "parameters": getattr(learner, "eval_parameters", None),
+                "optimizer": getattr(learner, "optimizer", None),
+            },
+            {
+                "owner": "masac_critic_q2",
+                "parameters": getattr(learner, "eval_parameters_2", None),
+                "optimizer": getattr(learner, "optimizer_2", None),
+            },
+            {
+                "owner": "masac_alpha",
+                "parameters": [getattr(learner, "log_alpha", None)],
+                "optimizer": getattr(learner, "alpha_optimizer", None),
+            },
+        ]
         if resume_plan.get("active") and learner is not None:
             bundle = find_masac_checkpoint_bundle(artifact_dirs["checkpoints"] / "models")
             if bundle:
                 load_masac_checkpoint_bundle(learner, bundle, use_cuda=bool(backend_args.cuda))
                 print("[masac] Loaded checkpoint bundle for resume", flush=True)
+                hyperparameters["training_state_resume"] = restore_owner_training_state(
+                    Path(bundle["rnn"]).parent, masac_optimizer_specs
+                )
         if learner is not None and getattr(learner, "alpha_optimizer", None) is not None:
             for group in learner.alpha_optimizer.param_groups:
                 group["lr"] = float(args.alpha_lr)
+        if learner is not None:
+            wrap_save_with_training_state(
+                learner,
+                "save_model",
+                lambda: Path(str(learner.model_dir)),
+                lambda: masac_optimizer_specs,
+                backend="external/MADRL-MASAC",
+            )
         finite_optimizer_guard = install_finite_optimizer_step_guard(
-            [
-                {
-                    "owner": "masac_policy",
-                    "module": getattr(getattr(learner, "agent", None), "policy", None),
-                    "optimizer": getattr(learner, "policy_optimiser", None),
-                },
-                {
-                    "owner": "masac_critic_q1",
-                    "parameters": getattr(learner, "eval_parameters", None),
-                    "optimizer": getattr(learner, "optimizer", None),
-                },
-                {
-                    "owner": "masac_critic_q2",
-                    "parameters": getattr(learner, "eval_parameters_2", None),
-                    "optimizer": getattr(learner, "optimizer_2", None),
-                },
-                {
-                    "owner": "masac_alpha",
-                    "parameters": [getattr(learner, "log_alpha", None)],
-                    "optimizer": getattr(learner, "alpha_optimizer", None),
-                },
-            ],
+            masac_optimizer_specs,
             output_dir / "data" / "masac_finite_gradient_guard.jsonl",
         )
         hyperparameters["finite_optimizer_step_guard"] = finite_optimizer_guard

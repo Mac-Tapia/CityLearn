@@ -6,9 +6,11 @@ import argparse
 import os
 import sys
 import traceback
+from pathlib import Path
 
 import torch
 
+from checkpoint_state import restore_owner_training_state, wrap_save_with_training_state
 from citylearn_v3_training_common import (
     CityLearnHARLEnv,
     FiniteTensorBoardWriter,
@@ -19,6 +21,7 @@ from citylearn_v3_training_common import (
     configure_torch_runtime,
     ensure_project_paths,
     ensure_artifact_layout,
+    harl_optimizer_specs,
     install_harl_finite_optimizer_step_guard,
     resolve_output_dir,
     discover_job_resume_plan,
@@ -260,6 +263,18 @@ def main() -> int:
         runner,
         output_dir / "data" / "happo_finite_gradient_guard.jsonl",
     )
+    training_state_resume = None
+    if resume_plan.get("active") and resume_plan.get("model_dir"):
+        training_state_resume = restore_owner_training_state(
+            Path(str(resume_plan["model_dir"])), harl_optimizer_specs(runner)
+        )
+    wrap_save_with_training_state(
+        runner,
+        "save",
+        lambda: Path(str(runner.save_dir)),
+        lambda: harl_optimizer_specs(runner),
+        backend="external/HARL",
+    )
     reward_metadata = {}
     runner_envs = getattr(runner.envs, "envs", None)
     report_candidate = runner.envs
@@ -300,6 +315,7 @@ def main() -> int:
         "reward_profile": "HAPPO",
         "reward_metadata": reward_metadata,
         "job_resume": resume_plan,
+        "training_state_resume": training_state_resume,
     }
 
     heartbeat_stop = None
