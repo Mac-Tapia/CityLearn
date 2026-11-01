@@ -108,8 +108,8 @@ def test_resume_slice_episodes_field_does_not_block_skip(tmp_path: Path) -> None
     assert job_counts_as_launcher_complete(run, target_episodes=50)
 
 
-def test_happo_salvage_recorded_target_skips_without_kpi(tmp_path: Path) -> None:
-    """Salvage HAPPO with episodes_recorded=50 but timeseries stuck at 49 must SKIP."""
+def test_happo_salvage_recorded_target_requires_kpi(tmp_path: Path) -> None:
+    """A recorded target with missing KPI must remain incomplete (SPEC-004)."""
     run = tmp_path / "HAPPO" / "E1"
     run.mkdir(parents=True)
     _write_results(
@@ -132,12 +132,12 @@ def test_happo_salvage_recorded_target_skips_without_kpi(tmp_path: Path) -> None
     _write_timeseries_steps(run, 49 * 8760)
     _touch_checkpoint(run, algorithm="happo")
 
-    assert _happo_last_episode_flush_gap_complete(None, run, target_episodes=50)
-    assert job_meets_launcher_complete_requirements(run, target_episodes=50)
-    assert job_counts_as_launcher_complete(run, target_episodes=50)
+    assert not _happo_last_episode_flush_gap_complete(None, run, target_episodes=50)
+    assert not job_meets_launcher_complete_requirements(run, target_episodes=50)
+    assert not job_counts_as_launcher_complete(run, target_episodes=50)
 
 
-def test_happo_salvage_49_partial_final_episode_skips_without_kpi(tmp_path: Path) -> None:
+def test_happo_salvage_49_partial_final_episode_requires_kpi(tmp_path: Path) -> None:
     """Drive Colab loop: 49 full episodes + partial ep-50 steps, salvage, no KPI audit."""
     run = tmp_path / "HAPPO" / "E1_seed_0"
     run.mkdir(parents=True)
@@ -172,9 +172,9 @@ def test_happo_salvage_49_partial_final_episode_skips_without_kpi(tmp_path: Path
         encoding="utf-8",
     )
 
-    assert _happo_last_episode_flush_gap_complete(None, run, target_episodes=50)
-    assert attempt_repair_happo_launcher_job(run, target_episodes=50)
-    assert job_counts_as_launcher_complete(run, target_episodes=50)
+    assert not _happo_last_episode_flush_gap_complete(None, run, target_episodes=50)
+    assert not attempt_repair_happo_launcher_job(run, target_episodes=50)
+    assert not job_counts_as_launcher_complete(run, target_episodes=50)
 
 
 def test_happo_salvage_mid_training_does_not_skip(tmp_path: Path) -> None:
@@ -329,7 +329,8 @@ def test_unwrap_env_avoids_broken_harl_unwrapped() -> None:
     [
         ("matd3_E1_results.json", True),
         ("maac_E1_results.json", True),
-        ("happo_E1_results.json", False),
+        # Current canonical export now contains 50 episodes and 57 audited KPIs.
+        ("happo_E1_results.json", True),
     ],
 )
 def test_drive_kpi_fixtures_completion(tmp_path: Path, fixture_name: str, expect_complete: bool) -> None:
@@ -356,24 +357,14 @@ def test_drive_kpi_fixtures_completion(tmp_path: Path, fixture_name: str, expect
     assert job_counts_as_launcher_complete(run, target_episodes=50) is expect_complete
 
 
-def test_drive_exports_mislabeled_detected() -> None:
+def test_drive_exports_mislabeled_detected(tmp_path: Path) -> None:
     tools_dir = REPO_ROOT / "tools"
     if str(tools_dir) not in sys.path:
         sys.path.insert(0, str(tools_dir))
-    from validate_drive_kpi_downloads import validate_results_json
+    from tools.drive.validate_drive_kpi_downloads import validate_results_json
 
-    kpis = REPO_ROOT / "outputs" / "_drive_madrl" / "kpis"
-    if not kpis.is_dir():
-        pytest.skip("drive kpis folder missing")
-
-    mislabeled = [
-        row
-        for path in sorted(kpis.glob("*_results.json"))
-        for row in [validate_results_json(path)]
-        if not row.get("ok")
-    ]
-    if not mislabeled:
-        pytest.skip("no mislabeled drive exports in kpis/ (downloads look consistent)")
-
-    for row in mislabeled:
-        assert row.get("mismatches"), row
+    path = tmp_path / 'happo_E1_results.json'
+    path.write_text(json.dumps({'algorithm': 'HAPPO', 'scenario': 'E3'}), encoding='utf-8')
+    report = validate_results_json(path)
+    assert report['ok'] is False
+    assert report['mismatches']

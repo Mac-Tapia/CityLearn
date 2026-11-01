@@ -721,23 +721,17 @@ def estimate_matd3_replay_ram_gib(
     return (bytes_per_policy_buffer * policies) / float(1024 ** 3)
 
 
-def normalize_algorithm_dir(algorithm: str) -> str:
-    """Folder name for a MADRL backend: HAPPO, MASAC, MATD3, MAAC."""
-    return algorithm.strip().upper()
-
-
-def normalize_scenario_dir(scenario: str, seed: int = 0) -> str:
-    """Folder name for a scenario axis: E1, E2, E3 (seed 0 omits suffix)."""
-    scenario = scenario.strip().upper()
-    seed = int(seed)
-    if seed == 0:
-        return scenario
-    return f"{scenario}_s{seed}"
-
-
-def job_run_relative_parts(algorithm: str, scenario: str, seed: int = 0) -> Path:
-    """Relative path ``<MADRL>/<Escenario>`` under an output root."""
-    return Path(normalize_algorithm_dir(algorithm)) / normalize_scenario_dir(scenario, seed)
+# Backward-compatible facade: one implementation lives in the application layer.
+# Script launchers need the parent project on sys.path before importing UC3M.
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from uc3m.application.training.layout import (  # noqa: E402
+    ensure_artifact_layout,
+    job_run_relative_parts,
+    normalize_algorithm_dir,
+    normalize_scenario_dir,
+    resolve_job_run_dir,
+)
 
 
 def iter_job_run_dir_candidates(
@@ -767,13 +761,6 @@ def iter_job_run_dir_candidates(
             continue
         seen.add(key)
         yield path
-
-
-def resolve_job_run_dir(base: Path, algorithm: str, scenario: str, seed: int) -> Path:
-    """Canonical run directory for one MADRL job; creates parents if needed."""
-    path = next(iter_job_run_dir_candidates(base, algorithm, scenario, seed))
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def job_run_dir_has_artifacts(run_dir: Path) -> bool:
@@ -853,24 +840,6 @@ def resolve_output_dir(output_dir: Optional[str], algorithm: str, scenario: str,
     path = base / simple
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def ensure_artifact_layout(output_dir: Path) -> Dict[str, Path]:
-    """Create the canonical CityLearn v3 output folders for one MADRL run."""
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    dirs = {
-        "run": output_dir,
-        "data": output_dir / DATA_DIR_NAME,
-        "checkpoints": output_dir / CHECKPOINT_DIR_NAME,
-        "figures": output_dir / FIGURES_DIR_NAME,
-        "tables": output_dir / FIGURES_DIR_NAME / TABLES_DIR_NAME,
-    }
-
-    for path in dirs.values():
-        path.mkdir(parents=True, exist_ok=True)
-
-    return dirs
 
 
 def start_live_progress_heartbeat(
@@ -1011,8 +980,8 @@ def _artifact_layout_payload(dirs: Mapping[str, Path]) -> Dict[str, str]:
 
 
 def write_json(path: Path, data: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    from uc3m.application.training.persistence import write_json_atomic
+    write_json_atomic(path, data)
 
 
 def _write_json_mirrors(paths: Sequence[Path], data: Mapping[str, Any]) -> None:
@@ -1139,24 +1108,8 @@ def _csv_safe(value):
 def write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     """Atomically write rows to a CSV (tmp file + replace) so a crash mid-write never
     leaves a half-written/torn file on Drive."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = sorted({key for row in rows for key in row.keys()})
-
-    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    try:
-        with tmp_path.open("w", newline="", encoding="utf-8") as file:
-            writer = csv.DictWriter(file, fieldnames=fieldnames)
-            writer.writeheader()
-            for row in rows:
-                writer.writerow({key: _csv_safe(row.get(key)) for key in fieldnames})
-        tmp_path.replace(path)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+    from uc3m.application.training.persistence import write_csv_atomic
+    write_csv_atomic(path, rows)
 
 
 def _write_csv_mirrors(paths: Sequence[Path], rows: Sequence[Mapping[str, Any]]) -> None:
@@ -1259,17 +1212,8 @@ def _append_csv_rows_stable_schema(
     Callers must guarantee every row's keys are a subset of `fieldnames`; schema
     growth is handled by a full atomic rewrite in the recorder, not here.
     """
-    if not rows:
-        return
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = (not path.exists()) or path.stat().st_size == 0
-    with path.open("a", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=list(fieldnames), extrasaction="ignore")
-        if write_header:
-            writer.writeheader()
-        for row in rows:
-            writer.writerow({key: _csv_safe(row.get(key)) for key in fieldnames})
+    from uc3m.application.training.persistence import append_csv_stable_schema
+    append_csv_stable_schema(path, rows, fieldnames)
 
 
 def _write_markdown_table(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
@@ -1670,6 +1614,14 @@ def job_meets_launcher_complete_requirements(
     target_episodes = max(1, int(target_episodes))
     payload = read_job_results_json(output_dir)
     if not payload:
+        return False
+
+    # A complete step budget is training evidence, not a KPI audit.
+    if not _results_have_audited_kpis(payload):
+        return False
+    payload_scenario = str(payload.get('scenario') or '').upper()
+    folder_scenario = _infer_scenario_from_run_dir(output_dir)
+    if payload_scenario and folder_scenario and payload_scenario != folder_scenario:
         return False
 
     hyperparameters = dict(payload.get("hyperparameters") or {})
@@ -3112,6 +3064,7 @@ def discover_job_resume_plan(
             "note": "resume_from_checkpoint",
             "completed_episodes_global_step": completed_gs,
             "completed_episodes_csv": completed_csv,
+            "completed_episodes_live": _as_int((live or {}).get("episode")) or 0,
             "live_progress_episode": (live or {}).get("episode"),
             "live_progress_global_step": (live or {}).get("global_step"),
         }
@@ -6194,8 +6147,10 @@ def _core_citylearn_env(candidate):
     if objective_env is None:
         return None
 
+    from citylearn.madrl_kpis import unwrap_citylearn_core_env
+
     core = getattr(objective_env, "env", objective_env)
-    return getattr(core, "unwrapped", core)
+    return unwrap_citylearn_core_env(core)
 
 
 def _building_schema_rows(candidate, adapter=None) -> List[Dict[str, Any]]:
@@ -7913,7 +7868,9 @@ class CityLearnV3BackendAdapter:
                 dedup_keys=("episode", "episode_step"),
             )
             if kept_ts_count > 0:
-                self.timeseries_records = []
+                # Flushed counts index the in-memory buffer. Retain the same
+                # prefix there, otherwise new episodes are silently skipped.
+                self.timeseries_records = read_csv_rows(self._incremental_ts_path)
                 self._ts_fieldnames = sorted(ts_fields) if ts_fields else None
                 self._ts_flushed_count = kept_ts_count
                 summary["timeseries_rows"] = kept_ts_count
@@ -7931,7 +7888,7 @@ class CityLearnV3BackendAdapter:
                 dedup_keys=("episode", "episode_step", "agent"),
             )
             if kept_trace_count > 0:
-                self.trace_records = []
+                self.trace_records = read_csv_rows(self._incremental_trace_path)
                 self._trace_fieldnames = sorted(trace_fields) if trace_fields else None
                 self._trace_flushed_count = kept_trace_count
                 summary["trace_rows"] = kept_trace_count
@@ -8447,7 +8404,18 @@ class CityLearnV3BackendAdapter:
         _comps = _breakdown.get("components") or []
         _cstats: Dict[str, Any] = {}
         if _comps:
-            for _k in ("flex", "carbon", "cost", "ev"):
+            for _k in (
+                "flex",
+                "carbon",
+                "cost",
+                "weighted_flex",
+                "weighted_carbon",
+                "weighted_cost",
+                "effective_flex_share",
+                "effective_carbon_share",
+                "effective_cost_share",
+                "ev",
+            ):
                 _vals = [c.get(_k, 0.0) for c in _comps if _k in c]
                 if _vals:
                     _cstats[f"reward_component_{_k}_mean"] = float(np.mean(_vals))
@@ -8499,6 +8467,13 @@ class CityLearnV3BackendAdapter:
             "reward_component_flex_mean": _cstats.get("reward_component_flex_mean"),
             "reward_component_carbon_mean": _cstats.get("reward_component_carbon_mean"),
             "reward_component_cost_mean": _cstats.get("reward_component_cost_mean"),
+            "reward_component_weighted_flex_mean": _cstats.get("reward_component_weighted_flex_mean"),
+            "reward_component_weighted_carbon_mean": _cstats.get("reward_component_weighted_carbon_mean"),
+            "reward_component_weighted_cost_mean": _cstats.get("reward_component_weighted_cost_mean"),
+            "reward_effective_flex_share_mean": _cstats.get("reward_component_effective_flex_share_mean"),
+            "reward_effective_carbon_share_mean": _cstats.get("reward_component_effective_carbon_share_mean"),
+            "reward_effective_cost_share_mean": _cstats.get("reward_component_effective_cost_share_mean"),
+            "reward_effective_share_scope": _breakdown.get("effective_share_scope"),
             "reward_component_ev_mean": _cstats.get("reward_component_ev_mean"),
             "reward_team_reward": _breakdown.get("team_reward"),
             "reward_district_import_kwh": _breakdown.get("district_import"),

@@ -40,16 +40,16 @@ class CityLearnV3ExperimentConfig:
     citylearn_kwargs: Dict[str, Any] = field(default_factory=dict)
     model: Dict[str, Any] = field(
         default_factory=lambda: {
-            "hidden_sizes": [256, 256],
+            "hidden_sizes": [512, 512],
             "core_arch": "mlp",
             "recurrent_option": ["gru", "lstm"],
         }
     )
     hyperparameters: Dict[str, Any] = field(
         default_factory=lambda: {
-            "actor_lr": 3e-4,
-            "critic_lr": 1e-3,
-            "gamma": 0.99,
+            "actor_lr": 1e-4,
+            "critic_lr": 5e-4,
+            "gamma": 0.9999,
             "batch_size": 256,
             "replay_buffer_size": 1_000_000,
             "tau": 0.005,

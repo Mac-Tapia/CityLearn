@@ -64,7 +64,7 @@ class ScenarioManager:
         enable_dr_signals=False,
         dr_signal_threshold=0.8,
         dr_response_required=False,
-        reward_weights={"flex": 0.70, "carbon": 0.15, "cost": 0.15},
+        reward_weights={"flex": 0.60, "carbon": 0.15, "cost": 0.25},
         primary_kpi="peak_average"
     )
     
@@ -82,7 +82,7 @@ class ScenarioManager:
         enable_dr_signals=False,
         dr_signal_threshold=0.8,
         dr_response_required=False,
-        reward_weights={"flex": 0.15, "carbon": 0.70, "cost": 0.15},
+        reward_weights={"flex": 0.25, "carbon": 0.60, "cost": 0.15},
         primary_kpi="carbon_emissions_total"
     )
     
@@ -100,7 +100,7 @@ class ScenarioManager:
         enable_dr_signals=False,
         dr_signal_threshold=0.75,
         dr_response_required=False,
-        reward_weights={"flex": 0.25, "carbon": 0.15, "cost": 0.60},
+        reward_weights={"flex": 0.15, "carbon": 0.25, "cost": 0.60},
         primary_kpi="electricity_cost_total"
     )
     
@@ -130,6 +130,33 @@ class ScenarioManager:
         
         self.current_scenario = scenario_name
         self.current_config = self.SCENARIOS[scenario_name]
+        # Explicit opt-in for new reproducible runs; legacy launchers retain
+        # their historical composite tariffs and are never relabelled.
+        import os
+        catalog_path = os.environ.get('UC3M_SCENARIO_CATALOG')
+        if catalog_path:
+            from dataclasses import replace
+            from pathlib import Path
+            from uc3m.application.configuration import load_scenario_catalog
+            from uc3m.domain.objectives import canonical_objective_policies
+            definition = load_scenario_catalog(Path(catalog_path))[scenario_name]
+            # Native reward currently supports canonical E1-E3 only. Reject
+            # unsupported treatments instead of giving them false fingerprints.
+            if definition.objective_policy.fingerprint() != canonical_objective_policies()[scenario_name].fingerprint():
+                raise ValueError('native reward does not support this objective policy')
+            if not (definition.constraint_policy.ev_service_enabled
+                    and definition.constraint_policy.bess_limits_enabled):
+                raise ValueError('native simulator does not support disabled EV/BESS constraints')
+            weights = definition.objective_policy.as_dict()['weights']
+            self.current_config = replace(
+                self.current_config,
+                use_time_of_use=definition.tariff_policy.mode == 'tou',
+                use_real_time_pricing=definition.tariff_policy.mode == 'rtp',
+                tariff_multiplier=definition.tariff_policy.multiplier,
+                reward_weights={'flex': weights['flexibility'],
+                                'carbon': weights['co2_emissions'],
+                                'cost': weights['energy_cost']},
+            )
         
         # Generate outage schedule if needed
         if self.current_config.enable_outages:
@@ -410,7 +437,7 @@ class ExperimentalDesign:
                         "algorithm": algo,
                         "scenario": scenario,
                         "seed": seed,
-                        "n_episodes": 10,
+                        "n_episodes": 50,
                         "n_timesteps": 8760,  # 1 year hourly
                     })
                     exp_id += 1
@@ -450,7 +477,7 @@ class ExperimentalDesign:
             "n_scenarios": self.N_SCENARIOS,
             "seeds": self.SEEDS,
             "n_seeds": self.N_SEEDS,
-            "episodes_per_experiment": 10,
+            "episodes_per_experiment": 50,
             "timesteps_per_episode": 8760,
-            "total_timesteps": self.N_EXPERIMENTS * 10 * 8760
+            "total_timesteps": self.N_EXPERIMENTS * 50 * 8760
         }

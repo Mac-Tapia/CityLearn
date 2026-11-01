@@ -67,8 +67,9 @@ def verify_critical_patches(repo: Path) -> List[str]:
     madrl_kpis = repo / "CityLearn/citylearn/madrl_kpis.py"
     dec_pomdp = repo / "CityLearn/citylearn/dec_pomdp.py"
     harl_wrappers = repo / "external/HARL/harl/envs/env_wrappers.py"
+    offpolicy_wrappers = repo / "external/off-policy/offpolicy/envs/env_wrappers.py"
     regenerate = repo / "CityLearn/scripts/regenerate_happo_kpis.py"
-    for path in (madrl_kpis, dec_pomdp, harl_wrappers, regenerate):
+    for path in (madrl_kpis, dec_pomdp, harl_wrappers, offpolicy_wrappers, regenerate):
         if not path.is_file():
             problems.append(f"Falta archivo: {path}")
 
@@ -88,6 +89,13 @@ def verify_critical_patches(repo: Path) -> List[str]:
         harl_src = harl_wrappers.read_text(encoding="utf-8")
         if "class VecEnvWrapper" not in harl_src:
             problems.append("HARL env_wrappers sin stub VecEnvWrapper")
+
+    if offpolicy_wrappers.is_file():
+        off_src = offpolicy_wrappers.read_text(encoding="utf-8")
+        if "class VecEnvWrapper" not in off_src:
+            problems.append("off-policy env_wrappers sin stub VecEnvWrapper")
+        if "isinstance(self, VecEnvWrapper)" in off_src and "class VecEnvWrapper" not in off_src:
+            problems.append("off-policy unwrapped referencia VecEnvWrapper sin definir")
 
     prepare = repo / "CityLearn/scripts/prepare_happo_colab_resume.py"
     if not prepare.is_file():
@@ -120,7 +128,8 @@ def main(argv: List[str] | None = None) -> int:
     print(
         "[OK] parches verificados: MAAC cuda-sync + validación de corrida "
         "+ preview_job_launcher_decision + ImportError launcher "
-        "+ unwrap_citylearn_core_env (HAPPO KPIs)"
+        "+ unwrap_citylearn_core_env (HAPPO KPIs) "
+        "+ VecEnvWrapper stub HARL/off-policy"
     )
     return 0
 

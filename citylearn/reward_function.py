@@ -523,11 +523,54 @@ class Electric_Vehicles_Reward_Function(MARL):
         return penalty_total
 
 
-CITYLEARN_V3_AXIS_REWARD_WEIGHTS = {
-    "E1": {"flex": 0.70, "carbon": 0.15, "cost": 0.15},
-    "E2": {"flex": 0.15, "carbon": 0.70, "cost": 0.15},
-    "E3": {"flex": 0.25, "carbon": 0.15, "cost": 0.60},
+CITYLEARN_V3_HIERARCHY_LEVELS = {
+    "primary": 0.60,
+    "secondary": 0.25,
+    "residual": 0.15,
 }
+
+# Compensatory hierarchy: the primary objective has a strict majority of the
+# normalized axis reward, while the other objectives remain active.  This is a
+# weighted-sum preference hierarchy, not lexicographic/pre-emptive optimization.
+# The cyclic order is balanced: every axis receives each hierarchy level once
+# across E1/E2/E3, so no thesis objective has greater aggregate exposure.
+CITYLEARN_V3_AXIS_PRIORITY_ORDER = {
+    "E1": ("flex", "cost", "carbon"),
+    "E2": ("carbon", "flex", "cost"),
+    "E3": ("cost", "carbon", "flex"),
+}
+
+
+def _build_hierarchical_axis_reward_weights() -> Mapping[str, Mapping[str, float]]:
+    axes = {"flex", "carbon", "cost"}
+    levels = CITYLEARN_V3_HIERARCHY_LEVELS
+
+    if not levels["primary"] > levels["secondary"] > levels["residual"] > 0.0:
+        raise ValueError("CityLearn v3 hierarchy must satisfy primary > secondary > residual > 0")
+    if levels["primary"] <= levels["secondary"] + levels["residual"]:
+        raise ValueError("CityLearn v3 primary hierarchy weight must exceed the non-primary sum")
+    if not np.isclose(sum(levels.values()), 1.0, atol=1.0e-12):
+        raise ValueError("CityLearn v3 hierarchy levels must sum to 1.0")
+
+    weights = {}
+    for scenario, order in CITYLEARN_V3_AXIS_PRIORITY_ORDER.items():
+        if len(order) != 3 or set(order) != axes:
+            raise ValueError(f"Invalid CityLearn v3 axis priority order for {scenario}: {order}")
+        weights[scenario] = {
+            order[0]: levels["primary"],
+            order[1]: levels["secondary"],
+            order[2]: levels["residual"],
+        }
+
+    for axis in axes:
+        assigned = sorted(weights[scenario][axis] for scenario in weights)
+        if not np.allclose(assigned, sorted(levels.values()), atol=1.0e-12):
+            raise ValueError(f"CityLearn v3 hierarchy is not cyclically balanced for axis {axis}")
+
+    return weights
+
+
+CITYLEARN_V3_AXIS_REWARD_WEIGHTS = _build_hierarchical_axis_reward_weights()
 
 
 CITYLEARN_V3_MADRL_REWARD_PROFILES = {
@@ -671,6 +714,9 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
             "algorithm": self.algorithm,
             "scenario": self.scenario,
             "axis_weights": dict(self.axis_weights),
+            "weighting_method": "compensatory_hierarchical_weighted_sum",
+            "hierarchy_levels": dict(CITYLEARN_V3_HIERARCHY_LEVELS),
+            "axis_priority_order": list(CITYLEARN_V3_AXIS_PRIORITY_ORDER.get(self.scenario, ())),
             "profile": dict(self.profile),
             "base_reward": "CityLearnV3MADRLRewardFunction",
             "not_using_marl_base_weights": True,
@@ -876,10 +922,23 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
                 if np.isfinite(bess_soc_now):
                     self._last_bess_socs[i] = bess_soc_now
 
+            axis_contributions = {
+                "flex": self.axis_weights["flex"] * flex_component,
+                "carbon": self.axis_weights["carbon"] * carbon_component,
+                "cost": self.axis_weights["cost"] * cost_component,
+            }
+            axis_absolute_total = float(sum(abs(value) for value in axis_contributions.values()))
+            axis_effective_shares = {
+                key: (
+                    abs(value) / axis_absolute_total
+                    if axis_absolute_total > ZERO_DIVISION_PLACEHOLDER
+                    else 0.0
+                )
+                for key, value in axis_contributions.items()
+            }
+
             scalar_reward = reward_scale * (
-                self.axis_weights["flex"] * flex_component
-                + self.axis_weights["carbon"] * carbon_component
-                + self.axis_weights["cost"] * cost_component
+                sum(axis_contributions.values())
                 + ev_component
                 + bess_cycle_component
             )
@@ -889,6 +948,12 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
                 "flex": flex_component,
                 "carbon": carbon_component,
                 "cost": cost_component,
+                "weighted_flex": axis_contributions["flex"],
+                "weighted_carbon": axis_contributions["carbon"],
+                "weighted_cost": axis_contributions["cost"],
+                "effective_flex_share": axis_effective_shares["flex"],
+                "effective_carbon_share": axis_effective_shares["carbon"],
+                "effective_cost_share": axis_effective_shares["cost"],
                 "ev": ev_component,
                 "bess_cycle": bess_cycle_component,
             })
@@ -899,6 +964,8 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
             "algorithm": self.algorithm,
             "scenario": self.scenario,
             "axis_weights": dict(self.axis_weights),
+            "weighting_method": "compensatory_hierarchical_weighted_sum",
+            "effective_share_scope": "absolute_weighted_axis_terms_excluding_ev_and_bess",
             "profile_name": self.profile.get("profile_name"),
             "district_import": district_import,
             "district_ramp": district_ramp,

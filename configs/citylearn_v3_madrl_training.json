@@ -107,20 +107,43 @@
     "function": "citylearn.reward_function.CityLearnV3MADRLRewardFunction",
     "not_using_marl_base_weights": true,
     "citylearn_v2_kpis_are_evaluation_metrics": true,
+    "weighting_method": "compensatory_hierarchical_weighted_sum",
+    "hierarchy_levels": {
+      "primary": 0.6,
+      "secondary": 0.25,
+      "residual": 0.15
+    },
+    "priority_order": {
+      "E1": [
+        "flex",
+        "cost",
+        "carbon"
+      ],
+      "E2": [
+        "carbon",
+        "flex",
+        "cost"
+      ],
+      "E3": [
+        "cost",
+        "carbon",
+        "flex"
+      ]
+    },
     "axis_weights": {
       "E1": {
-        "flex": 0.7,
+        "flex": 0.6,
         "carbon": 0.15,
-        "cost": 0.15
+        "cost": 0.25
       },
       "E2": {
-        "flex": 0.15,
-        "carbon": 0.7,
+        "flex": 0.25,
+        "carbon": 0.6,
         "cost": 0.15
       },
       "E3": {
-        "flex": 0.25,
-        "carbon": 0.15,
+        "flex": 0.15,
+        "carbon": 0.25,
         "cost": 0.6
       }
     },
@@ -275,7 +298,7 @@
       "reward_profile": "HAPPO",
       "cli": {
         "num_env_steps": 438000,
-        "hidden_size": 384,
+        "hidden_size": 512,
         "torch_threads": 12,
         "n_rollout_threads": 1,
         "log_interval": 1,
@@ -288,16 +311,16 @@
         "episode_length": 8760,
         "n_rollout_threads": 1,
         "hidden_sizes": [
-          384,
-          384
+          512,
+          512
         ],
         "share_param": false,
         "log_interval": 1,
         "eval_interval": 1,
         "live_progress_interval": 250,
-        "lr": 0.0005,
+        "lr": 0.0001,
         "critic_lr": 0.0005,
-        "gamma": 0.99,
+        "gamma": 0.9999,
         "gae_lambda": 0.95,
         "clip_param": 0.2
       }
@@ -315,11 +338,11 @@
       "cli": {
         "action_bins": 3,
         "discrete_action_mode": "axis",
-        "max_replay_buffer_gib": 3.0,
-        "buffer_size": 2,
+        "max_replay_buffer_gib": 8.0,
+        "buffer_size": 4,
         "critic_batch_size": 1,
         "critic_train_steps": 1,
-        "actor_sample_times": 2,
+        "actor_sample_times": 10,
         "masac_preload_batch_device": "auto",
         "rnn_hidden_dim": 64,
         "qmix_hidden_dim": 32,
@@ -336,15 +359,17 @@
         "discrete_action_mode": "axis",
         "critic_batch_size": 1,
         "critic_train_steps": 1,
-        "actor_sample_times": 2,
+        "actor_sample_times": 10,
         "masac_preload_batch_device": "auto",
-        "buffer_size": 2,
+        "buffer_size": 4,
         "rnn_hidden_dim": 64,
         "qmix_hidden_dim": 32,
         "hyper_hidden_dim": 64,
         "live_progress_interval": 250,
         "state_shape": "CityLearn v3 CTDE state_shape",
-        "obs_shape": "CityLearn v3 local obs_shape"
+        "obs_shape": "CityLearn v3 local obs_shape",
+        "max_replay_buffer_gib": 8.0,
+        "gamma": 0.9999
       }
     },
     "MATD3": {
@@ -357,10 +382,10 @@
       "reward_profile": "MATD3",
       "cli": {
         "num_env_steps": 438000,
-        "batch_size": 512,
-        "buffer_size": 50000,
-        "hidden_size": 384,
-        "train_interval": 100,
+        "batch_size": 256,
+        "buffer_size": 4096,
+        "hidden_size": 256,
+        "train_interval": 50,
         "num_random_episodes": 1,
         "live_progress_interval": 250,
         "cuda": true
@@ -369,16 +394,16 @@
         "episodes": 50,
         "episode_length": 8760,
         "num_env_steps": 438000,
-        "batch_size": 512,
-        "buffer_size": 50000,
-        "hidden_size": 384,
-        "train_interval": 100,
+        "batch_size": 256,
+        "buffer_size": 4096,
+        "hidden_size": 256,
+        "train_interval": 50,
         "num_random_episodes": 1,
         "live_progress_interval": 250,
         "share_policy": false,
         "use_same_share_obs": true,
-        "lr": 0.0005,
-        "gamma": 0.99,
+        "lr": 0.0003,
+        "gamma": 0.9999,
         "tau": 0.005,
         "target_noise": 0.2
       }
@@ -397,17 +422,17 @@
         "action_bins": 3,
         "discrete_action_mode": "axis",
         "max_discrete_actions": 512,
-        "batch_size": 512,
-        "buffer_length": 200000,
-        "steps_per_update": 250,
-        "num_updates": 8,
-        "hidden_size": 384,
+        "batch_size": 768,
+        "buffer_length": 450000,
+        "steps_per_update": 50,
+        "num_updates": 12,
+        "hidden_size": 768,
         "attend_heads": 4,
         "pi_lr": 0.0003,
         "q_lr": 0.001,
         "tau": 0.005,
-        "gamma": 0.99,
-        "reward_scale": 100.0,
+        "gamma": 0.9999,
+        "reward_scale": 10.0,
         "live_progress_interval": 250,
         "cuda": true
       },
@@ -416,17 +441,17 @@
         "episode_length": 8760,
         "action_bins": 3,
         "discrete_action_mode": "axis",
-        "batch_size": 512,
-        "buffer_length": 200000,
-        "steps_per_update": 250,
-        "num_updates": 8,
-        "hidden_size": 384,
+        "batch_size": 768,
+        "buffer_length": 450000,
+        "steps_per_update": 50,
+        "num_updates": 12,
+        "hidden_size": 768,
         "attend_heads": 4,
         "pi_lr": 0.0003,
         "q_lr": 0.001,
         "tau": 0.005,
-        "gamma": 0.99,
-        "reward_scale": 100.0,
+        "gamma": 0.9999,
+        "reward_scale": 10.0,
         "live_progress_interval": 250
       }
     }
