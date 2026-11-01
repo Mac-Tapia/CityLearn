@@ -17,12 +17,12 @@ from pathlib import Path
 from typing import Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 COLAB_REPO_URL = "https://github.com/Mac-Tapia/MADRLCitytleranflexresdr.git"
-COLAB_REPO_BRANCH = "codex/fix-madrl-traceability-docs"
+COLAB_REPO_BRANCH = "fix/madrl-traceability-docs"
 COLAB_DEFAULT_REPO = "/content/MADRLCitytleranflexresdr"
 CITYLEARN_URL = "https://github.com/Mac-Tapia/CityLearn.git"
-CITYLEARN_BRANCH = "codex/iquitos-distillation-madrl-docs"
+CITYLEARN_BRANCH = "fix/iquitos-distillation-madrl-docs"
 MAAC_URL = "https://github.com/Mac-Tapia/MAAC.git"
-MAAC_BRANCH = "codex/integrar-limpieza-diagnosticos"
+MAAC_BRANCH = "chore/integrar-limpieza-diagnosticos"
 
 
 def _git_check(args: Sequence[str], *, cwd: Optional[Path] = None) -> None:

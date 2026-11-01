@@ -8,7 +8,7 @@ from __future__ import annotations
 
 COLAB_NOTEBOOK_OWNER = "Mac-Tapia"
 COLAB_NOTEBOOK_REPO = "MADRLCitytleranflexresdr"
-COLAB_NOTEBOOK_BRANCH = "codex/fix-madrl-traceability-docs"
+COLAB_NOTEBOOK_BRANCH = "fix/madrl-traceability-docs"
 COLAB_NOTEBOOK_PATH = "examples_madrl_v3/madrl_citylearn_v3_tutorial.ipynb"
 
 PARENT_REPO_OWNER = COLAB_NOTEBOOK_OWNER
