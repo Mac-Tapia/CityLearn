@@ -29,7 +29,7 @@ class CityLearnV3ExperimentConfig:
     seeds: Tuple[int, ...] = SEEDS
     episode_time_steps: int = 8760
     reward_aggregation: str = "team_mean"
-    reward_function: str = "citylearn.reward_function.CityLearnV3MADRLRewardFunction"
+    reward_function: str = "citylearn.v3.reward.CityLearnV3MADRLRewardFunction"
     central_agent: bool = False
     normalize_observations: bool = False
     backend_policy: str = "official_repository"

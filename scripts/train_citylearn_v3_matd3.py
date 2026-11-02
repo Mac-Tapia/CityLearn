@@ -331,7 +331,7 @@ def main() -> int:
         "gpu_runtime": gpu_runtime,
         "algorithm_family": "MADRL",
         "ctde_share_observation": "padded_joint_observation",
-        "reward_function": "CityLearnV3MADRLRewardFunction",
+        "reward_function": "citylearn.v3.reward.CityLearnV3MADRLRewardFunction",
         "reward_profile": "MATD3",
         "reward_metadata": env.adapter.reward_metadata,
         "finite_optimizer_step_guard": finite_optimizer_guard,

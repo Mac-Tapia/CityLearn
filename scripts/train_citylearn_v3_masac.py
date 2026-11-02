@@ -49,16 +49,20 @@ def parse_args():
     )
     parser.add_argument(
         "--max-replay-buffer-gib",
-        default=8.0,
+        default=None,
         type=float,
-        help="Abort before backend startup if MASAC replay buffer would exceed this estimate.",
+        help=(
+            "Refuse before backend startup if the MASAC replay estimate exceeds this value. "
+            "Default: the measured available system RAM. The buffer is never shrunk."
+        ),
     )
-    parser.add_argument("--buffer-size", default=20, type=int)
+    parser.add_argument("--buffer-size", default=5000, type=int,
+                        help="Replay capacity in EPISODES (author default 5000); never more than the run holds.")
     parser.add_argument(
         "--critic-batch-size",
-        default=1,
+        default=32,
         type=int,
-        help="Episodes sampled per QMIX critic update (NOT GPU transition batch; use 1 for 8760-step CityLearn).",
+        help="Episodes sampled per QMIX critic update (author default 32 episodes, not transitions).",
     )
     parser.add_argument("--critic-train-steps", default=1, type=int)
     parser.add_argument("--actor-sample-times", default=5, type=int)
@@ -76,8 +80,10 @@ def parse_args():
     parser.add_argument("--alpha-lr", default=3.0e-4, type=float)
     parser.add_argument("--grad-norm-clip", default=1.0, type=float)
     parser.add_argument("--rnn-hidden-dim", default=256, type=int)
-    parser.add_argument("--qmix-hidden-dim", default=128, type=int)
-    parser.add_argument("--hyper-hidden-dim", default=256, type=int)
+    parser.add_argument("--qmix-hidden-dim", default=None, type=int,
+                        help="Default: rnn_hidden_dim // 2 (author ratio rnn 64 / qmix 32).")
+    parser.add_argument("--hyper-hidden-dim", default=None, type=int,
+                        help="Default: rnn_hidden_dim (author ratio rnn 64 / hyper 64).")
     parser.add_argument("--gamma", default=0.9999, type=float,
                         help="Discount factor. Use 0.9999 for year-long (8760-step) episodes.")
     parser.add_argument("--use-recurrent-policy", action="store_true",
@@ -119,6 +125,102 @@ def estimate_replay_buffer_gib(
     )
     bytes_required = int(buffer_size) * int(episode_limit) * int(transition_elements) * 8
     return bytes_required / float(1024**3)
+
+
+def resolve_masac_capacity(
+    *,
+    episode_limit: int,
+    configured_episodes: int,
+    critic_batch_size: int,
+    critic_train_steps: int,
+    actor_sample_times: int,
+    rnn_hidden_dim: int,
+    qmix_hidden_dim=None,
+    hyper_hidden_dim=None,
+    buffer_size: int,
+) -> dict:
+    """Resolve the MASAC/QMIX capacity without any episode-length clamp.
+
+    Author defaults (external/MARL/src/common/arguments.py): critic_batch_size 32
+    episodes, critic_train_steps 1, buffer 5000 episodes, rnn 64 / qmix 32 / hyper 64.
+    qmix and hyper widths keep the author ratio to rnn_hidden_dim (qmix = rnn/2,
+    hyper = rnn) unless given explicitly. The only reduction is lossless: the episode
+    buffer never holds more episodes than the run produces. The runner itself samples
+    min(current_size, critic_batch_size) episodes.
+    """
+    rnn = max(1, int(rnn_hidden_dim))
+    resolved = {
+        "episode_limit": int(episode_limit),
+        "critic_batch_size": max(1, int(critic_batch_size)),
+        "critic_train_steps": max(1, int(critic_train_steps)),
+        "actor_sample_times": max(1, int(actor_sample_times)),
+        "rnn_hidden_dim": rnn,
+        "qmix_hidden_dim": max(1, int(qmix_hidden_dim)) if qmix_hidden_dim is not None else max(1, rnn // 2),
+        "hyper_hidden_dim": max(1, int(hyper_hidden_dim)) if hyper_hidden_dim is not None else rnn,
+        "buffer_size_requested": int(buffer_size),
+        "notes": [],
+    }
+    if qmix_hidden_dim is None or hyper_hidden_dim is None:
+        resolved["notes"].append("qmix/hyper widths follow the author ratio to rnn_hidden_dim (1/2, 1)")
+    run_episodes = max(2, int(configured_episodes))
+    resolved["buffer_size"] = max(2, min(int(buffer_size), run_episodes))
+    if resolved["buffer_size"] < int(buffer_size):
+        resolved["notes"].append(
+            f"buffer holds every episode of the run ({run_episodes}); requested {int(buffer_size)} episodes"
+        )
+    return resolved
+
+
+def estimate_masac_critic_gpu_gib(
+    *,
+    batch_episodes: int,
+    episode_limit: int,
+    n_agents: int,
+    obs_shape: int,
+    n_actions: int,
+    state_shape: int,
+    rnn_hidden_dim: int,
+    qmix_hidden_dim: int,
+    hyper_hidden_dim: int,
+) -> float:
+    """Conservative float32 estimate of one QMIX critic update unrolled over B x T.
+
+    Per (episode, step): eval and target agent inputs (obs + last action one-hot +
+    agent id), state and next state, eval activations kept for backward (fc1 + 3 GRU
+    gates + hidden = 5 x rnn per agent), eval/target Q values per action, and the
+    hypernetwork mixer activations; x2 for gradients and allocator slack.
+    """
+    per_step = (
+        2 * n_agents * (obs_shape + n_actions + n_agents)
+        + 2 * state_shape
+        + n_agents * 5 * rnn_hidden_dim
+        + 2 * n_agents * n_actions
+        + 2 * (n_agents * qmix_hidden_dim + qmix_hidden_dim + 2 * hyper_hidden_dim)
+    )
+    floats = int(batch_episodes) * int(episode_limit) * per_step
+    return 2.0 * floats * 4 / float(1024**3)
+
+
+def check_masac_capacity(*, replay_gib: float, available_ram_gib, critic_gpu_gib: float, free_vram_gib) -> None:
+    """Refuse (never shrink) when the measured device cannot hold the configuration."""
+    if available_ram_gib is not None and replay_gib > available_ram_gib:
+        raise MemoryError(
+            f"insufficient_resources:MASAC:ram replay {replay_gib:.2f} GiB > {available_ram_gib:.2f} GiB available"
+        )
+    if free_vram_gib is not None and critic_gpu_gib > free_vram_gib:
+        raise MemoryError(
+            f"insufficient_resources:MASAC:vram critic update {critic_gpu_gib:.2f} GiB > "
+            f"{free_vram_gib:.2f} GiB free VRAM"
+        )
+
+
+def _available_ram_gib():
+    try:
+        import psutil
+
+        return psutil.virtual_memory().available / float(1024**3)
+    except Exception:  # noqa: BLE001 - measurement unavailable is reported as None
+        return None
 
 
 def main() -> int:
@@ -204,31 +306,22 @@ def main() -> int:
     backend_args.state_shape = env_info["state_shape"]
     backend_args.obs_shape = env_info["obs_shape"]
     backend_args.episode_limit = env_info["episode_limit"]
-    backend_args.critic_batch_size = max(1, int(args.critic_batch_size))
-    backend_args.critic_train_steps = max(1, int(args.critic_train_steps))
-    backend_args.actor_sample_times = max(1, int(args.actor_sample_times))
-    # QMIX/MASAC critic_batch_size = episodes per update (Rashid et al. 2018: 32 ep x 60-120 steps SMAC).
-    # CityLearn 8760-step episodes unroll the full horizon on GPU -> cap at 1 episode.
-    if backend_args.episode_limit >= 1000:
-        if backend_args.critic_batch_size > 1:
-            print(
-                f"[masac] critic_batch_size clamped {backend_args.critic_batch_size} -> 1 "
-                f"(episodes not transitions; episode_limit={backend_args.episode_limit})",
-                flush=True,
-            )
-            backend_args.critic_batch_size = 1
-        if backend_args.critic_train_steps > 1:
-            print(
-                f"[masac] critic_train_steps clamped {backend_args.critic_train_steps} -> 1 "
-                f"(8760-step QMIX unroll; avoids synchronized GPU spikes in 6-parallel)",
-                flush=True,
-            )
-            backend_args.critic_train_steps = 1
-    else:
-        backend_args.critic_batch_size = min(
-            backend_args.critic_batch_size,
-            max(1, int(backend_args.buffer_size)),
-        )
+    capacity = resolve_masac_capacity(
+        episode_limit=backend_args.episode_limit,
+        configured_episodes=configured_episodes,
+        critic_batch_size=args.critic_batch_size,
+        critic_train_steps=args.critic_train_steps,
+        actor_sample_times=args.actor_sample_times,
+        rnn_hidden_dim=args.rnn_hidden_dim,
+        qmix_hidden_dim=args.qmix_hidden_dim,
+        hyper_hidden_dim=args.hyper_hidden_dim,
+        buffer_size=args.buffer_size,
+    )
+    for note in capacity["notes"]:
+        print(f"[masac] {note}", flush=True)
+    backend_args.critic_batch_size = capacity["critic_batch_size"]
+    backend_args.critic_train_steps = capacity["critic_train_steps"]
+    backend_args.actor_sample_times = capacity["actor_sample_times"]
     backend_args.citylearn_preload_batch_device = args.masac_preload_batch_device
     # Persist a resumable checkpoint after every QMIX critic update so an interruption
     # near the end of training never discards trained weights (resume always possible).
@@ -236,29 +329,12 @@ def main() -> int:
     backend_args.actor_lr = float(args.actor_lr)
     backend_args.critic_lr = float(args.critic_lr)
     backend_args.grad_norm_clip = float(args.grad_norm_clip)
-    backend_args.rnn_hidden_dim = max(1, int(args.rnn_hidden_dim))
-    backend_args.qmix_hidden_dim = max(1, int(args.qmix_hidden_dim))
-    backend_args.hyper_hidden_dim = max(1, int(args.hyper_hidden_dim))
-    # 8760-step QMIX stacks (1, T, n_agents, n_actions) on GPU; proven Iquitos profile uses 64/32/64.
-    if backend_args.episode_limit >= 1000:
-        caps = (
-            ("rnn_hidden_dim", 64),
-            ("qmix_hidden_dim", 32),
-            ("hyper_hidden_dim", 64),
-        )
-        for attr, cap in caps:
-            current = int(getattr(backend_args, attr))
-            if current > cap:
-                print(
-                    f"[masac] {attr} clamped {current} -> {cap} "
-                    f"(8760-step QMIX train_critic VRAM; see launch_citylearn_v3_iquitos_training.ps1)",
-                    flush=True,
-                )
-                setattr(backend_args, attr, cap)
-    backend_args.buffer_size = max(int(args.buffer_size), 2)
+    backend_args.rnn_hidden_dim = capacity["rnn_hidden_dim"]
+    backend_args.qmix_hidden_dim = capacity["qmix_hidden_dim"]
+    backend_args.hyper_hidden_dim = capacity["hyper_hidden_dim"]
+    backend_args.buffer_size = capacity["buffer_size"]
     backend_args.gamma = float(args.gamma)
     backend_args.use_rnn = bool(args.use_recurrent_policy)
-    requested_buffer_size = int(backend_args.buffer_size)
     estimated_replay_buffer_gib = estimate_replay_buffer_gib(
         buffer_size=backend_args.buffer_size,
         episode_limit=backend_args.episode_limit,
@@ -267,31 +343,35 @@ def main() -> int:
         obs_shape=backend_args.obs_shape,
         state_shape=backend_args.state_shape,
     )
-    max_replay_gib = float(args.max_replay_buffer_gib)
-    while estimated_replay_buffer_gib > max_replay_gib and backend_args.buffer_size > 2:
-        backend_args.buffer_size -= 1
-        estimated_replay_buffer_gib = estimate_replay_buffer_gib(
-            buffer_size=backend_args.buffer_size,
-            episode_limit=backend_args.episode_limit,
-            n_agents=backend_args.n_agents,
-            n_actions=backend_args.n_actions,
-            obs_shape=backend_args.obs_shape,
-            state_shape=backend_args.state_shape,
-        )
-    if backend_args.buffer_size != requested_buffer_size:
-        print(
-            f"[masac] buffer_size clamped {requested_buffer_size} -> {backend_args.buffer_size} "
-            f"(replay estimate {estimated_replay_buffer_gib:.2f} GiB <= cap {max_replay_gib:.2f} GiB)",
-            flush=True,
-        )
-
-    if estimated_replay_buffer_gib > max_replay_gib:
-        raise MemoryError(
-            "MASAC replay buffer estimate is too large: "
-            f"{estimated_replay_buffer_gib:.2f} GiB > {args.max_replay_buffer_gib:.2f} GiB. "
-            "Use --discrete-action-mode axis for CityLearn multi-actuator actions, "
-            "or reduce episode length, buffer size or action bins."
-        )
+    estimated_critic_gpu_gib = estimate_masac_critic_gpu_gib(
+        batch_episodes=min(backend_args.critic_batch_size, backend_args.buffer_size),
+        episode_limit=backend_args.episode_limit,
+        n_agents=backend_args.n_agents,
+        obs_shape=backend_args.obs_shape,
+        n_actions=backend_args.n_actions,
+        state_shape=backend_args.state_shape,
+        rnn_hidden_dim=backend_args.rnn_hidden_dim,
+        qmix_hidden_dim=backend_args.qmix_hidden_dim,
+        hyper_hidden_dim=backend_args.hyper_hidden_dim,
+    )
+    available_ram_gib = (
+        float(args.max_replay_buffer_gib) if args.max_replay_buffer_gib is not None else _available_ram_gib()
+    )
+    free_vram_gib = None
+    if backend_args.cuda and torch.cuda.is_available():
+        free_vram_gib = torch.cuda.mem_get_info()[0] / float(1024**3)
+    print(
+        f"[masac] capacity buffer={backend_args.buffer_size} ep replay={estimated_replay_buffer_gib:.2f} GiB "
+        f"(available {available_ram_gib}) critic_batch={backend_args.critic_batch_size} ep "
+        f"critic_gpu={estimated_critic_gpu_gib:.2f} GiB (free {free_vram_gib})",
+        flush=True,
+    )
+    check_masac_capacity(
+        replay_gib=estimated_replay_buffer_gib,
+        available_ram_gib=available_ram_gib,
+        critic_gpu_gib=estimated_critic_gpu_gib,
+        free_vram_gib=free_vram_gib,
+    )
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -307,7 +387,11 @@ def main() -> int:
         "discrete_action_metadata": env.adapter.discrete_action_metadata,
         "n_discrete_actions": env_info["n_actions"],
         "estimated_replay_buffer_gib": estimated_replay_buffer_gib,
-        "max_replay_buffer_gib": args.max_replay_buffer_gib,
+        "max_replay_buffer_gib": available_ram_gib,
+        "estimated_critic_gpu_gib": estimated_critic_gpu_gib,
+        "free_vram_gib_at_start": free_vram_gib,
+        "buffer_size_requested": capacity["buffer_size_requested"],
+        "capacity_notes": capacity["notes"],
         "critic_batch_size": backend_args.critic_batch_size,
         "critic_train_steps": backend_args.critic_train_steps,
         "actor_sample_times": backend_args.actor_sample_times,
@@ -331,7 +415,7 @@ def main() -> int:
         "algorithm_family": "MADRL",
         "backend_repository": "external/MARL/src",
         "ctde_state_shape": backend_args.state_shape,
-        "reward_function": "CityLearnV3MADRLRewardFunction",
+        "reward_function": "citylearn.v3.reward.CityLearnV3MADRLRewardFunction",
         "reward_profile": "MASAC",
         "reward_metadata": env.adapter.reward_metadata,
         "job_resume": resume_plan,

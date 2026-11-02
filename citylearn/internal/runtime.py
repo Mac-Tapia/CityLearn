@@ -329,50 +329,51 @@ class CityLearnRuntimeService:
         if t + 1 >= env.episode_tracker.episode_time_steps:
             return
 
+        # Only chargers whose current or next EV id is the vehicle can act on it, so they
+        # are indexed once per step in the original building/charger order; every
+        # other charger was a no-op of the former EVs x chargers scan.
+        candidates = {}
+        for building in env.buildings:
+            for charger in building.electric_vehicle_chargers or []:
+                sim: ChargerSimulation = charger.charger_simulation
+                ids = sim.electric_vehicle_id
+                states = sim.electric_vehicle_charger_state
+                arrival = sim.electric_vehicle_estimated_soc_arrival
+                row = (
+                    ids[t] if t < len(ids) else '',
+                    ids[t + 1] if t + 1 < len(ids) else '',
+                    states[t] if t < len(states) else np.nan,
+                    states[t + 1] if t + 1 < len(states) else np.nan,
+                    arrival[t] if t < len(arrival) else np.nan,
+                    arrival[t + 1] if t + 1 < len(arrival) else np.nan,
+                )
+                for key in {row[0], row[1]}:
+                    if isinstance(key, str):
+                        candidates.setdefault(key, []).append(row)
+
         for ev in env.electric_vehicles:
             ev_id = ev.name
             found_in_charger = False
 
-            for building in env.buildings:
-                for charger in building.electric_vehicle_chargers or []:
-                    sim: ChargerSimulation = charger.charger_simulation
+            for curr_id, next_id, curr_state, next_state, soc_now, soc_next in candidates.get(ev_id, ()):
+                currently_connected = isinstance(curr_id, str) and curr_id == ev_id and curr_state == 1
+                if currently_connected:
+                    found_in_charger = True
+                    break
 
-                    curr_id = sim.electric_vehicle_id[t] if t < len(sim.electric_vehicle_id) else ''
-                    next_id = sim.electric_vehicle_id[t + 1] if t + 1 < len(sim.electric_vehicle_id) else ''
-                    curr_state = sim.electric_vehicle_charger_state[t] if t < len(sim.electric_vehicle_charger_state) else np.nan
-                    next_state = sim.electric_vehicle_charger_state[t + 1] if t + 1 < len(sim.electric_vehicle_charger_state) else np.nan
+                is_connecting = (
+                    isinstance(next_id, str)
+                    and next_id == ev_id
+                    and next_state == 1
+                    and curr_state != 1
+                )
+                is_incoming = isinstance(curr_id, str) and curr_id == ev_id and curr_state == 2
 
-                    currently_connected = isinstance(curr_id, str) and curr_id == ev_id and curr_state == 1
-                    if currently_connected:
-                        found_in_charger = True
-                        break
-
-                    is_connecting = (
-                        isinstance(next_id, str)
-                        and next_id == ev_id
-                        and next_state == 1
-                        and curr_state != 1
-                    )
-                    is_incoming = isinstance(curr_id, str) and curr_id == ev_id and curr_state == 2
-
-                    if is_connecting:
-                        found_in_charger = True
-                        if is_incoming:
-                            if t < len(sim.electric_vehicle_estimated_soc_arrival):
-                                soc = sim.electric_vehicle_estimated_soc_arrival[t]
-                            else:
-                                soc = np.nan
-                        else:
-                            if t + 1 < len(sim.electric_vehicle_estimated_soc_arrival):
-                                soc = sim.electric_vehicle_estimated_soc_arrival[t + 1]
-                            else:
-                                soc = np.nan
-
-                        if 0 <= soc <= 1:
-                            ev.battery.force_set_soc(soc)
-                        break
-
-                if found_in_charger:
+                if is_connecting:
+                    found_in_charger = True
+                    soc = soc_now if is_incoming else soc_next
+                    if 0 <= soc <= 1:
+                        ev.battery.force_set_soc(soc)
                     break
 
             if not found_in_charger:

@@ -284,7 +284,7 @@ def main() -> int:
         "gpu_runtime": gpu_runtime,
         "algorithm_family": "MADRL",
         "critic": "multi-agent attention critic",
-        "reward_function": "CityLearnV3MADRLRewardFunction",
+        "reward_function": "citylearn.v3.reward.CityLearnV3MADRLRewardFunction",
         "reward_profile": "MAAC",
         "reward_metadata": env.adapter.reward_metadata,
         "finite_optimizer_step_guard": finite_optimizer_guard,

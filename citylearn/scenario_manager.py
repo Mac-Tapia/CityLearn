@@ -138,12 +138,11 @@ class ScenarioManager:
             from dataclasses import replace
             from pathlib import Path
             from uc3m.application.configuration import load_scenario_catalog
-            from uc3m.domain.objectives import canonical_objective_policies
             definition = load_scenario_catalog(Path(catalog_path))[scenario_name]
-            # Native reward currently supports canonical E1-E3 only. Reject
-            # unsupported treatments instead of giving them false fingerprints.
-            if definition.objective_policy.fingerprint() != canonical_objective_policies()[scenario_name].fingerprint():
-                raise ValueError('native reward does not support this objective policy')
+            # The v3 reward reads its axis weights from this same catalog
+            # (citylearn.reward_function.scenario_catalog_axis_weights), so a
+            # validated derived policy (weight sensitivity) is supported; the
+            # loader already rejects drift of the canonical E1-E3 policies.
             if not (definition.constraint_policy.ev_service_enabled
                     and definition.constraint_policy.bess_limits_enabled):
                 raise ValueError('native simulator does not support disabled EV/BESS constraints')

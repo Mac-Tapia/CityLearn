@@ -337,7 +337,7 @@ class Building(Environment):
     def net_electricity_consumption_emission_without_storage_and_pv(self) -> np.ndarray:
         """Carbon dioxide emmission from `net_electricity_consumption_without_storage_pv` time series, in [kg_co2]."""
 
-        return (self.carbon_intensity.carbon_intensity[0:self.time_step + 1] * self.net_electricity_consumption_without_storage_and_pv).clip(min=0)
+        return self.carbon_intensity.carbon_intensity[0:self.time_step + 1] * self.net_electricity_consumption_without_storage_and_pv  # net billing: not clipped
 
     @property
     def net_electricity_consumption_cost_without_storage_and_pv(self) -> np.ndarray:
@@ -362,7 +362,7 @@ class Building(Environment):
     def net_electricity_consumption_emission_without_storage(self) -> np.ndarray:
         """Carbon dioxide emmission from `net_electricity_consumption_without_storage` time series, in [kg_co2]."""
 
-        return (self.carbon_intensity.carbon_intensity[0:self.time_step + 1] * self.net_electricity_consumption_without_storage).clip(min=0)
+        return self.carbon_intensity.carbon_intensity[0:self.time_step + 1] * self.net_electricity_consumption_without_storage  # net billing: not clipped
 
     @property
     def net_electricity_consumption_cost_without_storage(self) -> np.ndarray:
@@ -2516,8 +2516,9 @@ class Building(Environment):
         # net electriciy consumption cost
         self.__net_electricity_consumption_cost[self.time_step] = net_electricity_consumption*self.pricing.electricity_pricing[self.time_step]
 
-        # net electriciy consumption emission
-        self.__net_electricity_consumption_emission[self.time_step] = max(0.0, net_electricity_consumption*self.carbon_intensity.carbon_intensity[self.time_step])
+        # net electriciy consumption emission. Net billing (owner decision 2026-11-01): exported
+        # energy displaces thermal generation of the isolated grid, so it is not clipped at zero.
+        self.__net_electricity_consumption_emission[self.time_step] = net_electricity_consumption*self.carbon_intensity.carbon_intensity[self.time_step]
 
     def set_net_electricity_consumption_cost(self, value: float, time_step: int = None):
         """Override net electricity consumption cost at a given time step."""
@@ -2661,7 +2662,7 @@ class DynamicsBuilding(Building):
 
         return (
             self.carbon_intensity.carbon_intensity[0:self.time_step + 1]*\
-                self.net_electricity_consumption_without_storage_and_partial_load_and_pv).clip(min=0)
+                self.net_electricity_consumption_without_storage_and_partial_load_and_pv)  # net billing: not clipped (owner decision 2026-11-01)
 
     @property
     def net_electricity_consumption_cost_without_storage_and_partial_load_and_pv(self) -> np.ndarray:
@@ -2688,7 +2689,7 @@ class DynamicsBuilding(Building):
 
         return (
             self.carbon_intensity.carbon_intensity[0:self.time_step + 1]\
-                *self.net_electricity_consumption_without_storage_and_partial_load).clip(min=0)
+                *self.net_electricity_consumption_without_storage_and_partial_load)  # net billing: not clipped (owner decision 2026-11-01)
 
     @property
     def net_electricity_consumption_cost_without_storage_and_partial_load(self) -> np.ndarray:

@@ -311,7 +311,7 @@ def main() -> int:
         "gpu_runtime": gpu_runtime,
         "finite_optimizer_step_guard": gradient_guard,
         "algorithm_family": "MADRL",
-        "reward_function": "CityLearnV3MADRLRewardFunction",
+        "reward_function": "citylearn.v3.reward.CityLearnV3MADRLRewardFunction",
         "reward_profile": "HAPPO",
         "reward_metadata": reward_metadata,
         "job_resume": resume_plan,

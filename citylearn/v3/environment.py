@@ -37,7 +37,7 @@ def make_citylearn_v3_env(
         reward_kwargs.setdefault("scenario", scenario or "E1")
         merged_citylearn_kwargs.setdefault(
             "reward_function",
-            "citylearn.reward_function.CityLearnV3MADRLRewardFunction",
+            "citylearn.v3.reward.CityLearnV3MADRLRewardFunction",
         )
         merged_citylearn_kwargs["reward_function_kwargs"] = reward_kwargs
 

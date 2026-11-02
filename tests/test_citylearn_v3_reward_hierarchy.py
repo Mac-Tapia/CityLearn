@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from citylearn.reward_function import (
+from citylearn.v3.reward import (
     CITYLEARN_V3_AXIS_PRIORITY_ORDER,
     CITYLEARN_V3_AXIS_REWARD_WEIGHTS,
     CITYLEARN_V3_HIERARCHY_LEVELS,
@@ -47,7 +47,7 @@ def test_reward_metadata_exposes_compensatory_hierarchy(algorithm, scenario):
     assert reward.metadata["axis_weights"] == EXPECTED_WEIGHTS[scenario]
     assert reward.metadata["weighting_method"] == "compensatory_hierarchical_weighted_sum"
     assert reward.metadata["axis_priority_order"] == list(CITYLEARN_V3_AXIS_PRIORITY_ORDER[scenario])
-    assert reward.metadata["profile"]["profile_name"] == f"{algorithm.lower()}_unified_comparable_v4"
+    assert reward.metadata["profile"]["profile_name"] == f"{algorithm.lower()}_thesis_indicators_v7"
 
 
 def test_effective_axis_contributions_are_auditable_and_exclude_service_terms():

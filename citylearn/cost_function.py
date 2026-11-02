@@ -208,7 +208,8 @@ class CostFunction:
             Carbon emissions cost.
         """
 
-        data = pd.DataFrame({'carbon_emissions':np.array(carbon_emissions).clip(min=0)})
+        # Net billing (owner decision 2026-11-01): exporting steps are credited, not clipped at zero.
+        data = pd.DataFrame({'carbon_emissions':np.array(carbon_emissions, dtype=float)})
         data['carbon_emissions'] = data['carbon_emissions'].rolling(window=data.shape[0],min_periods=1).sum()
         
         return data['carbon_emissions'].tolist()
@@ -228,7 +229,8 @@ class CostFunction:
             Cost of electricity.
         """
 
-        data = pd.DataFrame({'cost':np.array(cost).clip(min=0)})
+        # Net billing (owner decision 2026-11-01): exporting steps are credited, not clipped at zero.
+        data = pd.DataFrame({'cost':np.array(cost, dtype=float)})
         data['cost'] = data['cost'].rolling(window=data.shape[0],min_periods=1).sum()
         
         return data['cost'].tolist()
