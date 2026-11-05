@@ -508,6 +508,7 @@ class CityLearnKPIService:
             return totals, 0.0
 
         final_t = int(max(getattr(env, 'time_step', 0), 0))
+        final_t = min(final_t, int(getattr(env, 'time_steps', final_t + 1)) - 1)
         ratio = self._to_scalar(getattr(env, 'community_market_sell_ratio', 0.8), 0.8)
         ratio = min(max(ratio, 0.0), 1.0)
         weights_config = getattr(env, 'community_market_import_member_weights', {}) or {}

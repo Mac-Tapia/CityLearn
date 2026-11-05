@@ -452,7 +452,7 @@ class CityLearnEnv(Environment, Env):
     def terminated(self) -> bool:
         """Check if simulation has reached completion."""
 
-        return self.time_step >= self.time_steps - 1
+        return self.time_step >= self.time_steps
 
     @property
     def truncated(self) -> bool:

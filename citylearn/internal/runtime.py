@@ -203,7 +203,7 @@ class CityLearnRuntimeService:
 
         env = self.env
         current_step = int(env.time_step)
-        last_action_step = max(env.time_steps - 2, 0)
+        last_action_step = max(env.time_steps - 1, 0)
         reached_terminal_transition = current_step >= last_action_step
 
         partial_render_time = 0.0
