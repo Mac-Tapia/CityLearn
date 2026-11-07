@@ -386,6 +386,8 @@ def main() -> int:
         "discrete_action_mode": args.discrete_action_mode,
         "discrete_action_metadata": env.adapter.discrete_action_metadata,
         "n_discrete_actions": env_info["n_actions"],
+        # D03: per-building availability mask (get_avail_agent_actions) and the equipment of each action.
+        "discrete_action_map": env.adapter.discrete_action_map(),
         "estimated_replay_buffer_gib": estimated_replay_buffer_gib,
         "max_replay_buffer_gib": available_ram_gib,
         "estimated_critic_gpu_gib": estimated_critic_gpu_gib,

@@ -284,9 +284,20 @@ def main() -> int:
         # NOTE: resume preload is injected via the env constructor
         # (resume_completed_episodes) so it also runs inside SubprocVecEnv workers.
         # Do NOT call preload here too — that would double-apply on DummyVecEnv.
+    # D03: the map is a property of the schema. With SubprocVecEnv the parent has no adapter,
+    # so a probe adapter of the same schema provides it.
+    map_adapter = getattr(report_candidate, "adapter", None) or CityLearnHARLEnv(
+        schema_path=args.schema_path,
+        scenario=args.scenario,
+        seed=args.seed,
+        episode_time_steps=args.episode_time_steps,
+        algorithm="HAPPO",
+        normalize_observations=args.normalize_observations,
+    ).adapter
     report = citylearn_v3_training_report(None)
     artifacts = {}
     hyperparameters = {
+        "continuous_action_map": map_adapter.continuous_action_map(),
         "episodes": configured_episodes,
         "num_env_steps": configured_num_env_steps,
         "episode_length": args.episode_time_steps,

@@ -334,6 +334,8 @@ def main() -> int:
         "reward_function": "citylearn.v3.reward.CityLearnV3MADRLRewardFunction",
         "reward_profile": "MATD3",
         "reward_metadata": env.adapter.reward_metadata,
+        # D03: padded continuous outputs, the equipment each drives and the inert ones.
+        "continuous_action_map": env.adapter.continuous_action_map(),
         "finite_optimizer_step_guard": finite_optimizer_guard,
         "job_resume": resume_plan,
         "training_state_resume": training_state_resume,

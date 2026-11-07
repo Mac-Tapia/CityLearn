@@ -266,6 +266,9 @@ def main() -> int:
         "discrete_action_metadata": env.adapter.discrete_action_metadata,
         "max_discrete_actions": args.max_discrete_actions,
         "n_discrete_actions": env.adapter.n_discrete_actions,
+        # D03: each agent's own action space and the equipment every action moves.
+        "agent_action_sizes": [int(space.n) for space in env.action_space],
+        "discrete_action_map": env.adapter.discrete_action_map(),
         "batch_size": args.batch_size,
         "buffer_length": args.buffer_length,
         "steps_per_update": args.steps_per_update,

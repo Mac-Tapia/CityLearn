@@ -7691,6 +7691,18 @@ class CityLearnV3BackendAdapter:
             spaces.Discrete(self.n_discrete_actions)
             for _ in self.agents
         ]
+        # D03 (owner, 2026-11-06): the table is padded to the largest equipment count, so a row that
+        # moves a padded actuator acts on equipment the building does not have. Valid rows per agent
+        # move only its real actuators (the no-op row 0 always qualifies).
+        table = np.asarray(self.discrete_action_table)
+        self.discrete_action_rows_by_agent = {
+            agent: [row for row in range(table.shape[0]) if not np.any(table[row, self.action_dims[agent]:])]
+            for agent in self.agents
+        }
+        self.discrete_action_mask_by_agent = {
+            agent: np.isin(np.arange(self.n_discrete_actions), rows).astype(np.float32)
+            for agent, rows in self.discrete_action_rows_by_agent.items()
+        }
         self._live_progress_lock = threading.Lock()
         self._live_fps_last_step: Optional[int] = None
         self._live_fps_last_mono: Optional[float] = None
@@ -8064,6 +8076,37 @@ class CityLearnV3BackendAdapter:
             return int(array.reshape(-1)[0])
 
         return int(np.argmax(array.reshape(-1)))
+
+    def discrete_action_map(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Valid discrete actions of every agent with the equipment each one moves (D03)."""
+        table = np.asarray(self.discrete_action_table)
+        mapping: Dict[str, List[Dict[str, Any]]] = {}
+        for agent, rows in self.discrete_action_rows_by_agent.items():
+            names = self.action_names_by_agent[agent]
+            entries = []
+            for row in rows:
+                moved = np.flatnonzero(table[row])
+                dim = int(moved[0]) if moved.size else None
+                entries.append({'index': int(row), 'equipment': None if dim is None else names[dim],
+                                'value': 0.0 if dim is None else float(table[row, dim])})
+            mapping[agent] = entries
+        return mapping
+
+    def continuous_action_map(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Padded continuous outputs of every agent and the equipment each one drives (D03).
+
+        Outputs beyond the building's own actuators have no equipment: they are inert, the
+        adapter drops them, and the map declares them so every attempt records them.
+        """
+        mapping: Dict[str, List[Dict[str, Any]]] = {}
+        for agent in self.agents:
+            names = self.action_names_by_agent[agent]
+            mapping[agent] = [
+                {'index': index, 'equipment': names[index] if index < len(names) else None,
+                 'inert': index >= len(names)}
+                for index in range(self.max_action_dim)
+            ]
+        return mapping
 
     def discrete_to_continuous(self, agent: str, action: object) -> np.ndarray:
         index = self._discrete_index(action) % self.n_discrete_actions
@@ -8690,7 +8733,10 @@ class CityLearnSMACDiscreteEnv:
         return self.adapter.ctde_state()
 
     def get_avail_agent_actions(self, agent_id: int):
-        return np.ones(self.n_actions, dtype=np.float32)
+        # D03: the native MASAC agent sets unavailable actions to -inf, so it never selects an
+        # action that moves equipment its building does not have.
+        agent = self.adapter.agents[int(agent_id)]
+        return self.adapter.discrete_action_mask_by_agent[agent].copy()
 
     def get_env_info(self):
         return {
@@ -8724,13 +8770,25 @@ class CityLearnMAACVecEnv:
         self.num_envs = 1
         self.n_agents = self.adapter.n_agents
         self.observation_space = self.adapter.continuous_observation_space
-        self.action_space = self.adapter.discrete_action_space
+        # D03: MAAC admits a different action size per agent, so each agent only has the actions of
+        # its real equipment; its local index is translated to the row of the shared table.
+        self.action_space = [
+            spaces.Discrete(len(self.adapter.discrete_action_rows_by_agent[agent]))
+            for agent in self.adapter.agents
+        ]
+
+    def global_discrete_index(self, agent_index: int, action: object) -> int:
+        rows = self.adapter.discrete_action_rows_by_agent[self.adapter.agents[int(agent_index)]]
+        local = self.adapter._discrete_index(action)
+        if not 0 <= local < len(rows):
+            raise ValueError(f"MAAC action {local} outside the {len(rows)} actions of agent {agent_index}")
+        return int(rows[local])
 
     def reset(self):
         return np.asarray([self.adapter.reset()], dtype=np.float32)
 
     def step(self, actions):
-        env_actions = actions[0]
+        env_actions = [self.global_discrete_index(i, action) for i, action in enumerate(actions[0])]
         observations, rewards, dones, infos = self.adapter.step_discrete(env_actions)
         obs = np.asarray([self.adapter.padded_observations(observations)], dtype=np.float32)
         reward_array = np.asarray(
