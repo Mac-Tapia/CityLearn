@@ -410,6 +410,10 @@ class CityLearnLoadingService:
                         current_soc[valid] = normalized.astype('float32')
 
                     charger_simulation.electric_vehicle_current_soc = current_soc
+                # SPEC-016 D-V6-41: energy of the trip before each connection [kWh] (endogenous arrival SOC)
+                if 'electric_vehicle_trip_kwh' in charger_simulation_file.columns:
+                    charger_simulation.electric_vehicle_trip_kwh = pd.to_numeric(
+                        charger_simulation_file['electric_vehicle_trip_kwh'], errors='coerce').fillna(0.0).to_numpy(dtype='float64')
 
                 charger_type = charger_config['type']
                 charger_module = '.'.join(charger_type.split('.')[0:-1])
@@ -535,6 +539,8 @@ class CityLearnLoadingService:
 
         building.observation_space = building.estimate_observation_space()
         building.action_space = building.estimate_action_space()
+        # SPEC-016 D-V6-28: V2B behind the meter, EV discharge capped at the building's own demand
+        building._ev_discharge_to_demand = schema.get('electric_vehicle_discharge_limit') == 'building_demand'
 
         return building
 

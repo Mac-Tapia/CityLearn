@@ -940,6 +940,31 @@ class BuildingOpsService:
 
         return adjusted_actions, adjusted_storage_action
 
+    def _cap_ev_discharge_to_demand(self, actions: Optional[Mapping[str, float]],
+                                    electrical_storage_action: Optional[float]) -> Optional[Mapping[str, float]]:
+        """SPEC-016 D-V6-28: scale EV discharge so it never exceeds the building's own demand (no export).
+
+        Demand = non-controllable load net of PV + storage charging + EV charging requested this step. Only
+        active with schema ``electric_vehicle_discharge_limit: building_demand``.
+        """
+        building = self.building
+        if not getattr(building, '_ev_discharge_to_demand', False) or not actions:
+            return actions
+        lookup = getattr(building, '_charger_lookup', None) or {
+            c.charger_id: c for c in (building.electric_vehicle_chargers or [])}
+        requests = {cid: self._charger_requested_power_kw(lookup[cid], a) for cid, a in actions.items() if cid in lookup}
+        discharge_kw = -sum(kw for kw in requests.values() if kw < 0.0)
+        if discharge_kw <= 1e-9:
+            return actions
+        base_kw, _ = self._estimate_non_controllable_base_power()
+        demand_kw = base_kw + self._storage_requested_power_kw(electrical_storage_action) \
+            + sum(kw for kw in requests.values() if kw > 0.0)
+        allowed_kw = max(0.0, demand_kw)
+        if discharge_kw <= allowed_kw + 1e-9:
+            return actions
+        factor = allowed_kw/discharge_kw
+        return {cid: (a*factor if requests.get(cid, 0.0) < 0.0 else a) for cid, a in actions.items()}
+
     def apply_charging_constraints_to_actions(
         self,
         actions: Optional[Mapping[str, float]],
@@ -951,6 +976,7 @@ class BuildingOpsService:
 
         building._charging_constraint_penalty_kwh = 0.0
         building._charging_constraint_last_penalty_kwh = 0.0
+        actions = self._cap_ev_discharge_to_demand(actions, electrical_storage_action)
 
         if not building._charging_constraints_enabled:
             return actions, electrical_storage_action

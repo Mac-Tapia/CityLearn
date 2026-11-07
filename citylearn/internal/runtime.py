@@ -232,10 +232,33 @@ class CityLearnRuntimeService:
 
         return partial_render_time
 
+    @staticmethod
+    def endogenous_arrival_soc(env) -> bool:
+        """SPEC-016 D-V6-41: schema ``electric_vehicle_arrival_soc: endogenous``.
+
+        A vehicle then arrives with its last real SOC minus the energy of its trip (``electric_vehicle_trip_kwh``
+        of the charger CSV), so what the agent charged or discharged carries to the next days; while away its
+        SOC is kept (no random drift). Any other value keeps CityLearn's CSV arrival SOC and drift.
+        """
+        schema = getattr(env, 'schema', None)
+        return isinstance(schema, dict) and schema.get('electric_vehicle_arrival_soc') == 'endogenous'
+
+    @staticmethod
+    def _endogenous_soc(ev, simulation, connection_step: int, *, last_step: bool = True) -> float:
+        """Last real SOC minus the trip energy written on the connection row of the charger CSV."""
+        trips = getattr(simulation, 'electric_vehicle_trip_kwh', None)
+        trip = float(trips[connection_step]) if trips is not None and 0 <= connection_step < len(trips) else 0.0
+        socs = ev.battery.soc
+        current = connection_step - 1 if last_step else connection_step
+        last = float(socs[current - 1]) if current > 0 else float(socs[max(current, 0)])
+        capacity = float(ev.battery.capacity) or 1.0
+        return float(np.clip(last - trip/capacity, 0.0, 1.0))
+
     def associate_chargers_to_electric_vehicles(self):
         r"""Associate charger to its corresponding EV based on charger simulation state."""
 
         env = self.env
+        endogenous = self.endogenous_arrival_soc(env)
 
         def _resolve_arrival_soc(
             simulation: ChargerSimulation,
@@ -308,7 +331,13 @@ class CityLearnRuntimeService:
                                     or prev_ev_id != ev_id
                                 )
                                 if is_new_connection:
-                                    soc_value = _resolve_arrival_soc(sim, env.time_step, prev_state, prev_ev_id, ev_id)
+                                    if endogenous:
+                                        # set one step earlier by simulate_unconnected_ev_soc; only a
+                                        # connection at the first step of the episode is set here
+                                        soc_value = (self._endogenous_soc(ev, sim, env.time_step, last_step=False)
+                                                     if env.time_step == 0 else None)
+                                    else:
+                                        soc_value = _resolve_arrival_soc(sim, env.time_step, prev_state, prev_ev_id, ev_id)
                                     if soc_value is not None:
                                         ev.battery.force_set_soc(soc_value)
                             elif state == 2:
@@ -328,6 +357,7 @@ class CityLearnRuntimeService:
         t = env.time_step
         if t + 1 >= env.episode_tracker.episode_time_steps:
             return
+        endogenous = self.endogenous_arrival_soc(env)
 
         # Only chargers whose current or next EV id is the vehicle can act on it, so they
         # are indexed once per step in the original building/charger order; every
@@ -340,6 +370,7 @@ class CityLearnRuntimeService:
                 states = sim.electric_vehicle_charger_state
                 arrival = sim.electric_vehicle_estimated_soc_arrival
                 row = (
+                    sim,
                     ids[t] if t < len(ids) else '',
                     ids[t + 1] if t + 1 < len(ids) else '',
                     states[t] if t < len(states) else np.nan,
@@ -347,7 +378,7 @@ class CityLearnRuntimeService:
                     arrival[t] if t < len(arrival) else np.nan,
                     arrival[t + 1] if t + 1 < len(arrival) else np.nan,
                 )
-                for key in {row[0], row[1]}:
+                for key in {row[1], row[2]}:
                     if isinstance(key, str):
                         candidates.setdefault(key, []).append(row)
 
@@ -355,7 +386,7 @@ class CityLearnRuntimeService:
             ev_id = ev.name
             found_in_charger = False
 
-            for curr_id, next_id, curr_state, next_state, soc_now, soc_next in candidates.get(ev_id, ()):
+            for sim, curr_id, next_id, curr_state, next_state, soc_now, soc_next in candidates.get(ev_id, ()):
                 currently_connected = isinstance(curr_id, str) and curr_id == ev_id and curr_state == 1
                 if currently_connected:
                     found_in_charger = True
@@ -371,12 +402,18 @@ class CityLearnRuntimeService:
 
                 if is_connecting:
                     found_in_charger = True
+                    if endogenous:            # D-V6-41: last real SOC minus the trip, on the step before connecting
+                        ev.battery.force_set_soc(self._endogenous_soc(ev, sim, t + 1))
+                        break
                     soc = soc_now if is_incoming else soc_next
                     if 0 <= soc <= 1:
                         ev.battery.force_set_soc(soc)
                     break
 
-            if not found_in_charger:
+            if not found_in_charger and endogenous:
+                if t > 0:                     # away: the SOC is kept until the trip is charged on arrival
+                    ev.battery.force_set_soc(float(np.clip(ev.battery.soc[t - 1], 0.0, 1.0)))
+            elif not found_in_charger:
                 if t > 0:
                     last_soc = ev.battery.soc[t - 1]
                     drift_std = self._ev_unconnected_drift_std(env.seconds_per_time_step)
