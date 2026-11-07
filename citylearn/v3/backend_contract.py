@@ -36,6 +36,8 @@ class MADRLBackend:
     adapter: str
     policy_factory: Optional[Callable] = None
     source: str = ""
+    adapter_kwargs: Mapping = field(default_factory=dict)
+    adapter_step: Optional[Callable] = None   # (adapter_env, rng) -> reward of one step, in the backend's format
 
 
 @dataclass(frozen=True)
@@ -136,14 +138,100 @@ def run_smoke_episode(env, name: str, *, steps: int, seed: int = 0) -> SmokeResu
     return SmokeResult(backend=name, steps=done, agents=len(env.possible_agents), total_reward=total)
 
 
+@dataclass(frozen=True)
+class GateResult:
+    passed: bool
+    failures: List[str]
+    contract: Optional[ContractReport]
+    backends: Mapping[str, Mapping[str, float]]
+
+
+def _uniform(rng, space):
+    return rng.uniform(np.asarray(space.low, dtype=float), np.asarray(space.high, dtype=float)).astype(np.float32)
+
+
+def _step_harl(env, rng):
+    env.reset()
+    out = env.step(np.asarray([_uniform(rng, s) for s in env.action_space]))
+    return float(np.sum(out[2]))
+
+
+def _step_offpolicy(env, rng):
+    env.reset()
+    out = env.step([[_uniform(rng, s) for s in env.action_space]])
+    return float(np.sum(out[1]))
+
+
+def _step_smac(env, rng):
+    env.reset()
+    actions = [int(rng.choice(np.flatnonzero(env.get_avail_agent_actions(i)))) for i in range(env.n_agents)]
+    return float(env.step(actions)[0])
+
+
+def _step_maac(env, rng):
+    env.reset()
+    out = env.step([[np.eye(s.n)[int(rng.integers(s.n))] for s in env.action_space]])
+    return float(np.sum(out[1]))
+
+
+def operational_gate(schema_path, *, backends: Optional[List[str]] = None, steps: int = 2, seed: int = 0,
+                     scenario: str = "E1", episode_time_steps: int = 24) -> GateResult:
+    """FR-017.4: a dataset is operational only if v3 loads it, meets the contract and every backend steps.
+
+    Each step resets the adapter, so ``steps`` counts independent one-step checks of the backend's own
+    adapter. Any exception becomes a failure: the gate never raises and never passes by omission.
+    """
+    from citylearn.v3.environment import make_citylearn_v3_env
+
+    failures: List[str] = []
+    contract = None
+    try:
+        env = make_citylearn_v3_env(schema_path=schema_path, scenario=scenario, seed=seed,
+                                    episode_time_steps=episode_time_steps)
+        try:
+            contract = check_contract(env)
+            failures += [f"contract: {f}" for f in contract.failures]
+        finally:
+            env.close()
+    except Exception as error:  # noqa: BLE001 - the gate reports every failure
+        failures.append(f"v3 env: {type(error).__name__}: {error}")
+        return GateResult(False, failures, None, {})
+
+    results: Dict[str, Dict[str, float]] = {}
+    for name in backends or sorted(_REGISTRY):
+        spec = _REGISTRY[name]
+        if spec.adapter_step is None:
+            continue
+        rng = np.random.default_rng(seed)
+        try:
+            adapter = resolve_adapter(name)(schema_path=str(schema_path), scenario=scenario, seed=seed,
+                                            episode_time_steps=episode_time_steps, algorithm=name,
+                                            **dict(spec.adapter_kwargs))
+            try:
+                rewards = [spec.adapter_step(adapter, rng) for _ in range(steps)]
+            finally:
+                close = getattr(adapter, "close", None)
+                if close:
+                    close()
+            total = float(np.sum(rewards))
+            if not np.isfinite(total):
+                failures.append(f"{name}: non-finite reward")
+            results[name] = {"steps": len(rewards), "reward": total}
+        except Exception as error:  # noqa: BLE001
+            failures.append(f"{name}: {type(error).__name__}: {error}")
+    return GateResult(passed=not failures, failures=failures, contract=contract, backends=results)
+
+
+_DISCRETE = {"action_bins": 3, "discrete_action_mode": "axis"}
+
 for _spec in (
     MADRLBackend("HAPPO", "continuous", "per_agent", True, f"{_COMMON}:CityLearnHARLEnv",
-                 source="external/HARL (Zhong et al.)"),
+                 source="external/HARL (Zhong et al.)", adapter_step=_step_harl),
     MADRLBackend("MASAC", "discrete_masked", "team", True, f"{_COMMON}:CityLearnSMACDiscreteEnv",
-                 source="external/MARL"),
+                 source="external/MARL", adapter_kwargs=_DISCRETE, adapter_step=_step_smac),
     MADRLBackend("MATD3", "continuous", "per_agent", True, f"{_COMMON}:CityLearnOffPolicyVecEnv",
-                 source="external/off-policy"),
+                 source="external/off-policy", adapter_step=_step_offpolicy),
     MADRLBackend("MAAC", "discrete_masked", "per_agent", True, f"{_COMMON}:CityLearnMAACVecEnv",
-                 source="external/MAAC (Iqbal and Sha)"),
+                 source="external/MAAC (Iqbal and Sha)", adapter_kwargs=_DISCRETE, adapter_step=_step_maac),
 ):
     register_backend(_spec)
