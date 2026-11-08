@@ -34,11 +34,12 @@ def ashrae_g14(measured, simulated, *, n_params: int = 1) -> dict:
 
 def simulate_cooling_kwh(*, inputs: th.ThermalInputs, envelope_w_m2k: float, solar_aperture_fraction: float,
                          floor_area_m2: float, ventilation_m3_s: float, mass_class: str, set_point: float,
-                         w_in: float) -> np.ndarray:
+                         w_in: float, heat_capacity_factor: float = 1.0) -> np.ndarray:
     """Thermal kWh per hour (sensible + latent) of the ideal load at the set point in occupied hours."""
     p = th.iso13790_parameters(floor_area_m2=floor_area_m2, envelope_w_m2k=envelope_w_m2k,
                                solar_aperture_fraction=solar_aperture_fraction,
-                               ventilation_w_k=th.ventilation_conductance_w_k(ventilation_m3_s), mass_class=mass_class)
+                               ventilation_w_k=th.ventilation_conductance_w_k(ventilation_m3_s), mass_class=mass_class,
+                               heat_capacity_factor=heat_capacity_factor)
     series = th.ideal_cooling_series(p, inputs, set_point=set_point, ventilation_m3_s=ventilation_m3_s, w_in=w_in)
     return (series['sensible_w'] + series['latent_w'])/1000.0
 
@@ -116,7 +117,7 @@ def zone_inputs(inputs: th.ThermalInputs, fraction: float, last: int = None) -> 
 
 def calibrate_conditioned_zone(*, target_kwh, inputs: th.ThermalInputs, month, train, floor_area_m2: float,
                                ventilation_m3_s: float, mass_class: str, set_point: float,
-                               w_in: float) -> ZoneCalibration:
+                               w_in: float, heat_capacity_factor: float = 1.0) -> ZoneCalibration:
     """Fit envelope, solar aperture and conditioned fraction on the training hours (D-V6-53). The ASHRAE
     Guideline 14 statistics against the target are reported, not used as a gate: the target is a model."""
     from scipy.optimize import least_squares
@@ -131,7 +132,7 @@ def calibrate_conditioned_zone(*, target_kwh, inputs: th.ThermalInputs, month, t
         return simulate_cooling_kwh(inputs=zone_inputs(inputs, fraction, upto), envelope_w_m2k=envelope,
                                     solar_aperture_fraction=aperture, floor_area_m2=floor_area_m2*fraction,
                                     ventilation_m3_s=ventilation_m3_s*fraction, mass_class=mass_class,
-                                    set_point=set_point, w_in=w_in)
+                                    set_point=set_point, w_in=w_in, heat_capacity_factor=heat_capacity_factor)
 
     low = np.array([BOUNDS['envelope_w_m2k'][0], BOUNDS['solar_aperture_fraction'][0], FRACTION_BOUNDS[0]])
     high = np.array([BOUNDS['envelope_w_m2k'][1], BOUNDS['solar_aperture_fraction'][1], FRACTION_BOUNDS[1]])

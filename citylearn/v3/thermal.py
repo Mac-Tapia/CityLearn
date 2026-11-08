@@ -65,11 +65,15 @@ class StepResult:
 
 
 def iso13790_parameters(*, floor_area_m2: float, envelope_w_m2k: float, solar_aperture_fraction: float,
-                        ventilation_w_k: float, mass_class: str = 'medium') -> Parameters:
+                        ventilation_w_k: float, mass_class: str = 'medium',
+                        heat_capacity_factor: float = 1.0) -> Parameters:
+    """``heat_capacity_factor`` scales C_m of the Table 12 class (identified on measured data; 1 = the class)."""
     if floor_area_m2 <= 0:
         raise ValueError(f'floor area must be positive, got {floor_area_m2}')
     if envelope_w_m2k <= 0 or solar_aperture_fraction < 0 or ventilation_w_k < 0:
         raise ValueError('envelope conductance must be positive; solar aperture and ventilation non-negative')
+    if heat_capacity_factor <= 0:
+        raise ValueError(f'heat capacity factor must be positive, got {heat_capacity_factor}')
     if mass_class not in MASS_CLASSES:
         raise ValueError(f'unknown mass class {mass_class!r}; ISO 13790 Table 12 has {sorted(MASS_CLASSES)}')
     am_ratio, cm_per_m2 = MASS_CLASSES[mass_class]
@@ -82,7 +86,7 @@ def iso13790_parameters(*, floor_area_m2: float, envelope_w_m2k: float, solar_ap
     if h_tr_op >= h_tr_ms:
         raise ValueError(f'opaque conductance {h_tr_op:.0f} W/K must stay below h_tr_ms {h_tr_ms:.0f} W/K (eq. C.3)')
     h_tr_em = 1.0/(1.0/h_tr_op - 1.0/h_tr_ms)
-    return Parameters(a_f=a_f, a_m=a_m, a_t=a_t, c_m=cm_per_m2*a_f, h_ve=max(float(ventilation_w_k), 1e-6),
+    return Parameters(a_f=a_f, a_m=a_m, a_t=a_t, c_m=cm_per_m2*a_f*float(heat_capacity_factor), h_ve=max(float(ventilation_w_k), 1e-6),
                       h_tr_w=h_tr_w, h_tr_em=h_tr_em, h_tr_is=H_IS*a_t, h_tr_ms=h_tr_ms,
                       solar_aperture_m2=float(solar_aperture_fraction)*a_f)
 
@@ -258,12 +262,12 @@ class ISO13790Dynamics(Dynamics):
     def __init__(self, *, floor_area_m2: float, envelope_w_m2k: float, solar_aperture_fraction: float,
                  ventilation_m3_s: float, mass_class: str = 'medium', set_point: float = 24.0,
                  pressure_kpa: float = 101.325, indoor_rh_pct: float = DEFAULT_INDOOR_RH_PCT,
-                 electric_gain_fraction: float = 1.0, **_: object):
+                 electric_gain_fraction: float = 1.0, heat_capacity_factor: float = 1.0, **_: object):
         super().__init__()
         self.params = iso13790_parameters(floor_area_m2=floor_area_m2, envelope_w_m2k=envelope_w_m2k,
                                           solar_aperture_fraction=solar_aperture_fraction,
                                           ventilation_w_k=ventilation_conductance_w_k(ventilation_m3_s),
-                                          mass_class=mass_class)
+                                          mass_class=mass_class, heat_capacity_factor=heat_capacity_factor)
         self.network = Network(self.params)
         self.ventilation_m3_s = float(ventilation_m3_s)
         self.set_point = float(set_point)
