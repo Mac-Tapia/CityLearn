@@ -55,17 +55,28 @@ class BillTracker:
     def __init__(self, env, tables: List[Dict[str, np.ndarray]]):
         self.base = _base(env)
         self.tables = tables
-        self.months = [np.asarray(b.energy_simulation.month, dtype=int) for b in self.base.buildings]
-        for building, table, months in zip(self.base.buildings, tables, self.months):
-            if len(table['peak_block']) < len(months):
-                raise ValueError(f'{building.name}: bill tariff has {len(table["peak_block"])} rows, '
-                                 f'the simulation {len(months)}')
         # Bound of the peak observation: CityLearn's own estimate of the building's net consumption limit.
         self.peak_bound = [max(float(b.estimate_observation_space_limits(include_all=True)[1]
                                      .get('net_electricity_consumption', 1.0)), 1.0) for b in self.base.buildings]
         self.peak = [0.0]*len(tables)
         self.month: List[Optional[int]] = [None]*len(tables)
         self.last_time_step: Optional[int] = None
+
+    def _row(self, index: int, t: int) -> int:
+        """Row of the tariff file for episode step t. CityLearn's time step is relative to the episode start and its
+        series are cut to the episode; the terminal observation (t = episode length) reads the last row."""
+        tracker = getattr(self.base, 'episode_tracker', None)
+        start = int(getattr(tracker, 'episode_start_time_step', 0) or 0)
+        length = len(self.base.buildings[index].energy_simulation.month)
+        row = start + min(int(t), length - 1)
+        if row >= len(self.tables[index]['peak_block']):
+            raise ValueError(f'{self.base.buildings[index].name}: bill tariff has '
+                             f'{len(self.tables[index]["peak_block"])} rows, the episode needs row {row}')
+        return row
+
+    def _month(self, index: int, t: int) -> int:
+        months = self.base.buildings[index].energy_simulation.month       # re-cut by CityLearn at every reset
+        return int(months[min(int(t), len(months) - 1)])
 
     @classmethod
     def from_env(cls, env) -> Optional['BillTracker']:
@@ -95,33 +106,36 @@ class BillTracker:
         if self.last_time_step is None or t != self.last_time_step + 1:
             self.peak = [0.0]*len(self.tables)
             self.month = [None]*len(self.tables)
-        for i, months in enumerate(self.months):
-            month = int(months[t])
+        for i in range(len(self.tables)):
+            month = self._month(i, t)
             if self.month[i] != month:
                 self.peak[i], self.month[i] = 0.0, month
         self.last_time_step = t
 
     def fields(self, index: int, t: int) -> Dict[str, float]:
         """Bill state seen at step t, before its power is known (the peak of earlier hours of the month)."""
-        table = self.tables[index]
-        same_month = (self.month[index] == int(self.months[index][t])
+        table, row = self.tables[index], self._row(index, t)
+        same_month = (self.month[index] == self._month(index, t)
                       and self.last_time_step is not None and t == self.last_time_step + 1)
         return {'bill_month_block_peak_kw': float(self.peak[index]) if same_month else 0.0,
-                'bill_in_peak_block': float(table['peak_block'][t]),
-                'bill_demand_usd_kw_month': float(table['demand_usd_kw_month'][t])}
+                'bill_in_peak_block': float(table['peak_block'][row]),
+                'bill_demand_usd_kw_month': float(table['demand_usd_kw_month'][row])}
 
     def reward_fields(self, t: int) -> List[Dict[str, float]]:
         """Fields the reward of step t reads; syncs month and episode first (the only mutation besides update)."""
         self._sync(t)
-        return [{'bill_month_block_peak_kw': float(self.peak[i]),
-                 'bill_in_peak_block': float(table['peak_block'][t]),
-                 'bill_demand_usd_kw_month': float(table['demand_usd_kw_month'][t])}
-                for i, table in enumerate(self.tables)]
+        out = []
+        for i, table in enumerate(self.tables):
+            row = self._row(i, t)
+            out.append({'bill_month_block_peak_kw': float(self.peak[i]),
+                        'bill_in_peak_block': float(table['peak_block'][row]),
+                        'bill_demand_usd_kw_month': float(table['demand_usd_kw_month'][row])})
+        return out
 
     def update(self, t: int, net_kw: List[float]):
         """After the reward of step t: the block peak of the month takes this hour's power."""
         for i, power in enumerate(net_kw):
-            if self.tables[i]['peak_block'][t] and power > self.peak[i]:
+            if self.tables[i]['peak_block'][self._row(i, t)] and power > self.peak[i]:
                 self.peak[i] = float(power)
 
     def bounds(self, index: int, normalized: bool):
