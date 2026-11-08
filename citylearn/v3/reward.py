@@ -160,7 +160,7 @@ CITYLEARN_V3_REWARD_TERMS = {
     "carbon_ci_import": ("carbon", "CI-weighted consumption", "tesis D-VD.2 Dim3 (~578): import weighted by hourly CI, max(0,P)*xi", "defined"),
     "cost_net": ("cost", "electricity_cost_total", "tesis D-VD.3 Dim1 (~583); cap2 §2.2.8 p_imp*max(0,P)-p_exp*max(0,-P), p_exp = p_imp (net billing)", "defined"),
     "cost_delta": ("cost", "electricity_cost_delta", "tesis D-VD.3 Dim2 (~588); per step (P - P_baseline)*price", "defined"),
-    "cost_peak_billing": ("cost", "peak_billing", "tesis D-VD.3 Dim3 (~593, 974: 15-min billing window); billing period and p_pot have no value in the repository", "pending_owner"),
+    "cost_peak_billing": ("cost", "peak_billing", "tesis D-VD.3 Dim3 (~593, 974); SPEC-016 D-V6-8 / D04: in a block hour p_pot*max(0, P - month peak so far in 18:00-23:00), p_pot from bill_tariff_<b>.csv (Osinergmin, D02); monthly sum = p_pot*block peak; 15-min window = 1 hourly step", "defined"),
     "cost_price_signal": ("cost", "price_signal_deviation", "tesis D-VD.3 Dim3 (~593); CityLearn v3 defines it per episode (objectives.py:360), no per-step form", "pending_owner"),
 }
 _CITYLEARN_V3_BASE_PROFILE = {
@@ -173,7 +173,10 @@ _CITYLEARN_V3_BASE_PROFILE = {
     # pending_owner terms carry 0 until the owner fixes their formula or parameter.
     "flex_subweights": {"daily_peak": 1.0 / 3.0, "ramp": 1.0 / 3.0, "load_factor": 1.0 / 3.0, "dso_excess": 0.0},
     "carbon_subweights": {"carbon_net": 1.0 / 3.0, "carbon_delta": 1.0 / 3.0, "carbon_ci_import": 1.0 / 3.0},
-    "cost_subweights": {"cost_net": 0.5, "cost_delta": 0.5, "cost_peak_billing": 0.0, "cost_price_signal": 0.0},
+    # Owner 2026-11-07 (D04): the cost axis split in thirds, as flex and carbon. Without a bill tariff in the
+    # schema the demand term is not applicable and its third goes back to cost_net and cost_delta (1/2 each).
+    "cost_subweights": {"cost_net": 1.0 / 3.0, "cost_delta": 1.0 / 3.0, "cost_peak_billing": 1.0 / 3.0,
+                        "cost_price_signal": 0.0},
     "dso_limit_kw": None,
     # Per-building references used to normalize district and building terms.
     "peak_reference_kw": 25.0,
@@ -261,6 +264,16 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
         new = self._day_step_count % self._steps_per_day() == 0
         self._day_step_count += 1
         return new
+
+    @staticmethod
+    def _without_term(weights: Mapping[str, float], term: str) -> Mapping[str, float]:
+        """Weights of an axis with a not-applicable term removed and the rest rescaled to the same total."""
+        total = float(sum(weights.values()))
+        kept = {k: float(v) for k, v in weights.items() if k != term}
+        rest = float(sum(kept.values()))
+        if rest <= ZERO_DIVISION_PLACEHOLDER:
+            return {**kept, term: 0.0}
+        return {**{k: v * total / rest for k, v in kept.items()}, term: 0.0}
 
     def reset(self):
         self._reset_day()
@@ -514,17 +527,28 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
                     for d in (observation.get("electric_vehicles_chargers_dict") or {}).values())
             carbon_scale = import_reference * self.carbon_reference
             cost_scale = import_reference * self.price_reference
+            # SPEC-016 D-V6-8: demand charge of the step, from the bill state of the v3 layer (citylearn.v3.bill).
+            demand_rate = observation.get("bill_demand_usd_kw_month")
+            bill_applicable = demand_rate is not None
+            peak_billing, peak_increment_kw = 0.0, 0.0
+            if bill_applicable and self._safe_float(observation.get("bill_in_peak_block")) > 0.5:
+                month_peak = self._safe_float(observation.get("bill_month_block_peak_kw"))
+                peak_increment_kw = max(0.0, net_value - month_peak)
+                peak_billing = self._safe_float(demand_rate) * peak_increment_kw
+            step_cost_w = cost_w if bill_applicable else self._without_term(cost_w, "cost_peak_billing")
             # Net billing: export credited at the purchase price and displacing thermal generation.
             axis_terms = {
                 "carbon_net": (net_value * carbon, net_value * carbon / carbon_scale, carbon_w),
                 "carbon_delta": ((net_value - baseline_net) * carbon,
                                  (net_value - baseline_net) * carbon / carbon_scale, carbon_w),
                 "carbon_ci_import": (import_kwh * carbon, import_kwh * carbon / carbon_scale, carbon_w),
-                "cost_net": (net_value * price, net_value * price / cost_scale, cost_w),
+                "cost_net": (net_value * price, net_value * price / cost_scale, step_cost_w),
                 "cost_delta": ((net_value - baseline_net) * price,
-                               (net_value - baseline_net) * price / cost_scale, cost_w),
-                "cost_peak_billing": (0.0, 0.0, cost_w),
-                "cost_price_signal": (0.0, 0.0, cost_w),
+                               (net_value - baseline_net) * price / cost_scale, step_cost_w),
+                # P-V6-24: normalized as daily_peak, kW increment / peak_reference_kw (the USD value / the generic
+                # cost scale would saturate above about 1.2 kW and make the term binary).
+                "cost_peak_billing": (peak_billing, peak_increment_kw / peak_reference, step_cost_w),
+                "cost_price_signal": (0.0, 0.0, step_cost_w),
             }
             building_terms = {}
             carbon_component = 0.0
@@ -586,6 +610,7 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
                 **building_terms,
                 "raw_ev_violation_kwh": ev_terms["raw_ev_violation_kwh"],
                 "raw_bess_delta_soc": delta_soc,
+                "cost_peak_billing_applicable": bool(bill_applicable),
                 "norm_ev_violation": ev_terms["norm_ev_violation"],
                 "norm_bess_cycle": norm_bess,
                 "bounded_ev_violation": ev_terms["bounded_ev_violation"],

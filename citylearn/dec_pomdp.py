@@ -94,6 +94,16 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
                 agent: self._charger_aggregator.space(i, space)
                 for i, (agent, space) in enumerate(self._observation_spaces.items())
             }
+        # SPEC-016 D-V6-8 / FR-016.10: the bill state the reward prices (month peak in the 18:00-23:00 block,
+        # block membership and demand rate) is part of every agent's observation.
+        from citylearn.v3.bill import tracker_for
+        self._bill = tracker_for(env)
+        self._bill_normalized = _normalized_observations(env)
+        if self._bill is not None:
+            self._observation_spaces = {
+                agent: self._with_bill_space(i, space)
+                for i, (agent, space) in enumerate(self._observation_spaces.items())
+            }
         self.state_space = self._build_state_space()
         self._last_observations: Dict[str, np.ndarray] = {}
 
@@ -112,6 +122,8 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
         seed: Optional[int] = None,
         options: Optional[Mapping] = None,
     ) -> Tuple[Dict[str, np.ndarray], Dict[str, dict]]:
+        if getattr(self, "_bill", None) is not None:
+            self._bill.reset()
         if seed is None and options is None:
             observations, info = self.env.reset()
         elif seed is None:
@@ -245,8 +257,21 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
         """Names of the agent's observation, in the order of its vector."""
         index = self._agent_index[agent]
         if self._charger_aggregator is not None:
-            return self._charger_aggregator.names(index)
-        return list(self.env.observation_names[index])
+            names = self._charger_aggregator.names(index)
+        else:
+            names = list(self.env.observation_names[index])
+        if getattr(self, "_bill", None) is not None:
+            from citylearn.v3.bill import FIELDS
+            names = names + list(FIELDS)
+        return names
+
+    def _with_bill_space(self, index: int, space: spaces.Box) -> spaces.Box:
+        high = self._bill.bounds(index, self._bill_normalized)
+        return spaces.Box(
+            low=np.concatenate([np.asarray(space.low, dtype=np.float32), np.zeros(len(high), dtype=np.float32)]),
+            high=np.concatenate([np.asarray(space.high, dtype=np.float32), np.asarray(high, dtype=np.float32)]),
+            dtype=np.float32,
+        )
 
     def _observations_to_dict(self, observations) -> Dict[str, np.ndarray]:
         if isinstance(observations, Mapping):
@@ -262,6 +287,16 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
         aggregator = getattr(self, '_charger_aggregator', None)
         if aggregator is not None:
             out = {agent: aggregator.transform(self._agent_index[agent], value) for agent, value in out.items()}
+        bill = getattr(self, "_bill", None)
+        if bill is not None:
+            t = int(bill.base.time_step)
+            out = {
+                agent: np.concatenate([
+                    value,
+                    np.asarray(bill.observe(self._agent_index[agent], t, self._bill_normalized), dtype=np.float32),
+                ]).astype(np.float32)
+                for agent, value in out.items()
+            }
         return out
 
     def _clip_action(self, agent: str, action) -> np.ndarray:
@@ -314,6 +349,17 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
             }
             for agent in self.possible_agents
         }
+
+
+def _normalized_observations(env) -> bool:
+    from citylearn.wrappers import NormalizedObservationWrapper
+
+    inner = env
+    while inner is not None:
+        if isinstance(inner, NormalizedObservationWrapper):
+            return True
+        inner = getattr(inner, "env", None)
+    return False
 
 
 def make_citylearn_dec_pomdp(

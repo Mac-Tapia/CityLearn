@@ -52,8 +52,17 @@ class CityLearnRuntimeService:
         if env.debug_timing:
             building_observations_retrieval_end = time.perf_counter()
 
+        # SPEC-016 D-V6-8: the bill state of each building (month peak in the 18:00-23:00 block) for the reward.
+        from citylearn.v3.bill import tracker_for
+        bill = tracker_for(env)
+        if bill is not None:
+            for observation, fields in zip(reward_observations, bill.reward_fields(env.time_step)):
+                observation.update(fields)
+
         reward = env.reward_function.calculate(observations=reward_observations)
         env.rewards.append(reward)
+        if bill is not None:
+            bill.update(env.time_step, [float(o.get('net_electricity_consumption', 0.0)) for o in reward_observations])
 
         partial_render_time = self.next_time_step()
         end_export_time = 0.0
