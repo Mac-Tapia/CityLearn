@@ -386,6 +386,7 @@ class BuildingOpsService:
         electric_vehicle_storage_actions, electrical_storage_action = self.apply_charging_constraints_to_actions(
             electric_vehicle_storage_actions,
             electrical_storage_action,
+            cooling_device_action,
         )
 
         actions = {
@@ -941,7 +942,8 @@ class BuildingOpsService:
         return adjusted_actions, adjusted_storage_action
 
     def _cap_ev_discharge_to_demand(self, actions: Optional[Mapping[str, float]],
-                                    electrical_storage_action: Optional[float]) -> Optional[Mapping[str, float]]:
+                                    electrical_storage_action: Optional[float],
+                                    cooling_device_action: Optional[float] = None) -> Optional[Mapping[str, float]]:
         """SPEC-016 D-V6-28: scale EV discharge so it never exceeds the building's own demand (no export).
 
         Demand = non-controllable load net of PV + storage charging + EV charging requested this step. Only
@@ -957,6 +959,7 @@ class BuildingOpsService:
         if discharge_kw <= 1e-9:
             return actions
         base_kw, _ = self._estimate_non_controllable_base_power()
+        base_kw += self._controlled_cooling_correction_kw(cooling_device_action)
         demand_kw = base_kw + self._storage_requested_power_kw(electrical_storage_action) \
             + sum(kw for kw in requests.values() if kw > 0.0)
         allowed_kw = max(0.0, demand_kw)
@@ -965,10 +968,28 @@ class BuildingOpsService:
         factor = allowed_kw/discharge_kw
         return {cid: (a*factor if requests.get(cid, 0.0) < 0.0 else a) for cid, a in actions.items()}
 
+    def _controlled_cooling_correction_kw(self, cooling_device_action: Optional[float]) -> float:
+        """SPEC-016 D-V6-53: with the air conditioning as an action (a building with thermal dynamics), the cooling
+        electricity of this step is the action's share of the nominal power, not the data's cooling, which the
+        base estimate uses. Returns what to add to that estimate (0 for a building without the cooling action)."""
+        building = self.building
+        if cooling_device_action is None or not np.isfinite(cooling_device_action) \
+                or 'cooling_device' not in building.active_actions or not getattr(building, 'simulate_dynamics', False):
+            return 0.0
+        t = building.time_step
+        temperature = self._safe_index(building.weather.outdoor_dry_bulb_temperature, t, 0.0)
+        estimated = self._safe_scalar(building.cooling_device.get_input_power(
+            self._safe_index(building.energy_from_cooling_device, t, 0.0)
+            + self._safe_index(building.cooling_storage.energy_balance, t, 0.0), temperature, heating=False), 0.0)
+        planned = max(0.0, float(cooling_device_action))*float(building.cooling_device.nominal_power)\
+            *float(getattr(building, 'algorithm_action_based_time_step_hours_ratio', 1.0) or 1.0)
+        return min(planned, float(building.cooling_device.nominal_power)) - estimated
+
     def apply_charging_constraints_to_actions(
         self,
         actions: Optional[Mapping[str, float]],
         electrical_storage_action: Optional[float] = None,
+        cooling_device_action: Optional[float] = None,
     ) -> Tuple[Optional[Mapping[str, float]], Optional[float]]:
         """Apply configured electrical constraints and return adjusted EV/storage actions."""
 
@@ -976,7 +997,7 @@ class BuildingOpsService:
 
         building._charging_constraint_penalty_kwh = 0.0
         building._charging_constraint_last_penalty_kwh = 0.0
-        actions = self._cap_ev_discharge_to_demand(actions, electrical_storage_action)
+        actions = self._cap_ev_discharge_to_demand(actions, electrical_storage_action, cooling_device_action)
 
         if not building._charging_constraints_enabled:
             return actions, electrical_storage_action
