@@ -1,3 +1,5 @@
+# Decisions implemented here (governance/decision_traceability.yaml):
+#   FR-015.5: training_state.pt in the 4 launchers
 """Save and restore full training state: optimizers, RNG seeds, and replay buffers."""
 from __future__ import annotations
 

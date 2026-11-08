@@ -1,3 +1,5 @@
+# Decisions implemented here (governance/decision_traceability.yaml):
+#   P-017-1: declaration of the built-in backends
 """Universal MADRL backend contract of the CityLearn v3 layer (SPEC-017 FR-017.3).
 
 What the layer guarantees to any MADRL backend:

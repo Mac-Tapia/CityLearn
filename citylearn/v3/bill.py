@@ -1,3 +1,5 @@
+# Decisions implemented here (governance/decision_traceability.yaml):
+#   D-V6-50: cost axis in thirds with the bill demand charge
 """Bill state of each building for the v3 reward and observations (SPEC-016 D-V6-8, FR-016.7 and FR-016.10).
 
 The dataset ships one ``bill_tariff_Building_<b>.csv`` per building (columns ``energy_usd_kwh``,

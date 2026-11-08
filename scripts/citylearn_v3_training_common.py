@@ -1,3 +1,5 @@
+# Decisions implemented here (governance/decision_traceability.yaml):
+#   FR-015.7: D03 action maps and masks
 """Shared CityLearn v3 training launch utilities for external MADRL backends."""
 # Optional backends and Colab integrations are imported only on their execution
 # paths; broad catches deliberately isolate those non-critical integrations.

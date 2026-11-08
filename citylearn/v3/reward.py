@@ -1,3 +1,5 @@
+# Decisions implemented here (governance/decision_traceability.yaml):
+#   D-V6-50: cost axis in thirds with the bill demand charge
 """CityLearn v3 MADRL thesis reward (moved from citylearn.reward_function, 2026-11-01).
 
 Canonical dotted path: ``citylearn.v3.reward.CityLearnV3MADRLRewardFunction``.

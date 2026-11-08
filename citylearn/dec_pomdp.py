@@ -1,3 +1,5 @@
+# Decisions implemented here (governance/decision_traceability.yaml):
+#   D-V6-12: one agent per building
 """PettingZoo Dec-POMDP wrapper for CityLearn MADRL experiments.
 
 The thesis experiments use CityLearn as a decentralized partially observable
