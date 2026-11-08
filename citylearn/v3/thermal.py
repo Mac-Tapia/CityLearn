@@ -205,20 +205,22 @@ class Network:
 def ideal_cooling_series(p: Parameters, inputs: ThermalInputs, *, set_point: float, ventilation_m3_s: float,
                          w_in: float, theta_m0: float = None) -> dict:
     """Ideal sensible cooling (W, positive) that holds the set point in occupied hours, free-floating otherwise,
-    the latent load (W) and the air temperature: ideal_load_w + step hour by hour, without the object overhead."""
+    the latent load (W) and the air temperature: ideal_load_w + step hour by hour, without the object overhead.
+    ``set_point`` is one value or one per hour (a measured indoor temperature in the CU-BEMS validation)."""
     net = Network(p)
     n = len(inputs.theta_e)
+    points = np.broadcast_to(np.asarray(set_point, dtype=float), (n,))
     sensible, latent, theta_air = np.zeros(n), np.zeros(n), np.zeros(n)
-    theta_m = float(set_point if theta_m0 is None else theta_m0)
+    theta_m = float(points[0] if theta_m0 is None else theta_m0)
     probe = 10.0*p.a_f
     for h in range(n):
         theta_e = float(inputs.theta_e[h])
         phi_int, phi_sol = gains_w(p, inputs, h)
         free, free_m = net.air(theta_m, theta_e, phi_int, phi_sol, 0.0)
         load = 0.0
-        if float(inputs.occupants[h]) > 0.0 and free > set_point:
+        if float(inputs.occupants[h]) > 0.0 and free > points[h]:
             heated, _ = net.air(theta_m, theta_e, phi_int, phi_sol, probe)
-            load = probe*(set_point - free)/(heated - free)
+            load = probe*(points[h] - free)/(heated - free)
             theta_air[h], theta_m = net.air(theta_m, theta_e, phi_int, phi_sol, load)
         else:
             theta_air[h], theta_m = free, free_m
