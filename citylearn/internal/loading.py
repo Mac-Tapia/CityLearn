@@ -330,9 +330,9 @@ class CityLearnLoadingService:
             dynamics_module = '.'.join(dynamics_type.split('.')[0:-1])
             dynamics_name = dynamics_type.split('.')[-1]
             dynamics_constructor = getattr(importlib.import_module(dynamics_module), dynamics_name)
-            attributes = building_schema['dynamics'].get('attributes', {})
-            attributes['filepath'] = os.path.join(schema['root_directory'], attributes['filename'])
-            _ = attributes.pop('filename')
+            attributes = dict(building_schema['dynamics'].get('attributes', {}))
+            if 'filename' in attributes:  # file-based models (LSTM); SPEC-016 D-V6-52: the 5R1C model has none
+                attributes['filepath'] = os.path.join(schema['root_directory'], attributes.pop('filename'))
             building_kwargs['dynamics'] = dynamics_constructor(**attributes)
         else:
             building_kwargs['dynamics'] = None

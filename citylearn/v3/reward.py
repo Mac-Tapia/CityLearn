@@ -166,6 +166,9 @@ CITYLEARN_V3_REWARD_TERMS = {
 _CITYLEARN_V3_BASE_PROFILE = {
     "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
     "ev_weight": 0.25,
+    # SPEC-016 D-V6-53 / P-V6-25 (pending owner confirmation): comfort penalty outside the weighted axes, like the
+    # EV and BESS constraints, with the EV weight; only occupied hours of buildings with a cooling set point.
+    "comfort_weight": 0.25,
     "reward_scale": 1.00,
     # Within-axis shares of the flexibility term (sum 1).
     # Subweights inside each axis (sum 1, identical for the 4 MADRL and E1/E2/E3); the
@@ -264,6 +267,21 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
         new = self._day_step_count % self._steps_per_day() == 0
         self._day_step_count += 1
         return new
+
+    def _comfort_terms(self, observation) -> Mapping[str, Any]:
+        """D-V6-53: excess of the indoor temperature over set point + comfort band in an occupied hour, in bands,
+        bounded to 1. Not applicable (0) without a cooling set point or occupants."""
+        set_point = self._safe_float(observation.get("indoor_dry_bulb_temperature_cooling_set_point"))
+        occupants = self._safe_float(observation.get("occupant_count"))
+        applicable = set_point > 0.0 and occupants > 0.0
+        excess = 0.0
+        band = max(self._safe_float(observation.get("comfort_band"), 2.0) or 2.0, ZERO_DIVISION_PLACEHOLDER)
+        if applicable:
+            indoor = self._safe_float(observation.get("indoor_dry_bulb_temperature"))
+            excess = max(0.0, indoor - (set_point + band))
+        bounded, saturated = self._bounded(excess / band, 1.0)
+        return {"comfort_applicable": bool(applicable), "raw_comfort_excess_c": float(excess),
+                "norm_comfort": float(excess / band), "bounded_comfort": bounded, "sat_comfort": saturated}
 
     @staticmethod
     def _without_term(weights: Mapping[str, float], term: str) -> Mapping[str, float]:
@@ -577,6 +595,8 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
             norm_bess = delta_soc / bess_cycle_scale
             bounded_bess, sat_bess = self._bounded(norm_bess, 1.0)
             bess_cycle_component = -bess_cycle_weight * bounded_bess
+            comfort_terms = self._comfort_terms(observation)
+            comfort_component = -float(profile.get("comfort_weight", 0.0)) * comfort_terms["bounded_comfort"]
 
             axis_contributions = {
                 "flex": self.axis_weights["flex"] * flex_component,
@@ -597,6 +617,7 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
                 sum(axis_contributions.values())
                 + ev_component
                 + bess_cycle_component
+                + comfort_component
             )
             rewards.append(float(local_reward))
             components.append({
@@ -629,6 +650,8 @@ class CityLearnV3MADRLRewardFunction(Electric_Vehicles_Reward_Function):
                 "effective_cost_share": axis_effective_shares["cost"],
                 "ev": ev_component,
                 "bess_cycle": bess_cycle_component,
+                **comfort_terms,
+                "comfort": comfort_component,
                 "local_reward": float(local_reward),
             })
 
