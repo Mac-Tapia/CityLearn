@@ -481,6 +481,14 @@ def add_common_citylearn_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--scenario", default="E1", help="CityLearn v3 scenario label.")
     parser.add_argument("--seed", default=0, type=int, help="Random seed.")
     parser.add_argument("--episode-time-steps", default=8760, type=int, help="Episode length for the launcher.")
+    parser.add_argument(
+        "--action-grid-levels",
+        dest="action_grid_levels",
+        default=0,
+        type=int,
+        help="SPEC-015 D-M3-7/D-M3-10: round continuous actions to the common grid of this many levels per "
+             "equipment (0: off; it must equal citylearn.v3.action_grid.LEVELS).",
+    )
     parser.add_argument("--output-dir", default=None, help="Directory for logs, models and summaries.")
     parser.add_argument(
         "--normalize-observations",
@@ -7532,6 +7540,7 @@ class CityLearnV3BackendAdapter:
         action_bins: int = 3,
         discrete_action_mode: str = "axis",
         algorithm: str = "MADRL",
+        action_grid: bool = False,
         live_progress_path: Optional[str] = None,
         live_progress_interval: int = 100,
         trace_record_interval: int = 1,
@@ -7587,6 +7596,13 @@ class CityLearnV3BackendAdapter:
         self.num_agents = self.n_agents
         self.action_bins = int(action_bins)
         self.discrete_action_mode = str(discrete_action_mode or "axis").strip().lower()
+        # SPEC-015 D-M3-7/D-M3-10: one grid of levels per equipment for the 4 MADRL. ``grid`` discrete mode for
+        # MASAC and MAAC (one level per equipment), ``action_grid`` rounding for HAPPO and MATD3.
+        self.action_grid_round = bool(action_grid)
+        if action_grid:
+            from citylearn.v3.action_grid import LEVELS as _GRID_LEVELS
+            if int(action_grid) not in (1, _GRID_LEVELS):   # True or the declared number of levels
+                raise ValueError(f"action grid of {int(action_grid)} levels; the common grid has {_GRID_LEVELS}")
         self.live_progress_path = Path(live_progress_path) if live_progress_path else None
         self.live_progress_interval = max(1, int(live_progress_interval))
         self.trace_record_interval = max(0, int(trace_record_interval))
@@ -7684,10 +7700,12 @@ class CityLearnV3BackendAdapter:
             for _ in self.agents
         ]
 
+        from citylearn.v3.action_grid import ActionGrid
+        self.action_grid = ActionGrid([self._act_spaces[agent] for agent in self.agents])
         self.discrete_action_table, self.discrete_action_metadata = build_discrete_action_table(
             action_bins=self.action_bins,
             action_dim=self.max_action_dim,
-            mode=self.discrete_action_mode,
+            mode="axis" if self.discrete_action_mode == "grid" else self.discrete_action_mode,
         )
         self.n_discrete_actions = int(self.discrete_action_table.shape[0])
         self.discrete_action_space = [
@@ -7706,6 +7724,13 @@ class CityLearnV3BackendAdapter:
             agent: np.isin(np.arange(self.n_discrete_actions), rows).astype(np.float32)
             for agent, rows in self.discrete_action_rows_by_agent.items()
         }
+        if self.discrete_action_mode == "grid":
+            # D-M3-9: flat multi-discrete head of max equipments x levels; padded branches only take PAD_LEVEL
+            self.n_discrete_actions = self.action_grid.n_actions
+            self.discrete_action_space = [spaces.Discrete(self.n_discrete_actions) for _ in self.agents]
+            self.discrete_action_mask_by_agent = {
+                agent: self.action_grid.avail_mask(i).astype(np.float32) for i, agent in enumerate(self.agents)}
+            self.discrete_action_metadata = {**self.action_grid.describe(), "mode": "grid"}
         self._live_progress_lock = threading.Lock()
         self._live_fps_last_step: Optional[int] = None
         self._live_fps_last_mono: Optional[float] = None
@@ -8080,8 +8105,17 @@ class CityLearnV3BackendAdapter:
 
         return int(np.argmax(array.reshape(-1)))
 
+    def grid_action_map(self) -> Dict[str, List[Dict[str, Any]]]:
+        """D-M3-9: each branch of every agent, the equipment it drives and its levels."""
+        return {agent: [{'branch': k, 'equipment': self.action_names_by_agent[agent][k],
+                         'levels': [float(v) for v in self.action_grid.levels(i, k)]}
+                        for k in range(self.action_grid.branches[i])]
+                for i, agent in enumerate(self.agents)}
+
     def discrete_action_map(self) -> Dict[str, List[Dict[str, Any]]]:
         """Valid discrete actions of every agent with the equipment each one moves (D03)."""
+        if self.discrete_action_mode == "grid":
+            return self.grid_action_map()
         table = np.asarray(self.discrete_action_table)
         mapping: Dict[str, List[Dict[str, Any]]] = {}
         for agent, rows in self.discrete_action_rows_by_agent.items():
@@ -8112,6 +8146,8 @@ class CityLearnV3BackendAdapter:
         return mapping
 
     def discrete_to_continuous(self, agent: str, action: object) -> np.ndarray:
+        if self.discrete_action_mode == "grid":   # one level index per branch (D-M3-9)
+            return self.action_grid.decode(self._agent_index_map[agent], action).astype(np.float32)
         index = self._discrete_index(action) % self.n_discrete_actions
         return self._continuous_action_for_agent(agent, self.discrete_action_table[index])
 
@@ -8120,6 +8156,9 @@ class CityLearnV3BackendAdapter:
             agent: self._continuous_action_for_agent(agent, actions[i])
             for i, agent in enumerate(self.agents)
         }
+        if self.action_grid_round:              # D-M3-7: HAPPO and MATD3 act on the same levels
+            action_dict = {agent: self.action_grid.round(self._agent_index_map[agent], value).astype(np.float32)
+                           for agent, value in action_dict.items()}
         return self._step(action_dict)
 
     def step_discrete(self, actions: Sequence[object]):
@@ -8742,13 +8781,17 @@ class CityLearnSMACDiscreteEnv:
         return self.adapter.discrete_action_mask_by_agent[agent].copy()
 
     def get_env_info(self):
-        return {
+        info = {
             "n_actions": self.n_actions,
             "n_agents": self.n_agents,
             "state_shape": self.state_shape,
             "obs_shape": self.obs_shape,
             "episode_limit": self.episode_limit,
         }
+        if self.adapter.discrete_action_mode == "grid":   # D-M3-9: (K, L) of the multi-discrete head
+            from citylearn.v3.action_grid import LEVELS
+            info["action_branches"] = (self.adapter.action_grid.max_branches, LEVELS)
+        return info
 
     def step(self, actions):
         observations, rewards, dones, infos = self.adapter.step_discrete(actions)
@@ -8779,6 +8822,15 @@ class CityLearnMAACVecEnv:
             spaces.Discrete(len(self.adapter.discrete_action_rows_by_agent[agent]))
             for agent in self.adapter.agents
         ]
+        if self.adapter.discrete_action_mode == "grid":   # D-M3-9: one branch of levels per real equipment
+            from citylearn.v3.action_grid import LEVELS
+            self.action_space = [spaces.MultiDiscrete([LEVELS]*k) for k in self.adapter.action_grid.branches]
+
+    def grid_indices(self, agent_index: int, action: object) -> np.ndarray:
+        """Flat one-hot blocks of a MAAC multi-discrete action -> one level index per equipment."""
+        from citylearn.v3.action_grid import LEVELS
+        k = self.adapter.action_grid.branches[int(agent_index)]
+        return np.asarray(action, dtype=np.float32).reshape(k, LEVELS).argmax(axis=1)
 
     def global_discrete_index(self, agent_index: int, action: object) -> int:
         rows = self.adapter.discrete_action_rows_by_agent[self.adapter.agents[int(agent_index)]]
@@ -8791,7 +8843,10 @@ class CityLearnMAACVecEnv:
         return np.asarray([self.adapter.reset()], dtype=np.float32)
 
     def step(self, actions):
-        env_actions = [self.global_discrete_index(i, action) for i, action in enumerate(actions[0])]
+        if self.adapter.discrete_action_mode == "grid":
+            env_actions = [self.grid_indices(i, action) for i, action in enumerate(actions[0])]
+        else:
+            env_actions = [self.global_discrete_index(i, action) for i, action in enumerate(actions[0])]
         observations, rewards, dones, infos = self.adapter.step_discrete(env_actions)
         obs = np.asarray([self.adapter.padded_observations(observations)], dtype=np.float32)
         reward_array = np.asarray(

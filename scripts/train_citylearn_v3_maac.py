@@ -42,7 +42,7 @@ def parse_args():
     parser.add_argument(
         "--discrete-action-mode",
         default="axis",
-        choices=("axis", "shared", "cartesian"),
+        choices=("axis", "shared", "cartesian", "grid"),
         help="Discrete CityLearn action table. axis is linear in action dimensions; cartesian is exponential.",
     )
     parser.add_argument(
@@ -129,6 +129,12 @@ def _maac_optimizer_specs(model):
         }
         for agent_index, agent in enumerate(getattr(model, "agents", []) or [])
     ]
+
+
+def _action_size(space) -> int:
+    """Flat size of a MAAC action: n of a Discrete, sum of the branches of a MultiDiscrete (D-M3-9)."""
+    nvec = getattr(space, "nvec", None)
+    return int(sum(int(v) for v in nvec)) if nvec is not None else int(space.n)
 
 
 def main() -> int:
@@ -252,7 +258,7 @@ def main() -> int:
         args.buffer_length,
         model.nagents,
         [space.shape[0] for space in env.observation_space],
-        [space.n for space in env.action_space],
+        [_action_size(space) for space in env.action_space],
     )
 
     t = 0
@@ -267,7 +273,7 @@ def main() -> int:
         "max_discrete_actions": args.max_discrete_actions,
         "n_discrete_actions": env.adapter.n_discrete_actions,
         # D03: each agent's own action space and the equipment every action moves.
-        "agent_action_sizes": [int(space.n) for space in env.action_space],
+        "agent_action_sizes": [_action_size(space) for space in env.action_space],
         "discrete_action_map": env.adapter.discrete_action_map(),
         "batch_size": args.batch_size,
         "buffer_length": args.buffer_length,

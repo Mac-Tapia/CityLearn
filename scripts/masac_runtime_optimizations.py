@@ -166,6 +166,31 @@ def _get_q_values_2(self: Any, batch: dict[str, torch.Tensor], max_episode_len: 
     return torch.stack(q_evals, dim=1), torch.stack(q_targets, dim=1)
 
 
+def _branches(self: Any) -> tuple[int, int]:
+    """(K, L) of the multi-discrete head (SPEC-015 D-M3-9): one categorical of L levels per equipment. Without
+    ``args.action_branches`` it is (1, n_actions), the original single categorical, and every formula below
+    reduces to the author's."""
+    branches = getattr(self.args, "action_branches", None)
+    if branches:
+        return int(branches[0]), int(branches[1])
+    return 1, int(self.n_actions)
+
+
+def _branch_policy(self: Any, agent_outs: torch.Tensor, avail: torch.Tensor, episode_num: int):
+    """Masked per-branch softmax of the policy logits -> (probs, log probs), shape (episodes, agents, K*L)."""
+    k, l = _branches(self)
+    agent_outs = agent_outs.masked_fill(avail == 0, -1e11)
+    probs = F.softmax(agent_outs.view(-1, k, l), dim=-1).view(episode_num, self.n_agents, -1)
+    return probs, torch.log(probs + (probs == 0.0).float() * 1e-8)
+
+
+def _taken_q(self: Any, q: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+    """Q of the taken joint action of each agent: mean over branches of Q_k(a_k) (action branching)."""
+    k, l = _branches(self)
+    shape = q.shape[:-1]
+    return torch.gather(q.view(*shape, k, l), dim=-1, index=u.view(*shape, k, 1)).squeeze(-1).mean(dim=-1)
+
+
 def _train_actor(self: Any, batch: dict[str, Any], max_episode_len: int, actor_sample_times=None):
     batch = _prepare_batch(self, batch)
     episode_num = batch["o"].shape[0]
@@ -191,18 +216,18 @@ def _train_actor(self: Any, batch: dict[str, Any], max_episode_len: int, actor_s
 
         agent_outs, self.policy_hidden = self.agent.policy(inputs, self.policy_hidden)
         avail_actions = avail_u[:, transition_idx]
-        reshaped_avail_actions = avail_actions.reshape(episode_num * self.n_agents, -1)
-        agent_outs[reshaped_avail_actions == 0] = -1e11
-        agent_outs = F.softmax(agent_outs, dim=1).view(episode_num, self.n_agents, -1)
-        actions_prob.append(agent_outs)
-        actions_logprobs.append(torch.log(agent_outs + (agent_outs == 0.0).float() * 1e-8))
+        probs, log_probs = _branch_policy(self, agent_outs,
+                                          avail_actions.reshape(episode_num * self.n_agents, -1), episode_num)
+        actions_prob.append(probs)
+        actions_logprobs.append(log_probs)
 
     del actions
     q_vals = torch.stack(q_evals, dim=1)
     actions_prob = torch.stack(actions_prob, dim=1)
     log_prob_pi = torch.stack(actions_logprobs, dim=1)
 
-    q_i_mean_negi_mean = torch.sum(actions_prob * (self.alpha * log_prob_pi - q_vals), dim=-1)
+    # E_pi[alpha log pi(a) - Q(a)], log pi = sum of branches, Q = mean of branches (K = 1: the author's formula)
+    q_i_mean_negi_mean = torch.sum(actions_prob * (self.alpha * log_prob_pi - q_vals / _branches(self)[0]), dim=-1)
     q_i_mean_negi_mean = self.eval_qmix_net(q_i_mean_negi_mean, s)
     q_i_mean_negi_mean = q_i_mean_negi_mean.repeat(repeats=(1, 1, self.n_agents))
     policy_loss = (q_i_mean_negi_mean * mask).sum() / mask.sum()
@@ -243,8 +268,8 @@ def _train_critic(self: Any, batch: dict[str, Any], max_episode_len: int, train_
     else:
         avail_u = batch["avail_u"]
 
-    q_evals = torch.gather(q_evals, dim=3, index=u).squeeze(3)
-    q_evals_2 = torch.gather(q_evals_2, dim=3, index=u).squeeze(3)
+    q_evals = _taken_q(self, q_evals, u)
+    q_evals_2 = _taken_q(self, q_evals_2, u)
 
     actions_prob = []
     actions_logprobs = []
@@ -252,11 +277,10 @@ def _train_critic(self: Any, batch: dict[str, Any], max_episode_len: int, train_
         _, inputs_next = self._get_inputs(batch, transition_idx)
         agent_outs, self.policy_hidden = self.agent.policy(inputs_next, self.policy_hidden)
         avail_actions = avail_u[:, transition_idx]
-        reshaped_avail_actions = avail_actions.reshape(episode_num * self.n_agents, -1)
-        agent_outs[reshaped_avail_actions == 0] = -1e11
-        agent_outs = F.softmax(agent_outs, dim=1).view(episode_num, self.n_agents, -1)
-        actions_prob.append(agent_outs)
-        actions_logprobs.append(torch.log(agent_outs + (agent_outs == 0.0).float() * 1e-8))
+        probs, log_probs = _branch_policy(self, agent_outs,
+                                          avail_actions.reshape(episode_num * self.n_agents, -1), episode_num)
+        actions_prob.append(probs)
+        actions_logprobs.append(log_probs)
 
     actions_prob = torch.stack(actions_prob, dim=1)
     log_prob_pi = torch.stack(actions_logprobs, dim=1)
@@ -277,12 +301,13 @@ def _train_critic(self: Any, batch: dict[str, Any], max_episode_len: int, train_
     else:
         self.alpha = 1.0
 
-    q_targets_sample = torch.sum(actions_prob * (q_targets - self.alpha * log_prob_pi), dim=-1).view(
+    k_branches = _branches(self)[0]
+    q_targets_sample = torch.sum(actions_prob * (q_targets / k_branches - self.alpha * log_prob_pi), dim=-1).view(
         episode_num,
         max_episode_len,
         -1,
     ).detach()
-    q_targets_sample_2 = torch.sum(actions_prob * (q_targets_2 - self.alpha * log_prob_pi), dim=-1).view(
+    q_targets_sample_2 = torch.sum(actions_prob * (q_targets_2 / k_branches - self.alpha * log_prob_pi), dim=-1).view(
         episode_num,
         max_episode_len,
         -1,

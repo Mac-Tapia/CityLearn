@@ -127,6 +127,7 @@ def main() -> int:
         trace_record_interval=args.trace_record_interval,
         trace_detail=args.trace_detail,
         normalize_observations=args.normalize_observations,
+        action_grid=int(getattr(args, "action_grid_levels", 0) or 0),
         resume_completed_episodes=matd3_resume_completed,
     )
 

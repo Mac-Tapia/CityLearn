@@ -189,6 +189,7 @@ def main() -> int:
                     trace_record_interval=args.trace_record_interval,
                     trace_detail=args.trace_detail,
                     normalize_observations=args.normalize_observations,
+                    action_grid=int(getattr(args, "action_grid_levels", 0) or 0),
                     resume_completed_episodes=_rank_offset,
                     resume_preload_lightweight=happo_lightweight_preload and rank == 0,
                 )
@@ -293,6 +294,7 @@ def main() -> int:
         episode_time_steps=args.episode_time_steps,
         algorithm="HAPPO",
         normalize_observations=args.normalize_observations,
+        action_grid=int(getattr(args, "action_grid_levels", 0) or 0),
     ).adapter
     report = citylearn_v3_training_report(None)
     artifacts = {}

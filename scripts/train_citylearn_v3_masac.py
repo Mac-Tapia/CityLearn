@@ -44,7 +44,7 @@ def parse_args():
     parser.add_argument(
         "--discrete-action-mode",
         default="axis",
-        choices=("axis", "shared", "cartesian"),
+        choices=("axis", "shared", "cartesian", "grid"),
         help="Discrete CityLearn action table. axis is linear in action dimensions; cartesian is exponential.",
     )
     parser.add_argument(
@@ -302,6 +302,8 @@ def main() -> int:
     backend_args.model_dir = str(artifact_dirs["checkpoints"] / "models")
     backend_args.replay_dir = ""
     backend_args.n_actions = env_info["n_actions"]
+    if env_info.get("action_branches"):   # SPEC-015 D-M3-9: multi-discrete head, one branch per equipment
+        backend_args.action_branches = tuple(env_info["action_branches"])
     backend_args.n_agents = env_info["n_agents"]
     backend_args.state_shape = env_info["state_shape"]
     backend_args.obs_shape = env_info["obs_shape"]
