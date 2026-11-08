@@ -168,7 +168,7 @@ CITYLEARN_V3_REWARD_TERMS = {
 _CITYLEARN_V3_BASE_PROFILE = {
     "axis_weight_multipliers": {"flex": 1.00, "carbon": 1.00, "cost": 1.00},
     "ev_weight": 0.25,
-    # SPEC-016 D-V6-53 / P-V6-25 (pending owner confirmation): comfort penalty outside the weighted axes, like the
+    # SPEC-016 D-V6-53 / P-V6-25 (confirmed by the owner, 2026-11-08): comfort penalty outside the weighted axes, like the
     # EV and BESS constraints, with the EV weight; only occupied hours of buildings with a cooling set point.
     "comfort_weight": 0.25,
     "reward_scale": 1.00,
