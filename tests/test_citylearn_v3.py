@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from typing import Tuple, cast
 
 import numpy as np
@@ -181,7 +183,12 @@ def test_citylearn_v3_marllib_adapter_pads_heterogeneous_spaces():
         env_info = env.get_env_info()
 
         assert env.num_agents == 17
-        assert env_info["original_action_dims"]["Building_1"] == 3
+        # One action per equipment (D03): Building_1 of the default schema has its BESS, 4 chargers since the
+        # Mode 3 sizing of 2026-06-12 and 1 washing machine, 6 in all (the former literal 3 predates that sizing).
+        building = json.loads(Path(config.schema_path).read_text(encoding="utf-8"))["buildings"]["Building_1"]
+        expected = 1 + len(building["chargers"]) + len(building.get("washing_machines") or {})
+        assert expected == 6
+        assert env_info["original_action_dims"]["Building_1"] == expected
         assert env.action_space.shape[0] == max(env.original_action_dims.values())
         assert observations["Building_1"]["obs"].shape == env.observation_space["obs"].shape
 
