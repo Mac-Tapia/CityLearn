@@ -86,6 +86,14 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
             agent: self._copy_box_space(space)
             for agent, space in zip(self.possible_agents, self.env.action_space)
         }
+        # SPEC-016 D-V6-49: charger observations aggregated per vehicle class (every socket stays an action)
+        from citylearn.v3.charger_aggregate import aggregator_for
+        self._charger_aggregator = aggregator_for(env)
+        if self._charger_aggregator is not None:
+            self._observation_spaces = {
+                agent: self._charger_aggregator.space(i, space)
+                for i, (agent, space) in enumerate(self._observation_spaces.items())
+            }
         self.state_space = self._build_state_space()
         self._last_observations: Dict[str, np.ndarray] = {}
 
@@ -233,17 +241,28 @@ class CityLearnDecPOMDPEnv(ParallelEnv):
             dtype=np.float32,
         )
 
+    def observation_names(self, agent: str) -> List[str]:
+        """Names of the agent's observation, in the order of its vector."""
+        index = self._agent_index[agent]
+        if self._charger_aggregator is not None:
+            return self._charger_aggregator.names(index)
+        return list(self.env.observation_names[index])
+
     def _observations_to_dict(self, observations) -> Dict[str, np.ndarray]:
         if isinstance(observations, Mapping):
-            return {
+            out = {
                 str(agent): np.asarray(value, dtype=np.float32)
                 for agent, value in observations.items()
             }
-
-        return {
-            agent: np.asarray(observations[i], dtype=np.float32)
-            for i, agent in enumerate(self.possible_agents)
-        }
+        else:
+            out = {
+                agent: np.asarray(observations[i], dtype=np.float32)
+                for i, agent in enumerate(self.possible_agents)
+            }
+        aggregator = getattr(self, '_charger_aggregator', None)
+        if aggregator is not None:
+            out = {agent: aggregator.transform(self._agent_index[agent], value) for agent, value in out.items()}
+        return out
 
     def _clip_action(self, agent: str, action) -> np.ndarray:
         space = self._action_spaces[agent]

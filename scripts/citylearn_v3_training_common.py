@@ -7605,9 +7605,12 @@ class CityLearnV3BackendAdapter:
             import json as _json_mod
             _EV_TYPE_NORM: Dict[str, float] = {'moto_lineal': 1/3, 'mototaxi': 2/3, 'v2g': 1.0, 'camioneta': 1.0}
             _schema_data = _json_mod.loads(Path(_resolved_schema).read_text(encoding="utf-8"))
+            # SPEC-016 D-V6-49: with class-aggregated charger observations the class is in the observation
+            # names, so no per-socket type code is appended (it would bring back one value per socket).
+            _aggregated = getattr(self.env, "_charger_aggregator", None) is not None
             for _agent in self.agents:
                 _bdata = _schema_data.get("buildings", {}).get(_agent, {})
-                _chargers = _bdata.get("chargers", {})
+                _chargers = {} if _aggregated else _bdata.get("chargers", {})
                 _codes = [
                     _EV_TYPE_NORM.get(
                         _chargers[_k].get("hardware", {}).get("ev_type", "moto_lineal"), 1/3
