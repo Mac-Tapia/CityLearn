@@ -18,7 +18,8 @@ fits them per building against the bill-anchored cooling (D-V6-18) and validates
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Optional
 
 import numpy as np
 
@@ -206,12 +207,31 @@ class Network:
         return theta_air, theta_m_t
 
 
+NO_COOLING_W = 1.0   # D-V6-61: below this the sensible cooling is the rounding of the CSV and of the float32 series
+
+
+def open_windows(p: Parameters, *, ventilation_m3_s: float, natural_ventilation_m3_s: float) -> Optional['Network']:
+    """D-V6-61: the same zone with the extra outdoor air of natural ventilation; None without it."""
+    if not natural_ventilation_m3_s > 0.0:
+        return None
+    return Network(replace(p, h_ve=ventilation_conductance_w_k(ventilation_m3_s + natural_ventilation_m3_s)))
+
+
+def _no_cooling(net: 'Network', opened: Optional['Network'], theta_m, theta_e, phi_int, phi_sol):
+    """Air and mass of an hour without cooling. People open the windows only if that cools the air (D-V6-61)."""
+    air, mass = net.air(theta_m, theta_e, phi_int, phi_sol, 0.0)
+    if opened is not None and air > theta_e:
+        return opened.air(theta_m, theta_e, phi_int, phi_sol, 0.0)
+    return air, mass
+
+
 def ideal_cooling_series(p: Parameters, inputs: ThermalInputs, *, set_point: float, ventilation_m3_s: float,
-                         w_in: float, theta_m0: float = None) -> dict:
+                         w_in: float, theta_m0: float = None, natural_ventilation_m3_s: float = 0.0) -> dict:
     """Ideal sensible cooling (W, positive) that holds the set point in occupied hours, free-floating otherwise,
     the latent load (W) and the air temperature: ideal_load_w + step hour by hour, without the object overhead.
     ``set_point`` is one value or one per hour (a measured indoor temperature in the CU-BEMS validation)."""
     net = Network(p)
+    opened = open_windows(p, ventilation_m3_s=ventilation_m3_s, natural_ventilation_m3_s=natural_ventilation_m3_s)
     n = len(inputs.theta_e)
     points = np.broadcast_to(np.asarray(set_point, dtype=float), (n,))
     sensible, latent, theta_air = np.zeros(n), np.zeros(n), np.zeros(n)
@@ -227,7 +247,7 @@ def ideal_cooling_series(p: Parameters, inputs: ThermalInputs, *, set_point: flo
             load = probe*(points[h] - free)/(heated - free)
             theta_air[h], theta_m = net.air(theta_m, theta_e, phi_int, phi_sol, load)
         else:
-            theta_air[h], theta_m = free, free_m
+            theta_air[h], theta_m = _no_cooling(net, opened, theta_m, theta_e, phi_int, phi_sol)
         sensible[h] = -load
         latent[h] = latent_w(inputs, h, ventilation_m3_s=ventilation_m3_s, w_in=w_in)
     return {'sensible_w': sensible, 'latent_w': latent, 'theta_air': theta_air}
@@ -235,17 +255,21 @@ def ideal_cooling_series(p: Parameters, inputs: ThermalInputs, *, set_point: flo
 
 
 def simulate_delivered(p: Parameters, inputs: ThermalInputs, delivered_kwh, *, ventilation_m3_s: float, w_in: float,
-                       theta_m0: float) -> np.ndarray:
+                       theta_m0: float, natural_ventilation_m3_s: float = 0.0) -> np.ndarray:
     """Air temperature under a delivered cooling series (thermal kWh per hour): the latent load is covered first and
     the rest is sensible, exactly as ISO13790Building.update_indoor_dry_bulb_temperature does at run time."""
     net = Network(p)
+    opened = open_windows(p, ventilation_m3_s=ventilation_m3_s, natural_ventilation_m3_s=natural_ventilation_m3_s)
     theta_m = float(theta_m0)
     out = np.zeros(len(inputs.theta_e))
     for h in range(len(out)):
         phi_int, phi_sol = gains_w(p, inputs, h)
         sensible = max(0.0, float(delivered_kwh[h])*1000.0 - latent_w(inputs, h, ventilation_m3_s=ventilation_m3_s,
                                                                          w_in=w_in))
-        out[h], theta_m = net.air(theta_m, float(inputs.theta_e[h]), phi_int, phi_sol, -sensible)
+        if sensible <= NO_COOLING_W:
+            out[h], theta_m = _no_cooling(net, opened, theta_m, float(inputs.theta_e[h]), phi_int, phi_sol)
+        else:
+            out[h], theta_m = net.air(theta_m, float(inputs.theta_e[h]), phi_int, phi_sol, -sensible)
     return out
 
 # --- CityLearn building with the 5R1C dynamics (the air conditioning is an action) ------------------------------
@@ -262,7 +286,8 @@ class ISO13790Dynamics(Dynamics):
     def __init__(self, *, floor_area_m2: float, envelope_w_m2k: float, solar_aperture_fraction: float,
                  ventilation_m3_s: float, mass_class: str = 'medium', set_point: float = 24.0,
                  pressure_kpa: float = 101.325, indoor_rh_pct: float = DEFAULT_INDOOR_RH_PCT,
-                 electric_gain_fraction: float = 1.0, heat_capacity_factor: float = 1.0, **_: object):
+                 electric_gain_fraction: float = 1.0, heat_capacity_factor: float = 1.0,
+                 natural_ventilation_m3_s: float = 0.0, **_: object):
         super().__init__()
         self.params = iso13790_parameters(floor_area_m2=floor_area_m2, envelope_w_m2k=envelope_w_m2k,
                                           solar_aperture_fraction=solar_aperture_fraction,
@@ -270,6 +295,9 @@ class ISO13790Dynamics(Dynamics):
                                           mass_class=mass_class, heat_capacity_factor=heat_capacity_factor)
         self.network = Network(self.params)
         self.ventilation_m3_s = float(ventilation_m3_s)
+        self.natural_ventilation_m3_s = float(natural_ventilation_m3_s)
+        self.opened_network = open_windows(self.params, ventilation_m3_s=self.ventilation_m3_s,
+                                           natural_ventilation_m3_s=self.natural_ventilation_m3_s)
         self.set_point = float(set_point)
         self.pressure_kpa = float(pressure_kpa)
         self.w_in = humidity_ratio(self.set_point, indoor_rh_pct, self.pressure_kpa)
@@ -321,7 +349,10 @@ class ISO13790Building(DynamicsBuilding):
         latent = latent_scalar_w(theta_e, float(weather.outdoor_relative_humidity[t]), occupants,
                                  pressure_kpa=d.pressure_kpa, ventilation_m3_s=d.ventilation_m3_s, w_in=d.w_in)
         sensible = max(0.0, float(sim.cooling_demand[t])*1000.0 - latent)
-        theta_air, d.theta_m = d.network.air(d.theta_m, theta_e, phi_int, phi_sol, -sensible)
+        if sensible <= NO_COOLING_W:
+            theta_air, d.theta_m = _no_cooling(d.network, d.opened_network, d.theta_m, theta_e, phi_int, phi_sol)
+        else:
+            theta_air, d.theta_m = d.network.air(d.theta_m, theta_e, phi_int, phi_sol, -sensible)
         sim.indoor_dry_bulb_temperature[t] = theta_air
 
 
